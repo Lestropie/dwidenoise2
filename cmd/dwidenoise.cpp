@@ -128,6 +128,9 @@ void usage() {
   + Option("rank",
            "The selected signal rank of the output denoised image.")
     + Argument("cutoff").type_image_out()
+  + Option("voxels",
+           "The number of voxels that contributed to the PCA for processing of each voxel")
+    + Argument("image").type_image_out()
 
   + OptionGroup("Options for controlling the sliding spatial window")
   + Option("shape",
@@ -141,17 +144,10 @@ void usage() {
            "Set the spherical kernel radius as a ratio of number of input volumes "
            "(default: 1.1)")
     + Argument("value").type_float(0.0)
-
   + Option("extent",
            "Set the patch size of the cuboid filter; "
            "can be either a single odd integer or a comma-separated triplet of odd integers")
     + Argument("window").type_sequence_int();
-
-
-
-
-
-
 
   COPYRIGHT =
       "Copyright (c) 2016 New York University, University of Antwerp, and the MRtrix3 contributors \n \n"
@@ -200,7 +196,8 @@ template <class MatrixType> class KernelBase {
 public:
   KernelBase() : pos({-1, -1, -1}) {}
   KernelBase(const KernelBase &) : pos({-1, -1, -1}) {}
-  virtual ssize_t minimum_size() const = 0;
+  // This is just for pre-allocating matrices
+  virtual ssize_t estimated_size() const = 0;
 
 protected:
   // Store / restore position of image before / after data loading
@@ -226,7 +223,7 @@ public:
   }
   KernelCube(const KernelCube &) = default;
   template <class ImageType> void operator()(ImageType &image, KernelData<MatrixType> &data) {
-    assert(data.X.cols() == minimum_size());
+    assert(data.X.cols() == size());
     KernelBase<MatrixType>::stash_pos(image);
     size_t k = 0;
     for (int z = -half_extent[2]; z <= half_extent[2]; z++) {
@@ -240,10 +237,11 @@ public:
       }
     }
     KernelBase<MatrixType>::restore_pos(image);
-    data.voxel_count = minimum_size();
-    data.centre_index = minimum_size() / 2;
+    data.voxel_count = size();
+    data.centre_index = size() / 2;
   }
-  ssize_t minimum_size() const override {
+  ssize_t size() const { return estimated_size(); }
+  ssize_t estimated_size() const override {
     return (2 * half_extent[0] + 1) * (2 * half_extent[1] + 1) * (2 * half_extent[2] + 1);
   }
 
@@ -340,10 +338,10 @@ public:
     KernelBase<MatrixType>::restore_pos(image);
     data.centre_index = 0;
   }
-  ssize_t minimum_size() const override { return min_size; }
+  ssize_t estimated_size() const override { return min_size; }
 
 private:
-  size_t min_size;
+  ssize_t min_size;
   // Determine an appropriate bounding box from which to generate the search table
   // Find the radius for which 7/8 of the sphere will contain the minimum number of voxels, then round up
   // This is only for setting the maximal radius for generation of the lookup table
@@ -361,24 +359,63 @@ private:
   }
 };
 
+template <class MatrixType> class KernelSphereFixedRadius : public KernelSphereBase<MatrixType> {
+public:
+  KernelSphereFixedRadius(const Header &voxel_grid, const default_type radius)
+      : KernelSphereBase<MatrixType>(voxel_grid, radius),
+        maximum_size(std::distance(KernelSphereBase<MatrixType>::shared->begin(),  //
+                                   KernelSphereBase<MatrixType>::shared->end())) { //
+    INFO("Maximum number of voxels in " + str(radius) + "mm fixed-radius kernel is " + str(maximum_size));
+  }
+  template <class ImageType> void operator()(ImageType &image, KernelData<MatrixType> &data) {
+    KernelBase<MatrixType>::stash_pos(image);
+    data.voxel_count = 0;
+    default_type prev_distance = -std::numeric_limits<default_type>::infinity();
+    for (auto map_it = KernelSphereBase<MatrixType>::shared->begin();
+         map_it != KernelSphereBase<MatrixType>::shared->end();
+         ++map_it) {
+      for (size_t axis = 0; axis != 3; ++axis)
+        image.index(axis) = KernelBase<MatrixType>::pos[axis] + map_it->second[axis];
+      if (!is_out_of_bounds(image, 0, 3)) {
+        // We should not need to do any matrix size checking here;
+        //   it should have already been allocated to the maximum size of the kernel
+        data.X.col(data.voxel_count) = image.row(3);
+        ++data.voxel_count;
+      }
+    }
+    KernelBase<MatrixType>::restore_pos(image);
+    data.centre_index = 0;
+  }
+  ssize_t estimated_size() const override { return maximum_size; }
+
+private:
+  const ssize_t maximum_size;
+};
+
 template <typename F, class KernelType> class DenoisingFunctor {
 
 public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
   using SValsType = Eigen::VectorXd;
 
-  DenoisingFunctor(
-      int ndwi, KernelType &kernel, Image<bool> &mask, Image<real_type> &noise, Image<uint16_t> &rank, bool exp1)
-      : data(ndwi, kernel.minimum_size()),
+  DenoisingFunctor(int ndwi,
+                   KernelType &kernel,
+                   Image<bool> &mask,
+                   Image<real_type> &noise,
+                   Image<uint16_t> &rank,
+                   Image<uint16_t> &voxels,
+                   bool exp1)
+      : data(ndwi, kernel.estimated_size()),
         kernel(kernel),
         m(ndwi),
         exp1(exp1),
-        XtX(std::min(m, kernel.minimum_size()), std::min(m, kernel.minimum_size())),
-        eig(std::min(m, kernel.minimum_size())),
-        s(std::min(m, kernel.minimum_size())),
+        XtX(std::min(m, kernel.estimated_size()), std::min(m, kernel.estimated_size())),
+        eig(std::min(m, kernel.estimated_size())),
+        s(std::min(m, kernel.estimated_size())),
         mask(mask),
         noise(noise),
-        rankmap(rank) {}
+        rankmap(rank),
+        voxelsmap(voxels) {}
 
   template <typename ImageType> void operator()(ImageType &dwi, ImageType &out) {
     // Process voxels in mask only
@@ -458,6 +495,11 @@ public:
       assign_pos_of(dwi, 0, 3).to(rankmap);
       rankmap.value() = uint16_t(r - cutoff_p);
     }
+    // store number of voxels map if requested:
+    if (voxelsmap.valid()) {
+      assign_pos_of(dwi, 0, 3).to(voxelsmap);
+      voxelsmap.value() = n;
+    }
   }
 
 private:
@@ -472,33 +514,36 @@ private:
   Image<bool> mask;
   Image<real_type> noise;
   Image<uint16_t> rankmap;
+  Image<uint16_t> voxelsmap;
 };
 
 template <typename T, class KernelType>
-void process_image(Header &data,
-                   Image<bool> &mask,
-                   Image<real_type> &noise,
-                   Image<uint16_t> &rank,
-                   const std::string &output_name,
-                   KernelType &kernel,
-                   bool exp1) {
+void run(Header &data,
+         Image<bool> &mask,
+         Image<real_type> &noise,
+         Image<uint16_t> &rank,
+         Image<uint16_t> &voxels,
+         const std::string &output_name,
+         KernelType &kernel,
+         bool exp1) {
   auto input = data.get_image<T>().with_direct_io(3);
   // create output
   Header header(data);
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  DenoisingFunctor<T, KernelType> func(data.size(3), kernel, mask, noise, rank, exp1);
+  DenoisingFunctor<T, KernelType> func(data.size(3), kernel, mask, noise, rank, voxels, exp1);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
 }
 
 template <typename T>
-void make_kernel(Header &data,
-                 Image<bool> &mask,
-                 Image<real_type> &noise,
-                 Image<uint16_t> &rank,
-                 const std::string &output_name,
-                 bool exp1) {
+void run(Header &data,
+         Image<bool> &mask,
+         Image<real_type> &noise,
+         Image<uint16_t> &rank,
+         Image<uint16_t> &voxels,
+         const std::string &output_name,
+         bool exp1) {
   using MatrixType = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
 
   auto opt = get_options("shape");
@@ -507,15 +552,22 @@ void make_kernel(Header &data,
   switch (shape) {
   case shape_type::SPHERE: {
     // TODO Could infer that user wants a cuboid kernel if -extent is used, even if -shape is not
-    if (!get_options("extent").empty()) {
+    if (!get_options("extent").empty())
       throw Exception("-extent option does not apply to spherical kernel");
+    opt = get_options("radius_mm");
+    if (opt.size()) {
+      KernelSphereFixedRadius<MatrixType> kernel(data, opt[0][0]);
+      run<T, KernelSphereFixedRadius<MatrixType>>(data, mask, noise, rank, voxels, output_name, kernel, exp1);
+      return;
     }
     const default_type min_ratio = get_option_value("-radius_ratio", sphere_multiplier_default);
     KernelSphereRatio<MatrixType> kernel(data, min_ratio);
-    process_image<T, KernelSphereRatio<MatrixType>>(data, mask, noise, rank, output_name, kernel, exp1);
+    run<T, KernelSphereRatio<MatrixType>>(data, mask, noise, rank, voxels, output_name, kernel, exp1);
     return;
   }
   case shape_type::CUBOID: {
+    if (!get_options("radius_mm").size() || !get_options("radius_ratio").empty())
+      throw Exception("-radius_* options are inapplicable if cuboid kernel shape is selected");
     opt = get_options("extent");
     std::vector<uint32_t> extent;
     if (!opt.empty()) {
@@ -547,7 +599,7 @@ void make_kernel(Header &data,
     }
 
     KernelCube<MatrixType> kernel(extent);
-    process_image<T, KernelCube<MatrixType>>(data, mask, noise, rank, output_name, kernel, exp1);
+    run<T, KernelCube<MatrixType>>(data, mask, noise, rank, voxels, output_name, kernel, exp1);
     return;
   }
   default:
@@ -589,25 +641,35 @@ void run() {
     rank = Image<uint16_t>::create(opt[0][0], header);
   }
 
+  Image<uint16_t> voxels;
+  opt = get_options("voxels");
+  if (!opt.empty()) {
+    Header header(dwi);
+    header.ndim() = 3;
+    header.datatype() = DataType::UInt16;
+    header.reset_intensity_scaling();
+    voxels = Image<uint16_t>::create(opt[0][0], header);
+  }
+
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())
     prec += 2; // support complex input data
   switch (prec) {
   case 0:
     INFO("select real float32 for processing");
-    make_kernel<float>(dwi, mask, noise, rank, argument[1], exp1);
+    run<float>(dwi, mask, noise, rank, voxels, argument[1], exp1);
     break;
   case 1:
     INFO("select real float64 for processing");
-    make_kernel<double>(dwi, mask, noise, rank, argument[1], exp1);
+    run<double>(dwi, mask, noise, rank, voxels, argument[1], exp1);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    make_kernel<cfloat>(dwi, mask, noise, rank, argument[1], exp1);
+    run<cfloat>(dwi, mask, noise, rank, voxels, argument[1], exp1);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    make_kernel<cdouble>(dwi, mask, noise, rank, argument[1], exp1);
+    run<cdouble>(dwi, mask, noise, rank, voxels, argument[1], exp1);
     break;
   }
 }
