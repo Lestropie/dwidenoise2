@@ -26,6 +26,10 @@ using namespace App;
 const std::vector<std::string> dtypes = {"float32", "float64"};
 const std::vector<std::string> estimators = {"exp1", "exp2"};
 
+const std::vector<std::string> shapes = {"cuboid", "sphere"};
+enum class shape_type { CUBOID, SPHERE };
+constexpr default_type sphere_multiplier_default = 1.1;
+
 // clang-format off
 void usage() {
 
@@ -49,7 +53,29 @@ void usage() {
   + "Note that this function does not correct for non-Gaussian noise biases"
     " present in magnitude-reconstructed MRI images."
     " If available, including the MRI phase data can reduce such non-Gaussian biases,"
-    " and the command now supports complex input data.";
+    " and the command now supports complex input data."
+
+  + "The sliding spatial window behaves differently at the edges of the image FoV "
+    "depending on the shape / size selected for that window. "
+    "The default behaviour is to use a spherical kernel centred at the voxel of interest, "
+    "whose size is some multiple of the number of input volumes; "
+    "where some such voxels lie outside of the image FoV, "
+    "the radius of the kernel will be increased until the requisite number of voxels are used. "
+    "For a spherical kernel of a fixed radius, "
+    "no such expansion will occur, "
+    "and so for voxels near the image edge a reduced number of voxels will be present in the kernel. "
+    "For a cuboid kernel, "
+    "the centre of the kernel will be offset from the voxel being processed "
+    "such that the entire volume of the kernel resides within the image FoV."
+
+  + "The size of the default spherical kernel is set to select a number of voxels that is "
+    "1.1 times the number of volumes in the input series. "
+    "If a cuboid kernel is requested, "
+    "but the -extent option is not specified, "
+    "the command will select the smallest isotropic patch size "
+    "that exceeds the number of DW images in the input data; "
+    "e.g., 5x5x5 for data with <= 125 DWI volumes, "
+    "7x7x7 for data with <= 343 DWI volumes, etc.";
 
   AUTHOR = "Daan Christiaens (daan.christiaens@kcl.ac.uk)"
            " and Jelle Veraart (jelle.veraart@nyumc.org)"
@@ -73,19 +99,25 @@ void usage() {
   + Argument("out", "the output denoised DWI image.").type_image_out();
 
   OPTIONS
+  + OptionGroup("Options for modifying the application of PCA denoising")
   + Option("mask",
            "Only process voxels within the specified binary brain mask image.")
     + Argument("image").type_image_in()
+  + Option("datatype",
+           "Datatype for the eigenvalue decomposition"
+           " (single or double precision). "
+           "For complex input data,"
+           " this will select complex float32 or complex float64 datatypes.")
+    + Argument("float32/float64").type_choice(dtypes)
+  + Option("estimator",
+           "Select the noise level estimator"
+           " (default = Exp2),"
+           " either: \n"
+           "* Exp1: the original estimator used in Veraart et al. (2016), or \n"
+           "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019).")
+    + Argument("Exp1/Exp2").type_choice(estimators)
 
-  + Option("extent",
-           "Set the patch size of the denoising filter."
-           " By default, the command will select the smallest isotropic patch size"
-           " that exceeds the number of DW images in the input data,"
-           " e.g., 5x5x5 for data with <= 125 DWI volumes,"
-           " 7x7x7 for data with <= 343 DWI volumes,"
-           " etc.")
-    + Argument("window").type_sequence_int()
-
+  + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise",
            "The output noise map,"
            " i.e., the estimated noise level 'sigma' in the data."
@@ -93,25 +125,33 @@ void usage() {
            " this will be the total noise level across real and imaginary channels,"
            " so a scale factor sqrt(2) applies.")
     + Argument("level").type_image_out()
-
   + Option("rank",
            "The selected signal rank of the output denoised image.")
     + Argument("cutoff").type_image_out()
 
-  + Option("datatype",
-           "Datatype for the eigenvalue decomposition"
-           " (single or double precision). "
-           "For complex input data,"
-           " this will select complex float32 or complex float64 datatypes.")
-    + Argument("float32/float64").type_choice(dtypes)
+  + OptionGroup("Options for controlling the sliding spatial window")
+  + Option("shape",
+           "Set the shape of the sliding spatial window. "
+           "Options are: " + join(shapes, ",") + "; default: sphere")
+    + Argument("choice").type_choice(shapes)
+  + Option("radius_mm",
+           "Set an absolute spherical kernel radius in mm")
+    + Argument("value").type_float(0.0)
+  + Option("radius_ratio",
+           "Set the spherical kernel radius as a ratio of number of input volumes "
+           "(default: 1.1)")
+    + Argument("value").type_float(0.0)
 
-  + Option("estimator",
-           "Select the noise level estimator"
-           " (default = Exp2),"
-           " either: \n"
-           "* Exp1: the original estimator used in Veraart et al. (2016), or \n"
-           "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019).")
-    + Argument("Exp1/Exp2").type_choice(estimators);
+  + Option("extent",
+           "Set the patch size of the cuboid filter; "
+           "can be either a single odd integer or a comma-separated triplet of odd integers")
+    + Argument("window").type_sequence_int();
+
+
+
+
+
+
 
   COPYRIGHT =
       "Copyright (c) 2016 New York University, University of Antwerp, and the MRtrix3 contributors \n \n"
@@ -160,6 +200,7 @@ template <class MatrixType> class KernelBase {
 public:
   KernelBase() : pos({-1, -1, -1}) {}
   KernelBase(const KernelBase &) : pos({-1, -1, -1}) {}
+  virtual ssize_t minimum_size() const = 0;
 
 protected:
   // Store / restore position of image before / after data loading
@@ -185,7 +226,7 @@ public:
   }
   KernelCube(const KernelCube &) = default;
   template <class ImageType> void operator()(ImageType &image, KernelData<MatrixType> &data) {
-    assert(data.X.cols() == size());
+    assert(data.X.cols() == minimum_size());
     KernelBase<MatrixType>::stash_pos(image);
     size_t k = 0;
     for (int z = -half_extent[2]; z <= half_extent[2]; z++) {
@@ -199,10 +240,12 @@ public:
       }
     }
     KernelBase<MatrixType>::restore_pos(image);
-    data.voxel_count = size();
-    data.centre_index = size() / 2;
+    data.voxel_count = minimum_size();
+    data.centre_index = minimum_size() / 2;
   }
-  size_t size() const { return (2 * half_extent[0] + 1) * (2 * half_extent[1] + 1) * (2 * half_extent[2] + 1); }
+  ssize_t minimum_size() const override {
+    return (2 * half_extent[0] + 1) * (2 * half_extent[1] + 1) * (2 * half_extent[2] + 1);
+  }
 
 private:
   const std::vector<int> half_extent;
@@ -218,6 +261,106 @@ private:
   }
 };
 
+template <class MatrixType> class KernelSphereBase : public KernelBase<MatrixType> {
+public:
+  KernelSphereBase(const Header &voxel_grid, const default_type max_radius)
+      : shared(new Shared(voxel_grid, max_radius)) {}
+
+protected:
+  class Shared {
+  public:
+    using MapType = std::multimap<float, std::array<int, 3>>;
+    Shared(const Header &voxel_grid, const default_type max_radius) {
+      const default_type max_radius_sq = Math::pow2(max_radius);
+      const std::array<int, 3> half_extents({int(std::ceil(max_radius / voxel_grid.spacing(0))),   //
+                                             int(std::ceil(max_radius / voxel_grid.spacing(1))),   //
+                                             int(std::ceil(max_radius / voxel_grid.spacing(2)))}); //
+      // Build the searchlight
+      std::array<int, 3> offset;
+      for (offset[2] = -half_extents[2]; offset[2] <= half_extents[2]; ++offset[2]) {
+        for (offset[1] = -half_extents[1]; offset[1] <= half_extents[1]; ++offset[1]) {
+          for (offset[0] = -half_extents[0]; offset[0] <= half_extents[0]; ++offset[0]) {
+            const default_type squared_distance = Math::pow2(offset[0] * voxel_grid.spacing(0))    //
+                                                  + Math::pow2(offset[1] * voxel_grid.spacing(1))  //
+                                                  + Math::pow2(offset[2] * voxel_grid.spacing(2)); //
+            if (squared_distance <= max_radius_sq)
+              data.insert({squared_distance, offset});
+          }
+        }
+      }
+    }
+    MapType::const_iterator begin() const { return data.begin(); }
+    MapType::const_iterator end() const { return data.end(); }
+
+  private:
+    MapType data;
+  };
+  std::shared_ptr<Shared> shared;
+};
+
+template <class MatrixType> class KernelSphereRatio : public KernelSphereBase<MatrixType> {
+public:
+  KernelSphereRatio(const Header &voxel_grid, const default_type min_ratio)
+      : KernelSphereBase<MatrixType>(voxel_grid, compute_max_radius(voxel_grid, min_ratio)),
+        min_size(std::ceil(voxel_grid.size(3) * min_ratio)) {}
+  template <class ImageType> void operator()(ImageType &image, KernelData<MatrixType> &data) {
+    KernelBase<MatrixType>::stash_pos(image);
+    data.voxel_count = 0;
+    default_type prev_distance = -std::numeric_limits<default_type>::infinity();
+    auto map_it = KernelSphereBase<MatrixType>::shared->begin();
+    while (map_it != KernelSphereBase<MatrixType>::shared->end()) {
+      // If there's a tie in distances, want to include all such offsets in the kernel,
+      //   even if the size of the utilised kernel extends beyond the minimum size
+      if (map_it->first != prev_distance && data.voxel_count >= min_size)
+        break;
+      for (size_t axis = 0; axis != 3; ++axis)
+        image.index(axis) = KernelBase<MatrixType>::pos[axis] + map_it->second[axis];
+      if (!is_out_of_bounds(image, 0, 3)) {
+        // Is this larger than any kernel this thread has previously encountered?
+        // If so, try to project what the final size is going to be,
+        //   based on the set of voxels with identical distance to this one
+        //   all getting included in the kernel
+        if (data.voxel_count == data.X.cols()) {
+          size_t extra_cols = 1;
+          auto forward_search = map_it;
+          for (++forward_search;
+               forward_search != KernelSphereBase<MatrixType>::shared->end() && forward_search->first == map_it->first;
+               ++forward_search)
+            ++extra_cols;
+          data.X.conservativeResize(data.X.rows(), data.voxel_count + extra_cols);
+        }
+        data.X.col(data.voxel_count) = image.row(3);
+        prev_distance = map_it->first;
+        ++data.voxel_count;
+      }
+      ++map_it;
+    }
+    if (map_it == KernelSphereBase<MatrixType>::shared->end())
+      throw Exception("Inadequate spherical kernel initialisation");
+    KernelBase<MatrixType>::restore_pos(image);
+    data.centre_index = 0;
+  }
+  ssize_t minimum_size() const override { return min_size; }
+
+private:
+  size_t min_size;
+  // Determine an appropriate bounding box from which to generate the search table
+  // Find the radius for which 7/8 of the sphere will contain the minimum number of voxels, then round up
+  // This is only for setting the maximal radius for generation of the lookup table
+  default_type compute_max_radius(const Header &voxel_grid, const default_type min_ratio) const {
+    const size_t num_volumes = voxel_grid.size(3);
+    const default_type voxel_volume = voxel_grid.spacing(0) * voxel_grid.spacing(1) * voxel_grid.spacing(2);
+    const default_type sphere_volume = 8.0 * num_volumes * min_ratio * voxel_volume;
+    const default_type approx_radius = std::sqrt(sphere_volume * 0.75 / Math::pi);
+    const std::array<int, 3> half_extents({int(std::ceil(approx_radius / voxel_grid.spacing(0))),   //
+                                           int(std::ceil(approx_radius / voxel_grid.spacing(1))),   //
+                                           int(std::ceil(approx_radius / voxel_grid.spacing(2)))}); //
+    return std::max({half_extents[0] * voxel_grid.spacing(0),
+                     half_extents[1] * voxel_grid.spacing(1),
+                     half_extents[2] * voxel_grid.spacing(2)});
+  }
+};
+
 template <typename F, class KernelType> class DenoisingFunctor {
 
 public:
@@ -226,16 +369,13 @@ public:
 
   DenoisingFunctor(
       int ndwi, KernelType &kernel, Image<bool> &mask, Image<real_type> &noise, Image<uint16_t> &rank, bool exp1)
-      : data(ndwi, kernel.size()),
+      : data(ndwi, kernel.minimum_size()),
         kernel(kernel),
         m(ndwi),
-        n(kernel.size()),
-        r(std::min(m, n)),
-        q(std::max(m, n)),
         exp1(exp1),
-        XtX(r, r),
-        eig(r),
-        s(r),
+        XtX(std::min(m, kernel.minimum_size()), std::min(m, kernel.minimum_size())),
+        eig(std::min(m, kernel.minimum_size())),
+        s(std::min(m, kernel.minimum_size())),
         mask(mask),
         noise(noise),
         rankmap(rank) {}
@@ -250,15 +390,28 @@ public:
 
     // Load data in local window
     kernel(dwi, data);
+    auto X = data.X.leftCols(data.voxel_count);
+
+    const ssize_t n = data.voxel_count;
+    const ssize_t r = std::min(m, n);
+    const ssize_t q = std::max(m, n);
+
+    if (r > XtX.rows()) {
+      XtX.resize(r, r);
+      s.resize(r);
+    }
+
+    // TODO Fill matrices with NaN when in debug mode;
+    //   make sure results from one voxel are not creeping into another
 
     // Compute Eigendecomposition:
     if (m <= n)
-      XtX.template triangularView<Eigen::Lower>() = data.X * data.X.adjoint();
+      XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X * X.adjoint();
     else
-      XtX.template triangularView<Eigen::Lower>() = data.X.adjoint() * data.X;
-    eig.compute(XtX);
+      XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.adjoint() * X;
+    eig.compute(XtX.topLeftCorner(r, r));
     // eigenvalues sorted in increasing order:
-    s = eig.eigenvalues().template cast<double>();
+    s.head(r) = eig.eigenvalues().template cast<double>();
 
     // Marchenko-Pastur optimal threshold
     const double lam_r = std::max(s[0], 0.0) / q;
@@ -282,20 +435,18 @@ public:
     if (cutoff_p > 0) {
       // recombine data using only eigenvectors above threshold:
       s.head(cutoff_p).setZero();
-      s.tail(r - cutoff_p).setOnes();
+      s.segment(cutoff_p, r - cutoff_p).setOnes();
       if (m <= n)
-        data.X.col(data.centre_index) =
-            eig.eigenvectors() *
-            (s.cast<F>().asDiagonal() * (eig.eigenvectors().adjoint() * data.X.col(data.centre_index)));
+        X.col(data.centre_index) = eig.eigenvectors() * (s.head(r).cast<F>().asDiagonal() *
+                                                         (eig.eigenvectors().adjoint() * X.col(data.centre_index)));
       else
-        data.X.col(data.centre_index) =
-            data.X *
-            (eig.eigenvectors() * (s.cast<F>().asDiagonal() * eig.eigenvectors().adjoint().col(data.centre_index)));
+        X.col(data.centre_index) = X * (eig.eigenvectors() * (s.head(r).cast<F>().asDiagonal() *
+                                                              eig.eigenvectors().adjoint().col(data.centre_index)));
     }
 
     // Store output
     assign_pos_of(dwi).to(out);
-    out.row(3) = data.X.col(data.centre_index);
+    out.row(3) = X.col(data.centre_index);
 
     // store noise map if requested:
     if (noise.valid()) {
@@ -312,7 +463,7 @@ public:
 private:
   KernelData<MatrixType> data;
   KernelType kernel;
-  const ssize_t m, n, r, q;
+  const ssize_t m;
   const bool exp1;
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
@@ -348,40 +499,60 @@ void make_kernel(Header &data,
                  Image<uint16_t> &rank,
                  const std::string &output_name,
                  bool exp1) {
-  using KernelType = KernelCube<Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>>;
+  using MatrixType = Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>;
 
-  auto opt = get_options("extent");
-  std::vector<uint32_t> extent;
-  if (!opt.empty()) {
-    extent = parse_ints<uint32_t>(opt[0][0]);
-    if (extent.size() == 1)
-      extent = {extent[0], extent[0], extent[0]};
-    if (extent.size() != 3)
-      throw Exception("-extent must be either a scalar or a list of length 3");
-    for (int i = 0; i < 3; i++) {
-      if (!(extent[i] & 1))
-        throw Exception("-extent must be a (list of) odd numbers");
-      if (extent[i] > data.size(i))
-        throw Exception("-extent must not exceed the image dimensions");
+  auto opt = get_options("shape");
+  const shape_type shape = opt.empty() ? shape_type::SPHERE : shape_type((int)(opt[0][0]));
+
+  switch (shape) {
+  case shape_type::SPHERE: {
+    // TODO Could infer that user wants a cuboid kernel if -extent is used, even if -shape is not
+    if (!get_options("extent").empty()) {
+      throw Exception("-extent option does not apply to spherical kernel");
     }
-  } else {
-    uint32_t e = 1;
-    while (Math::pow3(e) < data.size(3))
-      e += 2;
-    extent = {std::min(e, uint32_t(data.size(0))),  //
-              std::min(e, uint32_t(data.size(1))),  //
-              std::min(e, uint32_t(data.size(2)))}; //
+    const default_type min_ratio = get_option_value("-radius_ratio", sphere_multiplier_default);
+    KernelSphereRatio<MatrixType> kernel(data, min_ratio);
+    process_image<T, KernelSphereRatio<MatrixType>>(data, mask, noise, rank, output_name, kernel, exp1);
+    return;
   }
-  INFO("selected patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]) + ".");
+  case shape_type::CUBOID: {
+    opt = get_options("extent");
+    std::vector<uint32_t> extent;
+    if (!opt.empty()) {
+      extent = parse_ints<uint32_t>(opt[0][0]);
+      if (extent.size() == 1)
+        extent = {extent[0], extent[0], extent[0]};
+      if (extent.size() != 3)
+        throw Exception("-extent must be either a scalar or a list of length 3");
+      for (int i = 0; i < 3; i++) {
+        if (!(extent[i] & 1))
+          throw Exception("-extent must be a (list of) odd numbers");
+        if (extent[i] > data.size(i))
+          throw Exception("-extent must not exceed the image dimensions");
+      }
+    } else {
+      uint32_t e = 1;
+      while (Math::pow3(e) < data.size(3))
+        e += 2;
+      extent = {std::min(e, uint32_t(data.size(0))),  //
+                std::min(e, uint32_t(data.size(1))),  //
+                std::min(e, uint32_t(data.size(2)))}; //
+    }
+    INFO("selected patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]) + ".");
 
-  if (std::min<uint32_t>(data.size(3), extent[0] * extent[1] * extent[2]) < 15) {
-    WARN("The number of volumes or the patch size is small. "
-         "This may lead to discretisation effects in the noise level "
-         "and cause inconsistent denoising between adjacent voxels.");
+    if (std::min<uint32_t>(data.size(3), extent[0] * extent[1] * extent[2]) < 15) {
+      WARN("The number of volumes or the patch size is small. "
+           "This may lead to discretisation effects in the noise level "
+           "and cause inconsistent denoising between adjacent voxels.");
+    }
+
+    KernelCube<MatrixType> kernel(extent);
+    process_image<T, KernelCube<MatrixType>>(data, mask, noise, rank, output_name, kernel, exp1);
+    return;
   }
-
-  KernelType kernel(extent);
-  process_image<T, KernelType>(data, mask, noise, rank, output_name, kernel, exp1);
+  default:
+    assert(false);
+  }
 }
 
 void run() {
