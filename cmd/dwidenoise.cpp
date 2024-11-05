@@ -438,8 +438,14 @@ public:
       s.resize(r);
     }
 
-    // TODO Fill matrices with NaN when in debug mode;
+    // Fill matrices with NaN when in debug mode;
     //   make sure results from one voxel are not creeping into another
+    //   due to use of block oberations to prevent memory re-allocation
+    //   in the presence of variation in kernel sizes
+#ifndef NDEBUG
+    XtX.fill(std::numeric_limits<F>::signaling_NaN());
+    s.fill(std::numeric_limits<default_type>::signaling_NaN());
+#endif
 
     // Compute Eigendecomposition:
     if (m <= n)
