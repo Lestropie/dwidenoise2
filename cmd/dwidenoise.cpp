@@ -121,7 +121,7 @@ void usage() {
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise",
            "The output noise map,"
-           " i.e., the estimated noise level 'sigma' in the data."
+           " i.e., the estimated noise level 'sigma' in the data. "
            "Note that on complex input data,"
            " this will be the total noise level across real and imaginary channels,"
            " so a scale factor sqrt(2) applies.")
@@ -129,6 +129,9 @@ void usage() {
   + Option("rank",
            "The selected signal rank of the output denoised image.")
     + Argument("cutoff").type_image_out()
+  + Option("max_dist",
+           "The maximum distance between a voxel and another voxel that was included in the local denoising patch")
+    + Argument("image").type_image_out()
   + Option("voxels",
            "The number of voxels that contributed to the PCA for processing of each voxel")
     + Argument("image").type_image_out()
@@ -182,13 +185,30 @@ void usage() {
 using real_type = float;
 using voxel_type = Eigen::Array<int, 3, 1>;
 
+class KernelVoxel {
+public:
+  KernelVoxel(const voxel_type offset, const default_type sq_distance) : offset(offset), sq_distance(sq_distance) {}
+  KernelVoxel(const KernelVoxel &) = default;
+  KernelVoxel(KernelVoxel &&) = default;
+  KernelVoxel &operator=(const KernelVoxel &that) {
+    offset = that.offset;
+    sq_distance = that.sq_distance;
+    return *this;
+  }
+  bool operator<(const KernelVoxel &that) const { return sq_distance < that.sq_distance; }
+  default_type distance() const { return std::sqrt(sq_distance); }
+  voxel_type offset;
+  default_type sq_distance;
+};
+
 // Class to encode return information from kernel
 class KernelData {
 public:
-  KernelData() : centre_index(-1) {}
-  KernelData(const ssize_t i) : centre_index(i) {}
+  KernelData() : centre_index(-1), max_distance(-std::numeric_limits<default_type>::infinity()) {}
+  KernelData(const ssize_t i) : centre_index(i), max_distance(-std::numeric_limits<default_type>::infinity()) {}
+  std::vector<KernelVoxel> voxels;
   ssize_t centre_index;
-  std::vector<voxel_type> voxels;
+  default_type max_distance;
 };
 
 class KernelBase {
@@ -227,10 +247,15 @@ public:
         voxel[1] = wrapindex(pos[1], offset[1], half_extent[1], H.size(1));
         for (offset[0] = -half_extent[0]; offset[0] <= half_extent[0]; ++offset[0]) {
           voxel[0] = wrapindex(pos[0], offset[0], half_extent[0], H.size(0));
-          result.voxels.push_back(pos);
+          const default_type sq_distance = Math::pow2((pos[0] - voxel[0]) * H.spacing(0)) +
+                                           Math::pow2((pos[1] - voxel[1]) * H.spacing(1)) +
+                                           Math::pow2((pos[2] - voxel[2]) * H.spacing(2));
+          result.voxels.push_back(KernelVoxel(voxel, sq_distance));
+          result.max_distance = std::max(result.max_distance, sq_distance);
         }
       }
     }
+    result.max_distance = std::sqrt(result.max_distance);
     return result;
   }
   ssize_t estimated_size() const override { return size; }
@@ -260,14 +285,15 @@ public:
 protected:
   class Shared {
   public:
-    using MapType = std::multimap<float, std::array<int, 3>>;
+    using TableType = std::vector<KernelVoxel>;
     Shared(const Header &voxel_grid, const default_type max_radius) {
       const default_type max_radius_sq = Math::pow2(max_radius);
-      const std::array<int, 3> half_extents({int(std::ceil(max_radius / voxel_grid.spacing(0))),   //
-                                             int(std::ceil(max_radius / voxel_grid.spacing(1))),   //
-                                             int(std::ceil(max_radius / voxel_grid.spacing(2)))}); //
+      const voxel_type half_extents({int(std::ceil(max_radius / voxel_grid.spacing(0))),   //
+                                     int(std::ceil(max_radius / voxel_grid.spacing(1))),   //
+                                     int(std::ceil(max_radius / voxel_grid.spacing(2)))}); //
       // Build the searchlight
-      std::array<int, 3> offset;
+      data.reserve((2 * half_extents[0] + 1) * (2 * half_extents[1] + 1) * (2 * half_extents[2] + 1));
+      voxel_type offset;
       for (offset[2] = -half_extents[2]; offset[2] <= half_extents[2]; ++offset[2]) {
         for (offset[1] = -half_extents[1]; offset[1] <= half_extents[1]; ++offset[1]) {
           for (offset[0] = -half_extents[0]; offset[0] <= half_extents[0]; ++offset[0]) {
@@ -275,16 +301,17 @@ protected:
                                                   + Math::pow2(offset[1] * voxel_grid.spacing(1))  //
                                                   + Math::pow2(offset[2] * voxel_grid.spacing(2)); //
             if (squared_distance <= max_radius_sq)
-              data.insert({squared_distance, offset});
+              data.emplace_back(KernelVoxel(offset, squared_distance));
           }
         }
       }
+      std::sort(data.begin(), data.end());
     }
-    MapType::const_iterator begin() const { return data.begin(); }
-    MapType::const_iterator end() const { return data.end(); }
+    TableType::const_iterator begin() const { return data.begin(); }
+    TableType::const_iterator end() const { return data.end(); }
 
   private:
-    MapType data;
+    TableType data;
   };
   std::shared_ptr<Shared> shared;
 };
@@ -296,28 +323,29 @@ public:
         min_size(std::ceil(voxel_grid.size(3) * min_ratio)) {}
   KernelData operator()(const voxel_type &pos) const override {
     KernelData result(0);
-    default_type prev_distance = -std::numeric_limits<default_type>::infinity();
-    auto map_it = shared->begin();
-    while (map_it != shared->end()) {
+    auto table_it = shared->begin();
+    while (table_it != shared->end()) {
       // If there's a tie in distances, want to include all such offsets in the kernel,
       //   even if the size of the utilised kernel extends beyond the minimum size
-      if (map_it->first != prev_distance && result.voxels.size() >= min_size)
+      if (result.voxels.size() >= min_size && table_it->sq_distance != result.max_distance)
         break;
-      const voxel_type voxel({pos[0] + map_it->second[0],   //
-                              pos[1] + map_it->second[1],   //
-                              pos[2] + map_it->second[2]}); //
-      if (!is_out_of_bounds(H, voxel, 0, 3))
-        result.voxels.push_back(voxel);
-      prev_distance = map_it->first;
-      ++map_it;
+      const voxel_type voxel({pos[0] + table_it->offset[0],   //
+                              pos[1] + table_it->offset[1],   //
+                              pos[2] + table_it->offset[2]}); //
+      if (!is_out_of_bounds(H, voxel, 0, 3)) {
+        result.voxels.push_back(KernelVoxel(voxel, table_it->sq_distance));
+        result.max_distance = table_it->sq_distance;
+      }
+      ++table_it;
     }
-    if (map_it == shared->end()) {
+    if (table_it == shared->end()) {
       throw Exception(                                                                   //
           std::string("Inadequate spherical kernel initialisation ")                     //
           + "(lookup table " + str(std::distance(shared->begin(), shared->end())) + "; " //
           + "min size " + str(min_size) + "; "                                           //
           + "read size " + str(result.voxels.size()) + ")");                             //
     }
+    result.max_distance = std::sqrt(result.max_distance);
     return result;
   }
   ssize_t estimated_size() const override { return min_size; }
@@ -332,9 +360,9 @@ private:
     const default_type voxel_volume = voxel_grid.spacing(0) * voxel_grid.spacing(1) * voxel_grid.spacing(2);
     const default_type sphere_volume = 8.0 * num_volumes * min_ratio * voxel_volume;
     const default_type approx_radius = std::sqrt(sphere_volume * 0.75 / Math::pi);
-    const std::array<int, 3> half_extents({int(std::ceil(approx_radius / voxel_grid.spacing(0))),   //
-                                           int(std::ceil(approx_radius / voxel_grid.spacing(1))),   //
-                                           int(std::ceil(approx_radius / voxel_grid.spacing(2)))}); //
+    const voxel_type half_extents({int(std::ceil(approx_radius / voxel_grid.spacing(0))),   //
+                                   int(std::ceil(approx_radius / voxel_grid.spacing(1))),   //
+                                   int(std::ceil(approx_radius / voxel_grid.spacing(2)))}); //
     return std::max({half_extents[0] * voxel_grid.spacing(0),
                      half_extents[1] * voxel_grid.spacing(1),
                      half_extents[2] * voxel_grid.spacing(2)});
@@ -352,12 +380,15 @@ public:
     KernelData result(0);
     result.voxels.reserve(maximum_size);
     for (auto map_it = shared->begin(); map_it != shared->end(); ++map_it) {
-      const voxel_type voxel({pos[0] + map_it->second[0],   //
-                              pos[1] + map_it->second[1],   //
-                              pos[2] + map_it->second[2]}); //
-      if (!is_out_of_bounds(H, voxel, 0, 3))
-        result.voxels.push_back(voxel);
+      const voxel_type voxel({pos[0] + map_it->offset[0],   //
+                              pos[1] + map_it->offset[1],   //
+                              pos[2] + map_it->offset[2]}); //
+      if (!is_out_of_bounds(H, voxel, 0, 3)) {
+        result.voxels.push_back(KernelVoxel(voxel, map_it->sq_distance));
+        result.max_distance = map_it->sq_distance;
+      }
     }
+    result.max_distance = std::sqrt(result.max_distance);
     return result;
   }
   ssize_t estimated_size() const override { return maximum_size; }
@@ -377,6 +408,7 @@ public:
                    Image<bool> &mask,
                    Image<real_type> &noise,
                    Image<uint16_t> &rank,
+                   Image<float> &max_dist,
                    Image<uint16_t> &voxels,
                    estimator_type estimator)
       : kernel(kernel),
@@ -389,6 +421,7 @@ public:
         mask(mask),
         noise(noise),
         rankmap(rank),
+        maxdistmap(max_dist),
         voxelsmap(voxels) {}
 
   template <typename ImageType> void operator()(ImageType &dwi, ImageType &out) {
@@ -400,7 +433,7 @@ public:
     }
 
     // Load list of voxels from which to load data
-    KernelData neighbourhood = (*kernel)({int(dwi.index(0)), int(dwi.index(1)), int(dwi.index(2))});
+    const KernelData neighbourhood = (*kernel)({int(dwi.index(0)), int(dwi.index(1)), int(dwi.index(2))});
     const ssize_t n = neighbourhood.voxels.size();
     const ssize_t r = std::min(m, n);
     const ssize_t q = std::max(m, n);
@@ -485,17 +518,19 @@ public:
     assign_pos_of(dwi).to(out);
     out.row(3) = X.col(neighbourhood.centre_index);
 
-    // store noise map if requested:
+    // Store additional output maps if requested
     if (noise.valid()) {
       assign_pos_of(dwi, 0, 3).to(noise);
       noise.value() = real_type(std::sqrt(sigma2));
     }
-    // store rank map if requested:
     if (rankmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(rankmap);
       rankmap.value() = uint16_t(r - cutoff_p);
     }
-    // store number of voxels map if requested:
+    if (maxdistmap.valid()) {
+      assign_pos_of(dwi, 0, 3).to(maxdistmap);
+      maxdistmap.value() = neighbourhood.max_distance;
+    }
     if (voxelsmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(voxelsmap);
       voxelsmap.value() = n;
@@ -514,12 +549,13 @@ private:
   Image<bool> mask;
   Image<real_type> noise;
   Image<uint16_t> rankmap;
+  Image<float> maxdistmap;
   Image<uint16_t> voxelsmap;
 
-  template <typename ImageType> void load_data(ImageType &image, const std::vector<voxel_type> &voxels) {
+  template <typename ImageType> void load_data(ImageType &image, const std::vector<KernelVoxel> &voxels) {
     const voxel_type pos({int(image.index(0)), int(image.index(1)), int(image.index(2))});
     for (ssize_t i = 0; i != voxels.size(); ++i) {
-      assign_pos_of(voxels[i], 0, 3).to(image);
+      assign_pos_of(voxels[i].offset, 0, 3).to(image);
       X.col(i) = image.row(3);
     }
     assign_pos_of(pos, 0, 3).to(image);
@@ -531,6 +567,7 @@ void run(Header &data,
          Image<bool> &mask,
          Image<real_type> &noise,
          Image<uint16_t> &rank,
+         Image<float> &max_dist,
          Image<uint16_t> &voxels,
          const std::string &output_name,
          std::shared_ptr<KernelBase> kernel,
@@ -541,7 +578,7 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  DenoisingFunctor<T> func(data.size(3), kernel, mask, noise, rank, voxels, estimator);
+  DenoisingFunctor<T> func(data.size(3), kernel, mask, noise, rank, max_dist, voxels, estimator);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
 }
 
@@ -580,6 +617,17 @@ void run() {
     header.datatype() = DataType::UInt16;
     header.reset_intensity_scaling();
     rank = Image<uint16_t>::create(opt[0][0], header);
+  }
+
+  Image<float> max_dist;
+  opt = get_options("max_dist");
+  if (!opt.empty()) {
+    Header header(dwi);
+    header.ndim() = 3;
+    header.datatype() = DataType::Float32;
+    header.datatype().set_byte_order_native();
+    header.reset_intensity_scaling();
+    max_dist = Image<float>::create(opt[0][0], header);
   }
 
   Image<uint16_t> voxels;
@@ -653,19 +701,19 @@ void run() {
   switch (prec) {
   case 0:
     INFO("select real float32 for processing");
-    run<float>(dwi, mask, noise, rank, voxels, argument[1], kernel, estimator);
+    run<float>(dwi, mask, noise, rank, max_dist, voxels, argument[1], kernel, estimator);
     break;
   case 1:
     INFO("select real float64 for processing");
-    run<double>(dwi, mask, noise, rank, voxels, argument[1], kernel, estimator);
+    run<double>(dwi, mask, noise, rank, max_dist, voxels, argument[1], kernel, estimator);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, mask, noise, rank, voxels, argument[1], kernel, estimator);
+    run<cfloat>(dwi, mask, noise, rank, max_dist, voxels, argument[1], kernel, estimator);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, mask, noise, rank, voxels, argument[1], kernel, estimator);
+    run<cdouble>(dwi, mask, noise, rank, max_dist, voxels, argument[1], kernel, estimator);
     break;
   }
 }
