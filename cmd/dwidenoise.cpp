@@ -660,7 +660,7 @@ void run() {
       throw Exception("-extent option does not apply to spherical kernel");
     opt = get_options("radius_mm");
     if (opt.empty())
-      kernel = std::make_shared<KernelSphereRatio>(dwi, get_option_value("-radius_ratio", sphere_multiplier_default));
+      kernel = std::make_shared<KernelSphereRatio>(dwi, get_option_value("radius_ratio", sphere_multiplier_default));
     else
       kernel = std::make_shared<KernelSphereFixedRadius>(dwi, opt[0][0]);
   } break;
