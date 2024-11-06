@@ -187,10 +187,16 @@ using voxel_type = Eigen::Array<int, 3, 1>;
 
 class KernelVoxel {
 public:
-  KernelVoxel(const voxel_type offset, const default_type sq_distance) : offset(offset), sq_distance(sq_distance) {}
+  KernelVoxel(const voxel_type &offset, const default_type sq_distance) : offset(offset), sq_distance(sq_distance) {}
   KernelVoxel(const KernelVoxel &) = default;
   KernelVoxel(KernelVoxel &&) = default;
+  ~KernelVoxel() {}
   KernelVoxel &operator=(const KernelVoxel &that) {
+    offset = that.offset;
+    sq_distance = that.sq_distance;
+    return *this;
+  }
+  KernelVoxel &operator=(KernelVoxel &&that) {
     offset = that.offset;
     sq_distance = that.sq_distance;
     return *this;
@@ -229,7 +235,7 @@ public:
   KernelCube(const Header &header, const std::vector<uint32_t> &extent)
       : KernelBase(header),
         half_extent({int(extent[0] / 2), int(extent[1] / 2), int(extent[2] / 2)}),
-        size(extent[0] * extent[1] * extent[2]),
+        size(size_t(extent[0]) * size_t(extent[1]) * size_t(extent[2])),
         centre_index(size / 2) {
     for (auto e : extent) {
       if (!(e % 2))
@@ -281,6 +287,7 @@ class KernelSphereBase : public KernelBase {
 public:
   KernelSphereBase(const Header &voxel_grid, const default_type max_radius)
       : KernelBase(voxel_grid), shared(new Shared(voxel_grid, max_radius)) {}
+  virtual ~KernelSphereBase() {}
 
 protected:
   class Shared {
@@ -292,7 +299,7 @@ protected:
                                      int(std::ceil(max_radius / voxel_grid.spacing(1))),   //
                                      int(std::ceil(max_radius / voxel_grid.spacing(2)))}); //
       // Build the searchlight
-      data.reserve((2 * half_extents[0] + 1) * (2 * half_extents[1] + 1) * (2 * half_extents[2] + 1));
+      data.reserve(size_t((2 * half_extents[0] + 1) * (2 * half_extents[1] + 1) * (2 * half_extents[2] + 1)));
       voxel_type offset;
       for (offset[2] = -half_extents[2]; offset[2] <= half_extents[2]; ++offset[2]) {
         for (offset[1] = -half_extents[1]; offset[1] <= half_extents[1]; ++offset[1]) {
@@ -321,6 +328,7 @@ public:
   KernelSphereRatio(const Header &voxel_grid, const default_type min_ratio)
       : KernelSphereBase(voxel_grid, compute_max_radius(voxel_grid, min_ratio)),
         min_size(std::ceil(voxel_grid.size(3) * min_ratio)) {}
+  ~KernelSphereRatio() {}
   KernelData operator()(const voxel_type &pos) const override {
     KernelData result(0);
     auto table_it = shared->begin();
@@ -376,6 +384,7 @@ public:
         maximum_size(std::distance(shared->begin(), shared->end())) { //
     INFO("Maximum number of voxels in " + str(radius) + "mm fixed-radius kernel is " + str(maximum_size));
   }
+  ~KernelSphereFixedRadius() {}
   KernelData operator()(const voxel_type &pos) const {
     KernelData result(0);
     result.voxels.reserve(maximum_size);
@@ -477,9 +486,9 @@ public:
     ssize_t cutoff_p = 0;
     for (ssize_t p = 0; p < r; ++p) // p+1 is the number of noise components
     {                               // (as opposed to the paper where p is defined as the number of signal components)
-      double lam = std::max(s[p], 0.0) / q;
+      const double lam = std::max(s[p], 0.0) / q;
       clam += lam;
-      double denominator;
+      double denominator = std::numeric_limits<double>::signaling_NaN();
       switch (estimator) {
       case estimator_type::EXP1:
         denominator = q;
@@ -490,9 +499,9 @@ public:
       default:
         assert(false);
       }
-      double gam = double(p + 1) / denominator;
-      double sigsq1 = clam / double(p + 1);
-      double sigsq2 = (lam - lam_r) / (4.0 * std::sqrt(gam));
+      const double gam = double(p + 1) / denominator;
+      const double sigsq1 = clam / double(p + 1);
+      const double sigsq2 = (lam - lam_r) / (4.0 * std::sqrt(gam));
       // sigsq2 > sigsq1 if signal else noise
       if (sigsq2 < sigsq1) {
         sigma2 = sigsq1;
@@ -529,7 +538,7 @@ public:
     }
     if (maxdistmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(maxdistmap);
-      maxdistmap.value() = neighbourhood.max_distance;
+      maxdistmap.value() = float(neighbourhood.max_distance);
     }
     if (voxelsmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(voxelsmap);
@@ -597,7 +606,7 @@ void run() {
 
   estimator_type estimator = estimator_type::EXP2; // default: Exp2 (unbiased estimator)
   opt = get_options("estimator");
-  if (opt.size())
+  if (!opt.empty())
     estimator = estimator_type(int(opt[0][0]));
 
   Image<real_type> noise;
@@ -650,10 +659,10 @@ void run() {
     if (!get_options("extent").empty())
       throw Exception("-extent option does not apply to spherical kernel");
     opt = get_options("radius_mm");
-    if (opt.size())
-      kernel.reset(new KernelSphereFixedRadius(dwi, opt[0][0]));
+    if (opt.empty())
+      kernel = std::make_shared<KernelSphereRatio>(dwi, get_option_value("-radius_ratio", sphere_multiplier_default));
     else
-      kernel.reset(new KernelSphereRatio(dwi, get_option_value("-radius_ratio", sphere_multiplier_default)));
+      kernel = std::make_shared<KernelSphereFixedRadius>(dwi, opt[0][0]);
   } break;
   case shape_type::CUBOID: {
     if (!get_options("radius_mm").empty() || !get_options("radius_ratio").empty())
@@ -667,7 +676,7 @@ void run() {
       if (extent.size() != 3)
         throw Exception("-extent must be either a scalar or a list of length 3");
       for (int i = 0; i < 3; i++) {
-        if (!(extent[i] & 1))
+        if ((extent[i] & 1) == 0)
           throw Exception("-extent must be a (list of) odd numbers");
         if (extent[i] > dwi.size(i))
           throw Exception("-extent must not exceed the image dimensions");
@@ -688,7 +697,7 @@ void run() {
            "and cause inconsistent denoising between adjacent voxels.");
     }
 
-    kernel.reset(new KernelCube(dwi, extent));
+    kernel = std::make_shared<KernelCube>(dwi, extent);
   } break;
   default:
     assert(false);
