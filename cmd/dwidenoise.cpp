@@ -196,7 +196,7 @@ public:
     sq_distance = that.sq_distance;
     return *this;
   }
-  KernelVoxel &operator=(KernelVoxel &&that) {
+  KernelVoxel &operator=(KernelVoxel &&that) noexcept {
     offset = that.offset;
     sq_distance = that.sq_distance;
     return *this;
@@ -221,6 +221,7 @@ class KernelBase {
 public:
   KernelBase(const Header &H) : H(H) {}
   KernelBase(const KernelBase &) = default;
+  virtual ~KernelBase() = default;
   // This is just for pre-allocating matrices
   virtual ssize_t estimated_size() const = 0;
   // This is the interface that kernels must provide
@@ -235,7 +236,7 @@ public:
   KernelCube(const Header &header, const std::vector<uint32_t> &extent)
       : KernelBase(header),
         half_extent({int(extent[0] / 2), int(extent[1] / 2), int(extent[2] / 2)}),
-        size(size_t(extent[0]) * size_t(extent[1]) * size_t(extent[2])),
+        size(ssize_t(extent[0]) * ssize_t(extent[1]) * ssize_t(extent[2])),
         centre_index(size / 2) {
     for (auto e : extent) {
       if (!(e % 2))
@@ -243,6 +244,7 @@ public:
     }
   }
   KernelCube(const KernelCube &) = default;
+  ~KernelCube() final = default;
   KernelData operator()(const voxel_type &pos) const override {
     KernelData result(centre_index);
     voxel_type voxel;
@@ -287,7 +289,8 @@ class KernelSphereBase : public KernelBase {
 public:
   KernelSphereBase(const Header &voxel_grid, const default_type max_radius)
       : KernelBase(voxel_grid), shared(new Shared(voxel_grid, max_radius)) {}
-  virtual ~KernelSphereBase() {}
+  KernelSphereBase(const KernelSphereBase &) = default;
+  virtual ~KernelSphereBase() override {}
 
 protected:
   class Shared {
@@ -299,8 +302,8 @@ protected:
                                      int(std::ceil(max_radius / voxel_grid.spacing(1))),   //
                                      int(std::ceil(max_radius / voxel_grid.spacing(2)))}); //
       // Build the searchlight
-      data.reserve(size_t((2 * half_extents[0] + 1) * (2 * half_extents[1] + 1) * (2 * half_extents[2] + 1)));
-      voxel_type offset;
+      data.reserve(size_t(2 * half_extents[0] + 1) * size_t(2 * half_extents[1] + 1) * size_t(2 * half_extents[2] + 1));
+      voxel_type offset({-1, -1, -1});
       for (offset[2] = -half_extents[2]; offset[2] <= half_extents[2]; ++offset[2]) {
         for (offset[1] = -half_extents[1]; offset[1] <= half_extents[1]; ++offset[1]) {
           for (offset[0] = -half_extents[0]; offset[0] <= half_extents[0]; ++offset[0]) {
@@ -328,7 +331,8 @@ public:
   KernelSphereRatio(const Header &voxel_grid, const default_type min_ratio)
       : KernelSphereBase(voxel_grid, compute_max_radius(voxel_grid, min_ratio)),
         min_size(std::ceil(voxel_grid.size(3) * min_ratio)) {}
-  ~KernelSphereRatio() {}
+  KernelSphereRatio(const KernelSphereRatio &) = default;
+  ~KernelSphereRatio() final = default;
   KernelData operator()(const voxel_type &pos) const override {
     KernelData result(0);
     auto table_it = shared->begin();
@@ -384,7 +388,8 @@ public:
         maximum_size(std::distance(shared->begin(), shared->end())) { //
     INFO("Maximum number of voxels in " + str(radius) + "mm fixed-radius kernel is " + str(maximum_size));
   }
-  ~KernelSphereFixedRadius() {}
+  KernelSphereFixedRadius(const KernelSphereFixedRadius &) = default;
+  ~KernelSphereFixedRadius() final = default;
   KernelData operator()(const voxel_type &pos) const {
     KernelData result(0);
     result.voxels.reserve(maximum_size);
