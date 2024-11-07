@@ -487,7 +487,7 @@ public:
     // Marchenko-Pastur optimal threshold
     const double lam_r = std::max(s[0], 0.0) / q;
     double clam = 0.0;
-    sigma2 = 0.0;
+    double sigma2 = 0.0;
     ssize_t cutoff_p = 0;
     for (ssize_t p = 0; p < r; ++p) // p+1 is the number of noise components
     {                               // (as opposed to the paper where p is defined as the number of signal components)
@@ -559,7 +559,6 @@ private:
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
   SValsType s;
-  double sigma2;
   Image<bool> mask;
   Image<real_type> noise;
   Image<uint16_t> rankmap;
