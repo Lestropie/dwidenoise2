@@ -29,7 +29,7 @@ enum class estimator_type { EXP1, EXP2 };
 
 const std::vector<std::string> shapes = {"cuboid", "sphere"};
 enum class shape_type { CUBOID, SPHERE };
-constexpr default_type sphere_multiplier_default = 1.1;
+constexpr default_type sphere_multiplier_default = 1.0 / 0.85;
 
 // clang-format off
 void usage() {
@@ -145,8 +145,8 @@ void usage() {
            "Set an absolute spherical kernel radius in mm")
     + Argument("value").type_float(0.0)
   + Option("radius_ratio",
-           "Set the spherical kernel radius as a ratio of number of input volumes "
-           "(default: 1.1)")
+           "Set the spherical kernel size as a ratio of number of voxels to number of input volumes "
+           "(default: ~1.18)")
     + Argument("value").type_float(0.0)
   + Option("extent",
            "Set the patch size of the cuboid filter; "
