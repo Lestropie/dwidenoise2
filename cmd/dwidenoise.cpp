@@ -24,8 +24,8 @@ using namespace MR;
 using namespace App;
 
 const std::vector<std::string> dtypes = {"float32", "float64"};
-const std::vector<std::string> estimators = {"exp1", "exp2"};
-enum class estimator_type { EXP1, EXP2 };
+const std::vector<std::string> estimators = {"exp1", "exp2", "mrm2022"};
+enum class estimator_type { EXP1, EXP2, MRM2022 };
 
 const std::vector<std::string> shapes = {"cuboid", "sphere"};
 enum class shape_type { CUBOID, SPHERE };
@@ -45,10 +45,8 @@ void usage() {
     " using the prior knowledge that the eigenspectrum of random covariance matrices"
     " is described by the universal Marchenko-Pastur (MP) distribution."
     " Fitting the MP distribution to the spectrum of patch-wise signal matrices"
-    " hence provides an estimator of the noise level 'sigma',"
-    " as was first shown in Veraart et al. (2016)"
-    " and later improved in Cordero-Grande et al. (2019)."
-    " This noise level estimate then determines the optimal cut-off for PCA denoising."
+    " hence provides an estimator of the noise level 'sigma';"
+    " this noise level estimate then determines the optimal cut-off for PCA denoising."
 
   + "Important note:"
     " image denoising must be performed as the first step of the image processing pipeline."
@@ -103,7 +101,12 @@ void usage() {
 
   + "Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. " // Internal
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
-    "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039";
+    "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
+
+  + "* If using -estimator mrm2022: "
+    "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
+    "Tensor denoising of multidimensional MRI data. "
+    "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172";
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image.").type_image_in()
@@ -124,9 +127,10 @@ void usage() {
            "Select the noise level estimator"
            " (default = Exp2),"
            " either: \n"
-           "* Exp1: the original estimator used in Veraart et al. (2016), or \n"
-           "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019).")
-    + Argument("Exp1/Exp2").type_choice(estimators)
+           "* Exp1: the original estimator used in Veraart et al. (2016); \n"
+           "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
+           "* MRM2022: the alternative estimator introduced in Olesen et al. (2022).")
+    + Argument("algorithm").type_choice(estimators)
   + Option("filter",
            "Modulate how components are filtered based on their eigenvalues; "
            "options are: " + join(filters, ",") + "; default: frobenius")
@@ -430,6 +434,89 @@ private:
   const ssize_t maximum_size;
 };
 
+class EstimatorResult {
+public:
+  EstimatorResult() : cutoff_p(0), sigma2(0.0) {}
+  ssize_t cutoff_p;
+  double sigma2;
+};
+
+class EstimatorBase {
+public:
+  EstimatorBase() = default;
+  virtual EstimatorResult operator()(const vector_type &eigenvalues, const ssize_t m, const ssize_t n) const = 0;
+};
+
+template <ssize_t version> class EstimatorExp : public EstimatorBase {
+public:
+  EstimatorExp() = default;
+  EstimatorResult operator()(const vector_type &s, const ssize_t m, const ssize_t n) const final {
+    EstimatorResult result;
+    const ssize_t r = std::min(m, n);
+    const ssize_t q = std::max(m, n);
+    assert(s.size() == r);
+    const double lam_r = std::max(s[0], 0.0) / q;
+    double clam = 0.0;
+    for (ssize_t p = 0; p < r; ++p) // p+1 is the number of noise components
+    {                               // (as opposed to the paper where p is defined as the number of signal components)
+      const double lam = std::max(s[p], 0.0) / q;
+      clam += lam;
+      double denominator = std::numeric_limits<double>::signaling_NaN();
+      switch (version) {
+      case 1:
+        denominator = q;
+        break;
+      case 2:
+        denominator = q - (r - p - 1);
+        break;
+      default:
+        assert(false);
+      }
+      const double gam = double(p + 1) / denominator;
+      const double sigsq1 = clam / double(p + 1);
+      const double sigsq2 = (lam - lam_r) / (4.0 * std::sqrt(gam));
+      // sigsq2 > sigsq1 if signal else noise
+      if (sigsq2 < sigsq1) {
+        result.sigma2 = sigsq1;
+        result.cutoff_p = p + 1;
+      }
+    }
+    return result;
+  }
+};
+
+class EstimatorMRM2022 : public EstimatorBase {
+public:
+  EstimatorMRM2022() = default;
+  EstimatorResult operator()(const vector_type &s, const ssize_t m, const ssize_t n) const final {
+    EstimatorResult result;
+    const ssize_t mprime = std::min(m, n);
+    const ssize_t nprime = std::max(m, n);
+    const double sigmasq_to_lamplus = Math::pow2(std::sqrt(nprime) + std::sqrt(mprime));
+    assert(s.size() == mprime);
+    double clam = 0.0;
+    for (ssize_t i = 0; i != mprime; ++i)
+      clam += std::max(s[i], 0.0);
+    clam /= nprime;
+    // Unlike Exp# code,
+    //   MRM2022 article uses p to index number of signal components,
+    //   and here doing a direct translation of the manuscript content to code
+    double lamplusprev = -std::numeric_limits<double>::infinity();
+    for (ssize_t p = 0; p < mprime; ++p) {
+      const ssize_t i = mprime - 1 - p;
+      const double lam = std::max(s[i], 0.0) / nprime;
+      if (lam < lamplusprev)
+        return result;
+      clam -= lam;
+      const double sigmasq = clam / ((mprime - p) * (nprime - p));
+      lamplusprev = sigmasq * sigmasq_to_lamplus;
+      result.cutoff_p = i;
+      result.sigma2 = sigmasq;
+    }
+    return result;
+  }
+};
+
 template <typename F> class DenoisingFunctor {
 
 public:
@@ -444,7 +531,7 @@ public:
                    Image<float> &sum_weights,
                    Image<float> &max_dist,
                    Image<uint16_t> &voxels,
-                   estimator_type estimator)
+                   std::shared_ptr<EstimatorBase> estimator)
       : kernel(kernel),
         filter(filter),
         m(ndwi),
@@ -512,49 +599,26 @@ public:
     // eigenvalues sorted in increasing order:
     s.head(r) = eig.eigenvalues().template cast<double>();
 
-    // Marchenko-Pastur optimal threshold
-    const double lam_r = std::max(s[0], 0.0) / q;
-    double sigma2 = 0.0;
-    ssize_t cutoff_p = 0;
-    for (ssize_t p = 0; p < r; ++p) // p+1 is the number of noise components
-    {                               // (as opposed to the paper where p is defined as the number of signal components)
-      const double lam = std::max(s[p], 0.0) / q;
-      clam[p] = (p == 0 ? 0.0 : clam[p - 1]) + lam;
-      double denominator = std::numeric_limits<double>::signaling_NaN();
-      switch (estimator) {
-      case estimator_type::EXP1:
-        denominator = q;
-        break;
-      case estimator_type::EXP2:
-        denominator = q - (r - p - 1);
-        break;
-      default:
-        assert(false);
-      }
-      const double gam = double(p + 1) / denominator;
-      const double sigsq1 = clam[p] / double(p + 1);
-      const double sigsq2 = (lam - lam_r) / (4.0 * std::sqrt(gam));
-      // sigsq2 > sigsq1 if signal else noise
-      if (sigsq2 < sigsq1) {
-        sigma2 = sigsq1;
-        cutoff_p = p + 1;
-      }
-    }
+    // Marchenko-Pastur optimal threshold determination
+    const EstimatorResult threshold = (*estimator)(s, m, n);
 
     // Generate weights vector
     double sum_weights = 0.0;
     switch (filter) {
     case filter_type::TRUNCATE:
-      w.head(cutoff_p).setZero();
-      w.segment(cutoff_p, r - cutoff_p).setOnes();
-      sum_weights = r - cutoff_p;
+      w.head(threshold.cutoff_p).setZero();
+      w.segment(threshold.cutoff_p, r - threshold.cutoff_p).setOnes();
+      sum_weights = r - threshold.cutoff_p;
       break;
     case filter_type::FROBENIUS: {
       const double beta = r / q;
-      const double threshold = 1.0 + std::sqrt(beta);
+      const double transition = 1.0 + std::sqrt(beta);
+      double clam = 0.0;
       for (ssize_t i = 0; i != r; ++i) {
-        const double y = clam[i] / (sigma2 * (i + 1));
-        const double nu = y > threshold ? std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y : 0.0;
+        const double lam = std::max(s[i], 0.0) / q;
+        clam += lam;
+        const double y = clam / (threshold.sigma2 * (i + 1));
+        const double nu = y > transition ? std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y : 0.0;
         w[i] = nu / y;
         sum_weights += w[i];
       }
@@ -580,11 +644,11 @@ public:
     // Store additional output maps if requested
     if (noise.valid()) {
       assign_pos_of(dwi, 0, 3).to(noise);
-      noise.value() = real_type(std::sqrt(sigma2));
+      noise.value() = real_type(std::sqrt(threshold.sigma2));
     }
     if (rankmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(rankmap);
-      rankmap.value() = uint16_t(r - cutoff_p);
+      rankmap.value() = uint16_t(r - threshold.cutoff_p);
     }
     if (sumweightsmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(sumweightsmap);
@@ -605,7 +669,7 @@ private:
   std::shared_ptr<KernelBase> kernel;
   filter_type filter;
   const ssize_t m;
-  const estimator_type estimator;
+  std::shared_ptr<EstimatorBase> estimator;
 
   // Reusable memory
   MatrixType X;
@@ -646,7 +710,7 @@ void run(Header &data,
          const std::string &output_name,
          std::shared_ptr<KernelBase> kernel,
          filter_type filter,
-         estimator_type estimator) {
+         std::shared_ptr<EstimatorBase> estimator) {
   auto input = data.get_image<T>().with_direct_io(3);
   // create output
   Header header(data);
@@ -670,10 +734,22 @@ void run() {
     check_dimensions(mask, dwi, 0, 3);
   }
 
-  estimator_type estimator = estimator_type::EXP2; // default: Exp2 (unbiased estimator)
+  std::shared_ptr<EstimatorBase> estimator;
   opt = get_options("estimator");
-  if (!opt.empty())
-    estimator = estimator_type(int(opt[0][0]));
+  const estimator_type est = opt.empty() ? estimator_type::EXP2 : estimator_type((int)(opt[0][0]));
+  switch (est) {
+  case estimator_type::EXP1:
+    estimator = std::make_shared<EstimatorExp<1>>();
+    break;
+  case estimator_type::EXP2:
+    estimator = std::make_shared<EstimatorExp<2>>();
+    break;
+  case estimator_type::MRM2022:
+    estimator = std::make_shared<EstimatorMRM2022>();
+    break;
+  default:
+    assert(false);
+  }
 
   filter_type filter = filter_type::FROBENIUS;
   opt = get_options("filter");
