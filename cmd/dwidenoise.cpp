@@ -36,7 +36,7 @@ constexpr default_type sphere_multiplier_default = 1.0 / 0.85;
 const std::vector<std::string> filters = {"truncate", "frobenius"};
 enum class filter_type { TRUNCATE, FROBENIUS };
 
-const std::vector<std::string> aggregators = {"exclusive", "Gaussian", "invL0", "rank", "uniform"};
+const std::vector<std::string> aggregators = {"exclusive", "gaussian", "invl0", "rank", "uniform"};
 enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
 
 // clang-format off
@@ -171,6 +171,10 @@ void usage() {
   // TODO For specifically the Gaussian aggregator,
   //   should ideally be possible to select the FWHM of the aggregator
 
+  // TODO Consider renaming some options to better distinguish between:
+  // - Parameters arising from PCA-based noise level estimation
+  // - Parameters encoding properties of the output data
+
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise",
            "The output noise map,"
@@ -180,10 +184,13 @@ void usage() {
            " so a scale factor sqrt(2) applies.")
     + Argument("image").type_image_out()
   + Option("rank",
-           "The selected signal rank of the output denoised image.")
+           "The estimated signal rank for the denoising patch centred at each voxel")
+    + Argument("image").type_image_out()
+  + Option("weightedrank",
+           "The weighted mean rank for the output image data, accounting for multi-patch aggregation")
     + Argument("image").type_image_out()
   + Option("sumweights",
-           "the sum of eigenvector weights contributed to the output image")
+           "the sum of eigenvector weights computed for the denoising patch centred at each voxel")
     + Argument("image").type_image_out()
   + Option("max_dist",
            "The maximum distance between a voxel and another voxel that was included in the local denoising patch")
@@ -567,6 +574,7 @@ public:
                    Image<bool> &mask,
                    Image<float> &noise,
                    Image<uint16_t> &rank,
+                   Image<float> &weighted_rank,
                    Image<float> &sum_weights,
                    Image<float> &max_dist,
                    Image<uint16_t> &voxels,
@@ -590,6 +598,7 @@ public:
         w(std::min(m, kernel->estimated_size())),
         noise(noise),
         rankmap(rank),
+        weightedrankmap(weighted_rank),
         sumweightsmap(sum_weights),
         maxdistmap(max_dist),
         voxelsmap(voxels),
@@ -696,6 +705,10 @@ public:
         assign_pos_of(dwi, 0, 3).to(aggregation_weight_map);
         aggregation_weight_map.value() = 1.0;
       }
+      if (weightedrankmap.valid()) {
+        assign_pos_of(dwi, 0, 3).to(weightedrankmap);
+        weightedrankmap.value() = r - threshold.cutoff_p;
+      }
       break;
     default: {
       if (m <= n)
@@ -727,6 +740,10 @@ public:
         }
         out.row(3) += weight * X.col(voxel_index);
         aggregation_weight_map.value() += weight;
+        if (weightedrankmap.valid()) {
+          assign_pos_of(neighbourhood.voxels[voxel_index].offset, 0, 3).to(weightedrankmap);
+          weightedrankmap.value() += weight * (r - threshold.cutoff_p);
+        }
       }
     } break;
     }
@@ -752,7 +769,7 @@ public:
       assign_pos_of(dwi, 0, 3).to(voxelsmap);
       voxelsmap.value() = n;
     }
-  }
+  } // End functor
 
 private:
   // Denoising configuration
@@ -784,6 +801,7 @@ private:
   // TODO Group these into a class?
   Image<float> noise;
   Image<uint16_t> rankmap;
+  Image<float> weightedrankmap;
   Image<float> sumweightsmap;
   Image<float> maxdistmap;
   Image<uint16_t> voxelsmap;
@@ -810,6 +828,7 @@ void run(Header &data,
          Image<bool> &mask,
          Image<float> &noise,
          Image<uint16_t> &rank,
+         Image<float> &weighted_rank,
          Image<float> &sum_weights,
          Image<float> &max_dist,
          Image<uint16_t> &voxels,
@@ -825,8 +844,19 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  DenoisingFunctor<T> func(
-      data, kernel, filter, aggregator, mask, noise, rank, sum_weights, max_dist, voxels, aggregation_sum, estimator);
+  DenoisingFunctor<T> func(data,
+                           kernel,
+                           filter,
+                           aggregator,
+                           mask,
+                           noise,
+                           rank,
+                           weighted_rank,
+                           sum_weights,
+                           max_dist,
+                           voxels,
+                           aggregation_sum,
+                           estimator);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
   // Rescale output if performing aggregation
   if (aggregator == aggregator_type::EXCLUSIVE)
@@ -834,6 +864,10 @@ void run(Header &data,
   for (auto l_voxel = Loop(aggregation_sum)(output, aggregation_sum); l_voxel; ++l_voxel) {
     for (auto l_volume = Loop(3)(output); l_volume; ++l_volume)
       output.value() /= float(aggregation_sum.value());
+  }
+  if (weighted_rank.valid()) {
+    for (auto l = Loop(aggregation_sum)(weighted_rank, aggregation_sum); l; ++l)
+      weighted_rank.value() /= aggregation_sum.value();
   }
 }
 
@@ -877,33 +911,47 @@ void run() {
   if (!opt.empty())
     aggregator = aggregator_type(int(opt[0][0]));
 
+  Header H3D(dwi);
+  H3D.ndim() = 3;
+  H3D.reset_intensity_scaling();
+
   Image<float> noise;
   opt = get_options("noise");
   if (!opt.empty()) {
-    Header header(dwi);
-    header.ndim() = 3;
+    Header header(H3D);
     header.datatype() = DataType::Float32;
+    header.datatype().set_byte_order_native();
     noise = Image<float>::create(opt[0][0], header);
   }
 
   Image<uint16_t> rank;
   opt = get_options("rank");
   if (!opt.empty()) {
-    Header header(dwi);
-    header.ndim() = 3;
+    Header header(H3D);
     header.datatype() = DataType::UInt16;
-    header.reset_intensity_scaling();
     rank = Image<uint16_t>::create(opt[0][0], header);
+  }
+
+  Image<float> weighted_rank;
+  opt = get_options("weightedrank");
+  if (!opt.empty()) {
+    if (aggregator == aggregator_type::EXCLUSIVE) {
+      WARN("When using -aggregator exclusive, "
+           "the output of -weightedrank will be identical to the output of -rank, "
+           "as there is no aggregation of multiple patches per output voxel");
+    }
+    Header header(H3D);
+    header.datatype() = DataType::Float32;
+    header.datatype().set_byte_order_native();
+    weighted_rank = Image<float>::create(opt[0][0], header);
   }
 
   Image<float> sum_weights;
   opt = get_options("sumweights");
   if (!opt.empty()) {
-    Header header(dwi);
-    header.ndim() = 3;
+    Header header(H3D);
     header.datatype() = DataType::Float32;
     header.datatype().set_byte_order_native();
-    header.reset_intensity_scaling();
     sum_weights = Image<float>::create(opt[0][0], header);
     if (filter == filter_type::TRUNCATE) {
       WARN("Note that with a truncation filter, "
@@ -914,41 +962,31 @@ void run() {
   Image<float> max_dist;
   opt = get_options("max_dist");
   if (!opt.empty()) {
-    Header header(dwi);
-    header.ndim() = 3;
+    Header header(H3D);
     header.datatype() = DataType::Float32;
     header.datatype().set_byte_order_native();
-    header.reset_intensity_scaling();
     max_dist = Image<float>::create(opt[0][0], header);
   }
 
   Image<uint16_t> voxels;
   opt = get_options("voxels");
   if (!opt.empty()) {
-    Header header(dwi);
-    header.ndim() = 3;
+    Header header(H3D);
     header.datatype() = DataType::UInt16;
-    header.reset_intensity_scaling();
+    header.datatype().set_byte_order_native();
     voxels = Image<uint16_t>::create(opt[0][0], header);
   }
 
   Image<float> aggregation_sum;
-  Header header_aggregation(dwi);
-  header_aggregation.ndim() = 3;
-  header_aggregation.datatype() = DataType::Float64;
+  Header header_aggregation(H3D);
+  header_aggregation.datatype() = DataType::Float32;
   header_aggregation.datatype().set_byte_order_native();
-  header_aggregation.reset_intensity_scaling();
   opt = get_options("aggregation_sum");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE) {
       WARN("Output from -aggregation_sum will just contain 1 for every voxel processed: "
            "no patch aggregation takes place when output series comex exclusively from central patch");
     }
-    Header header(dwi);
-    header.ndim() = 3;
-    header.datatype() = DataType::Float32;
-    header.datatype().set_byte_order_native();
-    header.reset_intensity_scaling();
     aggregation_sum = Image<float>::create(opt[0][0], header_aggregation);
   } else if (aggregator != aggregator_type::EXCLUSIVE) {
     aggregation_sum = Image<float>::scratch(header_aggregation, "Scratch buffer for patch aggregation weights");
@@ -1019,6 +1057,7 @@ void run() {
                mask,
                noise,
                rank,
+               weighted_rank,
                sum_weights,
                max_dist,
                voxels,
@@ -1035,6 +1074,7 @@ void run() {
                 mask,
                 noise,
                 rank,
+                weighted_rank,
                 sum_weights,
                 max_dist,
                 voxels,
@@ -1051,6 +1091,7 @@ void run() {
                 mask,
                 noise,
                 rank,
+                weighted_rank,
                 sum_weights,
                 max_dist,
                 voxels,
@@ -1067,6 +1108,7 @@ void run() {
                  mask,
                  noise,
                  rank,
+                 weighted_rank,
                  sum_weights,
                  max_dist,
                  voxels,
