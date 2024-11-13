@@ -14,6 +14,8 @@
  * For more details, see http://www.mrtrix.org/.
  */
 
+#include <mutex>
+
 #include "command.h"
 #include "image.h"
 
@@ -33,6 +35,9 @@ constexpr default_type sphere_multiplier_default = 1.0 / 0.85;
 
 const std::vector<std::string> filters = {"truncate", "frobenius"};
 enum class filter_type { TRUNCATE, FROBENIUS };
+
+const std::vector<std::string> aggregators = {"exclusive", "Gaussian", "invL0", "rank", "uniform"};
+enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
 
 // clang-format off
 void usage() {
@@ -83,7 +88,25 @@ void usage() {
     "will be used to attenuate eigenvectors based on the estimated noise level. "
     "Hard truncation of sub-threshold components"
     "---which was the behaviour of the dwidenoise command in version 3.0.x---"
-    "can be activated using -filter truncate.";
+    "can be activated using -filter truncate."
+
+  + "-aggregation exclusive corresponds to the behaviour of the dwidenoise command in version 3.0.x, "
+    "where the output intensities for a given image voxel are determined exclusively "
+    "from the PCA decomposition where the sliding spatial window is centred at that voxel. "
+    "In all other use cases, so-called \"overcomplete local PCA\" is performed, "
+    "where the intensities for an output image voxel are some combination of all PCA decompositions "
+    "for which that voxel is included in the local spatial kernel. "
+    "There are multiple algebraic forms that modulate the weight with which each decomposition "
+    "contributes with greater or lesser strength toward the output image intensities. "
+    "The various options are: "
+    "'Gaussian': A Gaussian distribution with FWHM equal to twice the voxel size, "
+      "such that decompisitions centred more closely to the output voxel have greater influence; "
+    "'invL0': The inverse of the L0 norm (ie. rank) of each decomposition, "
+      "as used in Manjon et al. 2013; "
+    "'rank': The rank of each decomposition, "
+      "such that high-rank decompositions contribute more strongly to the output intensities "
+      "regardless of distance between the output voxel and the centre of the decomposition kernel; "
+    "'uniform': All decompositions that include the output voxel in the sliding spatial window contribute equally.";
 
   AUTHOR = "Daan Christiaens (daan.christiaens@kcl.ac.uk)"
            " and Jelle Veraart (jelle.veraart@nyumc.org)"
@@ -106,7 +129,12 @@ void usage() {
   + "* If using -estimator mrm2022: "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
-    "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172";
+    "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172"
+
+  + "* If using anything other than -aggregation exclusive: "
+    "Manjon, J.V.; Coupe, P.; Concha, L.; Buades, A.; D. Collins, D.L.; Robles, M. "
+    "Diffusion Weighted Image Denoising Using Overcomplete Local PCA. "
+    "PLoS ONE, 2013, 8(9), e73021";
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image.").type_image_in()
@@ -135,6 +163,13 @@ void usage() {
            "Modulate how components are filtered based on their eigenvalues; "
            "options are: " + join(filters, ",") + "; default: frobenius")
     + Argument("choice").type_choice(filters)
+  + Option("aggregator",
+           "Select how the outcomes of multiple PCA outcomes centred at different voxels "
+           "contribute to the reconstructed DWI signal in each voxel; "
+           "options are: " + join(aggregators, ",") + "; default: Gaussian")
+    + Argument("choice").type_choice(aggregators)
+  // TODO For specifically the Gaussian aggregator,
+  //   should ideally be possible to select the FWHM of the aggregator
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise",
@@ -155,6 +190,9 @@ void usage() {
     + Argument("image").type_image_out()
   + Option("voxels",
            "The number of voxels that contributed to the PCA for processing of each voxel")
+    + Argument("image").type_image_out()
+  + Option("aggregation_sum",
+           "The sum of aggregation weights of those patches contributing to each output voxel")
     + Argument("image").type_image_out()
 
   + OptionGroup("Options for controlling the sliding spatial window")
@@ -204,7 +242,6 @@ void usage() {
 }
 // clang-format on
 
-using real_type = float;
 using voxel_type = Eigen::Array<int, 3, 1>;
 using vector_type = Eigen::VectorXd;
 
@@ -226,6 +263,9 @@ public:
   }
   bool operator<(const KernelVoxel &that) const { return sq_distance < that.sq_distance; }
   default_type distance() const { return std::sqrt(sq_distance); }
+  // TODO Sometimes this acts as an offset, other times it acts as an absolute voxel index
+  // Consider either renaming, or actually using two different classes
+  // The latter could use ssize_t instead of int to better indicate this
   voxel_type offset;
   default_type sq_distance;
 };
@@ -454,7 +494,6 @@ public:
     EstimatorResult result;
     const ssize_t r = std::min(m, n);
     const ssize_t q = std::max(m, n);
-    assert(s.size() == r);
     const double lam_r = std::max(s[0], 0.0) / q;
     double clam = 0.0;
     for (ssize_t p = 0; p < r; ++p) // p+1 is the number of noise components
@@ -493,7 +532,6 @@ public:
     const ssize_t mprime = std::min(m, n);
     const ssize_t nprime = std::max(m, n);
     const double sigmasq_to_lamplus = Math::pow2(std::sqrt(nprime) + std::sqrt(mprime));
-    assert(s.size() == mprime);
     double clam = 0.0;
     for (ssize_t i = 0; i != mprime; ++i)
       clam += std::max(s[i], 0.0);
@@ -522,32 +560,40 @@ template <typename F> class DenoisingFunctor {
 public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
 
-  DenoisingFunctor(int ndwi,
+  DenoisingFunctor(const Header &header,
                    std::shared_ptr<KernelBase> kernel,
                    filter_type filter,
+                   aggregator_type aggregator,
                    Image<bool> &mask,
-                   Image<real_type> &noise,
+                   Image<float> &noise,
                    Image<uint16_t> &rank,
                    Image<float> &sum_weights,
                    Image<float> &max_dist,
                    Image<uint16_t> &voxels,
+                   // TODO Would be preferable for this to be double if computations are happening using double
+                   Image<float> &aggregation_weight_map,
                    std::shared_ptr<EstimatorBase> estimator)
       : kernel(kernel),
         filter(filter),
-        m(ndwi),
+        aggregator(aggregator),
+        // FWHM = 2 x cube root of voxel spacings
+        gaussian_multiplier(-std::log(2.0) /
+                            Math::pow2(std::cbrt(header.spacing(0) * header.spacing(1) * header.spacing(2)))),
+        m(header.size(3)),
         estimator(estimator),
-        X(ndwi, kernel->estimated_size()),
+        mask(mask),
+        X(m, kernel->estimated_size()),
         XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
         eig(std::min(m, kernel->estimated_size())),
         s(std::min(m, kernel->estimated_size())),
         clam(std::min(m, kernel->estimated_size())),
         w(std::min(m, kernel->estimated_size())),
-        mask(mask),
         noise(noise),
         rankmap(rank),
         sumweightsmap(sum_weights),
         maxdistmap(max_dist),
-        voxelsmap(voxels) {}
+        voxelsmap(voxels),
+        aggregation_weight_map(aggregation_weight_map) {}
 
   template <typename ImageType> void operator()(ImageType &dwi, ImageType &out) {
     // Process voxels in mask only
@@ -627,24 +673,68 @@ public:
       assert(false);
     }
 
-    // recombine data using only eigenvectors above threshold:
-    if (m <= n)
-      X.col(neighbourhood.centre_index) =
-          eig.eigenvectors() *
-          (w.head(r).cast<F>().asDiagonal() * (eig.eigenvectors().adjoint() * X.col(neighbourhood.centre_index)));
-    else
-      X.col(neighbourhood.centre_index) =
-          X.leftCols(n) * (eig.eigenvectors() * (w.head(r).cast<F>().asDiagonal() *
-                                                 eig.eigenvectors().adjoint().col(neighbourhood.centre_index)));
-
-    // Store output
-    assign_pos_of(dwi).to(out);
-    out.row(3) = X.col(neighbourhood.centre_index);
+    // recombine data using only eigenvectors above threshold
+    // If only the data computed when this voxel was the centre of the patch
+    //   is to be used for synthesis of the output image,
+    //   then only that individual column needs to be reconstructed;
+    //   if however the result from this patch is to contribute to the synthesized image
+    //   for all voxels that were utilised within this patch,
+    //   then we need to instead compute the full projection
+    switch (aggregator) {
+    case aggregator_type::EXCLUSIVE:
+      if (m <= n)
+        X.col(neighbourhood.centre_index) =
+            eig.eigenvectors() *
+            (w.head(r).cast<F>().asDiagonal() * (eig.eigenvectors().adjoint() * X.col(neighbourhood.centre_index)));
+      else
+        X.col(neighbourhood.centre_index) =
+            X.leftCols(n) * (eig.eigenvectors() * (w.head(r).cast<F>().asDiagonal() *
+                                                   eig.eigenvectors().adjoint().col(neighbourhood.centre_index)));
+      assign_pos_of(dwi).to(out);
+      out.row(3) = X.col(neighbourhood.centre_index);
+      if (aggregation_weight_map.valid()) {
+        assign_pos_of(dwi, 0, 3).to(aggregation_weight_map);
+        aggregation_weight_map.value() = 1.0;
+      }
+      break;
+    default: {
+      if (m <= n)
+        X = eig.eigenvectors() * (w.head(r).cast<F>().asDiagonal() * (eig.eigenvectors().adjoint() * X));
+      else
+        X.leftCols(n) =
+            X.leftCols(n) * (eig.eigenvectors() * (w.head(r).cast<F>().asDiagonal() * eig.eigenvectors().adjoint()));
+      std::lock_guard<std::mutex> lock(mutex_aggregator);
+      for (size_t voxel_index = 0; voxel_index != neighbourhood.voxels.size(); ++voxel_index) {
+        assign_pos_of(neighbourhood.voxels[voxel_index].offset, 0, 3).to(out);
+        assign_pos_of(neighbourhood.voxels[voxel_index].offset).to(aggregation_weight_map);
+        double weight = std::numeric_limits<double>::signaling_NaN();
+        switch (aggregator) {
+        case aggregator_type::EXCLUSIVE:
+          assert(false);
+          break;
+        case aggregator_type::GAUSSIAN:
+          weight = std::exp(gaussian_multiplier * neighbourhood.voxels[voxel_index].sq_distance);
+          break;
+        case aggregator_type::INVL0:
+          weight = 1.0 / (1 + r - threshold.cutoff_p);
+          break;
+        case aggregator_type::RANK:
+          weight = r - threshold.cutoff_p;
+          break;
+        case aggregator_type::UNIFORM:
+          weight = 1.0;
+          break;
+        }
+        out.row(3) += weight * X.col(voxel_index);
+        aggregation_weight_map.value() += weight;
+      }
+    } break;
+    }
 
     // Store additional output maps if requested
     if (noise.valid()) {
       assign_pos_of(dwi, 0, 3).to(noise);
-      noise.value() = real_type(std::sqrt(threshold.sigma2));
+      noise.value() = float(std::sqrt(threshold.sigma2));
     }
     if (rankmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(rankmap);
@@ -656,7 +746,7 @@ public:
     }
     if (maxdistmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(maxdistmap);
-      maxdistmap.value() = float(neighbourhood.max_distance);
+      maxdistmap.value() = neighbourhood.max_distance;
     }
     if (voxelsmap.valid()) {
       assign_pos_of(dwi, 0, 3).to(voxelsmap);
@@ -668,8 +758,11 @@ private:
   // Denoising configuration
   std::shared_ptr<KernelBase> kernel;
   filter_type filter;
+  aggregator_type aggregator;
+  double gaussian_multiplier;
   const ssize_t m;
   std::shared_ptr<EstimatorBase> estimator;
+  Image<bool> mask;
 
   // Reusable memory
   MatrixType X;
@@ -679,15 +772,22 @@ private:
   vector_type clam;
   vector_type w;
 
-  Image<bool> mask;
+  // Data that can only be written in a thread-safe manner
+  // Note that this applies not just to this scratch buffer, but also the output image
+  //   (while it would be thread-safe to create a full copy of the output image for each thread
+  //   and combine them only at destruction time,
+  //   this runs the risk of becoming prohibitively large)
+  // Not placing this within a MutexProtexted<> as the image type is still templated
+  static std::mutex mutex_aggregator;
 
   // Export images
   // TODO Group these into a class?
-  Image<real_type> noise;
+  Image<float> noise;
   Image<uint16_t> rankmap;
   Image<float> sumweightsmap;
   Image<float> maxdistmap;
   Image<uint16_t> voxelsmap;
+  Image<float> aggregation_weight_map;
 
   template <typename ImageType> void load_data(ImageType &image, const std::vector<KernelVoxel> &voxels) {
     const voxel_type pos({int(image.index(0)), int(image.index(1)), int(image.index(2))});
@@ -698,18 +798,26 @@ private:
     assign_pos_of(pos, 0, 3).to(image);
   }
 };
+template <typename F> std::mutex DenoisingFunctor<F>::mutex_aggregator;
+
+// Necessary to allow normalisation by sum of aggregation weights
+//   where the image type is cdouble, but aggregation weights are float
+// (operations combining complex & real types not allowed to be of different precision)
+std::complex<double> operator/(const std::complex<double> &c, const float n) { return c / double(n); }
 
 template <typename T>
 void run(Header &data,
          Image<bool> &mask,
-         Image<real_type> &noise,
+         Image<float> &noise,
          Image<uint16_t> &rank,
          Image<float> &sum_weights,
          Image<float> &max_dist,
          Image<uint16_t> &voxels,
+         Image<float> &aggregation_sum,
          const std::string &output_name,
          std::shared_ptr<KernelBase> kernel,
          filter_type filter,
+         aggregator_type aggregator,
          std::shared_ptr<EstimatorBase> estimator) {
   auto input = data.get_image<T>().with_direct_io(3);
   // create output
@@ -717,8 +825,16 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  DenoisingFunctor<T> func(data.size(3), kernel, filter, mask, noise, rank, sum_weights, max_dist, voxels, estimator);
+  DenoisingFunctor<T> func(
+      data, kernel, filter, aggregator, mask, noise, rank, sum_weights, max_dist, voxels, aggregation_sum, estimator);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
+  // Rescale output if performing aggregation
+  if (aggregator == aggregator_type::EXCLUSIVE)
+    return;
+  for (auto l_voxel = Loop(aggregation_sum)(output, aggregation_sum); l_voxel; ++l_voxel) {
+    for (auto l_volume = Loop(3)(output); l_volume; ++l_volume)
+      output.value() /= float(aggregation_sum.value());
+  }
 }
 
 void run() {
@@ -756,13 +872,18 @@ void run() {
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
 
-  Image<real_type> noise;
+  aggregator_type aggregator = aggregator_type::GAUSSIAN;
+  opt = get_options("aggregator");
+  if (!opt.empty())
+    aggregator = aggregator_type(int(opt[0][0]));
+
+  Image<float> noise;
   opt = get_options("noise");
   if (!opt.empty()) {
     Header header(dwi);
     header.ndim() = 3;
     header.datatype() = DataType::Float32;
-    noise = Image<real_type>::create(opt[0][0], header);
+    noise = Image<float>::create(opt[0][0], header);
   }
 
   Image<uint16_t> rank;
@@ -809,6 +930,28 @@ void run() {
     header.datatype() = DataType::UInt16;
     header.reset_intensity_scaling();
     voxels = Image<uint16_t>::create(opt[0][0], header);
+  }
+
+  Image<float> aggregation_sum;
+  Header header_aggregation(dwi);
+  header_aggregation.ndim() = 3;
+  header_aggregation.datatype() = DataType::Float64;
+  header_aggregation.datatype().set_byte_order_native();
+  header_aggregation.reset_intensity_scaling();
+  opt = get_options("aggregation_sum");
+  if (!opt.empty()) {
+    if (aggregator == aggregator_type::EXCLUSIVE) {
+      WARN("Output from -aggregation_sum will just contain 1 for every voxel processed: "
+           "no patch aggregation takes place when output series comex exclusively from central patch");
+    }
+    Header header(dwi);
+    header.ndim() = 3;
+    header.datatype() = DataType::Float32;
+    header.datatype().set_byte_order_native();
+    header.reset_intensity_scaling();
+    aggregation_sum = Image<float>::create(opt[0][0], header_aggregation);
+  } else if (aggregator != aggregator_type::EXCLUSIVE) {
+    aggregation_sum = Image<float>::scratch(header_aggregation, "Scratch buffer for patch aggregation weights");
   }
 
   opt = get_options("shape");
@@ -872,19 +1015,67 @@ void run() {
   switch (prec) {
   case 0:
     INFO("select real float32 for processing");
-    run<float>(dwi, mask, noise, rank, sum_weights, max_dist, voxels, argument[1], kernel, filter, estimator);
+    run<float>(dwi,
+               mask,
+               noise,
+               rank,
+               sum_weights,
+               max_dist,
+               voxels,
+               aggregation_sum,
+               argument[1],
+               kernel,
+               filter,
+               aggregator,
+               estimator);
     break;
   case 1:
     INFO("select real float64 for processing");
-    run<double>(dwi, mask, noise, rank, sum_weights, max_dist, voxels, argument[1], kernel, filter, estimator);
+    run<double>(dwi,
+                mask,
+                noise,
+                rank,
+                sum_weights,
+                max_dist,
+                voxels,
+                aggregation_sum,
+                argument[1],
+                kernel,
+                filter,
+                aggregator,
+                estimator);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, mask, noise, rank, sum_weights, max_dist, voxels, argument[1], kernel, filter, estimator);
+    run<cfloat>(dwi,
+                mask,
+                noise,
+                rank,
+                sum_weights,
+                max_dist,
+                voxels,
+                aggregation_sum,
+                argument[1],
+                kernel,
+                filter,
+                aggregator,
+                estimator);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, mask, noise, rank, sum_weights, max_dist, voxels, argument[1], kernel, filter, estimator);
+    run<cdouble>(dwi,
+                 mask,
+                 noise,
+                 rank,
+                 sum_weights,
+                 max_dist,
+                 voxels,
+                 aggregation_sum,
+                 argument[1],
+                 kernel,
+                 filter,
+                 aggregator,
+                 estimator);
     break;
   }
 }
