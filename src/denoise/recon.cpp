@@ -34,11 +34,12 @@ Recon<F>::Recon(const Header &header,
       // FWHM = 2 x cube root of voxel spacings
       gaussian_multiplier(-std::log(2.0) /
                           Math::pow2(std::cbrt(header.spacing(0) * header.spacing(1) * header.spacing(2)))),
-      w(std::min(Estimate<F>::m, kernel->estimated_size())) {}
+      w(std::min(Estimate<F>::m, kernel->estimated_size())),
+      Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
 
 template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
-  Estimate<F> (*this)(dwi);
+  Estimate<F>::operator()(dwi);
 
   const ssize_t n = Estimate<F>::neighbourhood.voxels.size();
   const ssize_t r = std::min(Estimate<F>::m, n);
@@ -47,8 +48,11 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
   if (r > w.size())
     w.resize(r);
+  if (aggregator != aggregator_type::EXCLUSIVE && n > Xr.cols())
+    Xr.resize(Estimate<F>::m, n);
 #ifndef NDEBUG
   w.fill(std::numeric_limits<default_type>::signaling_NaN());
+  Xr.fill(std::numeric_limits<default_type>::signaling_NaN());
 #endif
 
   // Generate weights vector
@@ -93,18 +97,19 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   switch (aggregator) {
   case aggregator_type::EXCLUSIVE:
     if (Estimate<F>::m <= n)
-      Estimate<F>::X.col(Estimate<F>::neighbourhood.centre_index) =
-          Estimate<F>::eig.eigenvectors() *
-          (w.head(r).cast<F>().matrix().asDiagonal() *
-           (Estimate<F>::eig.eigenvectors().adjoint() * Estimate<F>::X.col(Estimate<F>::neighbourhood.centre_index)));
+      Xr.noalias() =                                                       //
+          Estimate<F>::eig.eigenvectors() *                                //
+          (w.head(r).cast<F>().matrix().asDiagonal() *                     //
+           (Estimate<F>::eig.eigenvectors().adjoint() *                    //
+            Estimate<F>::X.col(Estimate<F>::neighbourhood.centre_index))); //
     else
-      Estimate<F>::X.col(Estimate<F>::neighbourhood.centre_index) =
-          Estimate<F>::X.leftCols(n) *
-          (Estimate<F>::eig.eigenvectors() *
-           (w.head(r).cast<F>().matrix().asDiagonal() *
-            Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::neighbourhood.centre_index)));
+      Xr.noalias() =                                                                                  //
+          Estimate<F>::X.leftCols(n) *                                                                //
+          (Estimate<F>::eig.eigenvectors() *                                                          //
+           (w.head(r).cast<F>().matrix().asDiagonal() *                                               //
+            Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::neighbourhood.centre_index))); //
     assign_pos_of(dwi).to(out);
-    out.row(3) = Estimate<F>::X.col(Estimate<F>::neighbourhood.centre_index);
+    out.row(3) = Xr.col(0);
     if (Estimate<F>::exports.sum_aggregation.valid()) {
       assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.sum_aggregation);
       Estimate<F>::exports.sum_aggregation.value() = 1.0;
@@ -116,12 +121,16 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     break;
   default: {
     if (Estimate<F>::m <= n)
-      Estimate<F>::X = Estimate<F>::eig.eigenvectors() * (w.head(r).cast<F>().matrix().asDiagonal() *
-                                                          (Estimate<F>::eig.eigenvectors().adjoint() * Estimate<F>::X));
+      Xr.noalias() =                                                      //
+          Estimate<F>::eig.eigenvectors() *                               //
+          (w.head(r).cast<F>().matrix().asDiagonal() *                    //
+           (Estimate<F>::eig.eigenvectors().adjoint() * Estimate<F>::X)); //
     else
-      Estimate<F>::X.leftCols(n) =
-          Estimate<F>::X.leftCols(n) * (Estimate<F>::eig.eigenvectors() * (w.head(r).cast<F>().matrix().asDiagonal() *
-                                                                           Estimate<F>::eig.eigenvectors().adjoint()));
+      Xr.leftCols(n).noalias() =                         //
+          Estimate<F>::X.leftCols(n) *                   //
+          (Estimate<F>::eig.eigenvectors() *             //
+           (w.head(r).cast<F>().matrix().asDiagonal() *  //
+            Estimate<F>::eig.eigenvectors().adjoint())); //
     std::lock_guard<std::mutex> lock(mutex_aggregator);
     for (size_t voxel_index = 0; voxel_index != Estimate<F>::neighbourhood.voxels.size(); ++voxel_index) {
       assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index, 0, 3).to(out);
@@ -144,7 +153,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         weight = 1.0;
         break;
       }
-      out.row(3) += weight * Estimate<F>::X.col(voxel_index);
+      out.row(3) += weight * Xr.col(voxel_index);
       Estimate<F>::exports.sum_aggregation.value() += weight;
       if (Estimate<F>::exports.rank_output.valid()) {
         assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
