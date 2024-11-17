@@ -53,6 +53,7 @@ protected:
 
   // Reusable memory
   vector_type w;
+  typename Estimate<F>::MatrixType Xr;
 
   // Some data can only be written in a thread-safe manner
   static std::mutex mutex_aggregator;
