@@ -14,7 +14,6 @@
  * For more details, see http://www.mrtrix.org/.
  */
 
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,12 +31,12 @@
 #include "denoise/estimator/mrm2022.h"
 #include "denoise/estimator/result.h"
 #include "denoise/exports.h"
-#include "denoise/functor.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_ratio.h"
+#include "denoise/recon.h"
 
 using namespace MR;
 using namespace App;
@@ -72,7 +71,7 @@ void usage() {
 
   + "By default, optimal value shrinkage based on minimisation of the Frobenius norm "
     "will be used to attenuate eigenvectors based on the estimated noise level. "
-    "Hard truncation of sub-threshold components"
+    "Hard truncation of sub-threshold components and inclusion of supra-threshold components"
     "---which was the behaviour of the dwidenoise command in version 3.0.x---"
     "can be activated using -filter truncate."
 
@@ -85,9 +84,9 @@ void usage() {
     "There are multiple algebraic forms that modulate the weight with which each decomposition "
     "contributes with greater or lesser strength toward the output image intensities. "
     "The various options are: "
-    "'Gaussian': A Gaussian distribution with FWHM equal to twice the voxel size, "
+    "'gaussian': A Gaussian distribution with FWHM equal to twice the voxel size, "
       "such that decompisitions centred more closely to the output voxel have greater influence; "
-    "'invL0': The inverse of the L0 norm (ie. rank) of each decomposition, "
+    "'invl0': The inverse of the L0 norm (ie. rank) of each decomposition, "
       "as used in Manjon et al. 2013; "
     "'rank': The rank of each decomposition, "
       "such that high-rank decompositions contribute more strongly to the output intensities "
@@ -130,10 +129,10 @@ void usage() {
   + OptionGroup("Options for modifying PCA computations")
   + datatype_option
   + Estimator::option
-
   + Kernel::options
 
   + OptionGroup("Options that affect reconstruction of the output image series")
+  // TODO Separate masks for voxels to contribute to patches vs. voxels for which to perform denoising
   + Option("mask",
            "Only denoise voxels within the specified binary brain mask image.")
     + Argument("image").type_image_in()
@@ -249,7 +248,7 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  Functor<T> func(data, mask, kernel, estimator, filter, aggregator, exports);
+  Recon<T> func(data, mask, kernel, estimator, filter, aggregator, exports);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
   // Rescale output if performing aggregation
   if (aggregator == aggregator_type::EXCLUSIVE)

@@ -16,9 +16,7 @@
 
 #pragma once
 
-#include <limits>
 #include <memory>
-#include <mutex>
 
 #include <Eigen/Dense>
 
@@ -34,58 +32,45 @@
 
 namespace MR::Denoise {
 
-template <typename F> class Functor {
+template <typename F> class Estimate {
 
 public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
 
-  Functor(const Header &header,
-          Image<bool> &mask,
-          std::shared_ptr<Kernel::Base> kernel,
-          std::shared_ptr<Estimator::Base> estimator,
-          filter_type filter,
-          aggregator_type aggregator,
-          Exports &exports);
+  Estimate(const Header &header,
+           Image<bool> &mask,
+           std::shared_ptr<Kernel::Base> kernel,
+           std::shared_ptr<Estimator::Base> estimator,
+           Exports &exports);
 
-  void operator()(Image<F> &dwi, Image<F> &out);
+  void operator()(Image<F> &dwi);
 
-private:
-  // Denoising configuration
+protected:
   const ssize_t m;
+
+  // Denoising configuration
   Image<bool> mask;
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;
-  filter_type filter;
-  aggregator_type aggregator;
-  double gaussian_multiplier;
 
   // Reusable memory
+  Kernel::Data neighbourhood;
   MatrixType X;
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
   eigenvalues_type s;
+  Estimator::Result threshold;
   vector_type clam;
-  vector_type w;
 
   // Export images
   Exports exports;
 
-  // Data that can only be written in a thread-safe manner
-  // Note that this applies not just to this scratch buffer, but also the output image
-  //   (while it would be thread-safe to create a full copy of the output image for each thread
-  //   and combine them only at destruction time,
-  //   this runs the risk of becoming prohibitively large)
-  // Not placing this within a MutexProtexted<> as the image type is still templated
-  static std::mutex mutex_aggregator;
-
   void load_data(Image<F> &image, const std::vector<Kernel::Voxel> &voxels);
 };
 
-template <typename F> std::mutex Functor<F>::mutex_aggregator;
-
-template class Functor<float>;
-template class Functor<cfloat>;
-template class Functor<double>;
-template class Functor<cdouble>;
+template class Estimate<float>;
+template class Estimate<cfloat>;
+template class Estimate<double>;
+template class Estimate<cdouble>;
 
 } // namespace MR::Denoise
