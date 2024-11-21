@@ -18,6 +18,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 
 #include <Eigen/Dense>
 
@@ -28,6 +29,7 @@
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/voxel.h"
+#include "denoise/subsample.h"
 #include "header.h"
 #include "image.h"
 
@@ -40,6 +42,7 @@ public:
 
   Estimate(const Header &header,
            Image<bool> &mask,
+           std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports);
@@ -51,6 +54,7 @@ protected:
 
   // Denoising configuration
   Image<bool> mask;
+  std::shared_ptr<Subsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;
 
@@ -66,8 +70,13 @@ protected:
   // Export images
   Exports exports;
 
+  // Some data can only be written in a thread-safe manner
+  static std::mutex mutex;
+
   void load_data(Image<F> &image, const std::vector<Kernel::Voxel> &voxels);
 };
+
+template <typename F> std::mutex Estimate<F>::mutex;
 
 template class Estimate<float>;
 template class Estimate<cfloat>;

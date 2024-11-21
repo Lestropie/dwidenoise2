@@ -24,6 +24,7 @@
 #include "denoise/estimator/estimator.h"
 #include "denoise/exports.h"
 #include "denoise/kernel/kernel.h"
+#include "denoise/subsample.h"
 #include "exception.h"
 
 using namespace MR;
@@ -62,7 +63,9 @@ void usage() {
 
   + Kernel::shape_description
 
-  + Kernel::size_description;
+  + Kernel::default_size_description
+
+  + Kernel::cuboid_size_description;
 
   AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)"
            " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
@@ -106,6 +109,7 @@ void usage() {
   + datatype_option
   + Estimator::option
   + Kernel::options
+  + subsample_option
 
   // TODO Implement mask option
   // Note that behaviour of -mask for dwi2noise may be different to that of dwidenoise
@@ -120,6 +124,9 @@ void usage() {
     + Argument("image").type_image_out()
   + Option("voxelcount",
            "The number of voxels that contributed to the PCA for processing of each voxel")
+    + Argument("image").type_image_out()
+  + Option("patchcount",
+           "The number of unique patches to which an image voxel contributes")
     + Argument("image").type_image_out();
 
   COPYRIGHT =
@@ -153,12 +160,13 @@ void usage() {
 
 template <typename T>
 void run(Header &data,
+         std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
   auto input = data.get_image<T>().with_direct_io(3);
   Image<bool> mask; // unused
-  Estimate<T> func(data, mask, kernel, estimator, exports);
+  Estimate<T> func(data, mask, subsample, kernel, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input);
 }
 
@@ -168,13 +176,16 @@ void run() {
   if (dwi.ndim() != 4 || dwi.size(3) <= 1)
     throw Exception("input image must be 4-dimensional");
 
-  auto kernel = Kernel::make_kernel(dwi);
+  auto subsample = Subsample::make(dwi);
+  assert(subsample);
+
+  auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
 
   auto estimator = Estimator::make_estimator();
   assert(estimator);
 
-  Exports exports(dwi);
+  Exports exports(dwi, subsample->header());
   exports.set_noise_out(argument[1]);
   auto opt = get_options("rank");
   if (!opt.empty())
@@ -185,6 +196,9 @@ void run() {
   opt = get_options("voxelcount");
   if (!opt.empty())
     exports.set_voxelcount(opt[0][0]);
+  opt = get_options("patchcount");
+  if (!opt.empty())
+    exports.set_patchcount(opt[0][0]);
 
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())
@@ -192,19 +206,19 @@ void run() {
   switch (prec) {
   case 0:
     INFO("select real float32 for processing");
-    run<float>(dwi, kernel, estimator, exports);
+    run<float>(dwi, subsample, kernel, estimator, exports);
     break;
   case 1:
     INFO("select real float64 for processing");
-    run<double>(dwi, kernel, estimator, exports);
+    run<double>(dwi, subsample, kernel, estimator, exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, kernel, estimator, exports);
+    run<cfloat>(dwi, subsample, kernel, estimator, exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, kernel, estimator, exports);
+    run<cdouble>(dwi, subsample, kernel, estimator, exports);
     break;
   }
 }

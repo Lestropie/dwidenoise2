@@ -19,7 +19,6 @@
 
 #include <limits>
 #include <memory>
-#include <mutex>
 
 #include <Eigen/Dense>
 
@@ -37,6 +36,7 @@ template <typename F> class Recon : public Estimate<F> {
 public:
   Recon(const Header &header,
         Image<bool> &mask,
+        std::shared_ptr<Subsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
         std::shared_ptr<Estimator::Base> estimator,
         filter_type filter,
@@ -54,12 +54,7 @@ protected:
   // Reusable memory
   vector_type w;
   typename Estimate<F>::MatrixType Xr;
-
-  // Some data can only be written in a thread-safe manner
-  static std::mutex mutex_aggregator;
 };
-
-template <typename F> std::mutex Recon<F>::mutex_aggregator;
 
 template class Recon<float>;
 template class Recon<cfloat>;
