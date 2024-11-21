@@ -25,8 +25,10 @@ namespace MR::Denoise::Kernel {
 
 class SphereFixedRadius : public SphereBase {
 public:
-  SphereFixedRadius(const Header &voxel_grid, const default_type radius)
-      : SphereBase(voxel_grid, radius),                               //
+  SphereFixedRadius(const Header &voxel_grid,                         //
+                    const default_type radius,                        //
+                    const std::array<ssize_t, 3> &subsample_factors)  //
+      : SphereBase(voxel_grid, radius, subsample_factors),            //
         maximum_size(std::distance(shared->begin(), shared->end())) { //
     INFO("Maximum number of voxels in " + str(radius) + "mm fixed-radius kernel is " + str(maximum_size));
   }

@@ -40,7 +40,7 @@ const char *const shape_description =
     "the centre of the kernel will be offset from the voxel being processed "
     "such that the entire volume of the kernel resides within the image FoV.";
 
-const char *const size_description =
+const char *const default_size_description =
     "The size of the default spherical kernel is set to select a number of voxels that is "
     "1.0 / 0.85 ~ 1.18 times the number of volumes in the input series. "
     "If a cuboid kernel is requested, "
@@ -49,6 +49,20 @@ const char *const size_description =
     "that exceeds the number of DW images in the input data; "
     "e.g., 5x5x5 for data with <= 125 DWI volumes, "
     "7x7x7 for data with <= 343 DWI volumes, etc.";
+
+const char *const cuboid_size_description =
+    "Permissible sizes for the cuboid kernel depend on the subsampling factor. "
+    "If no subsampling is performed, or the subsampling factor is odd, "
+    "then the extent(s) of the kernel must be odd, "
+    "such that a unique voxel lies at the very centre of each kernel. "
+    "If however an even subsampling factor is used, "
+    "then the extent(s) of the kernel must be even, "
+    "reflecting the fact that it is a voxel corner that resides at the centre of the kernel."
+    "In either case, if the extent is specified manually, "
+    "the user can either provide a single integer---"
+    "which will determine the number of voxels in the kernel across all three spatial axes---"
+    "or a comma-separated list of three integers,"
+    "individually defining the number of voxels in the kernel for all three spatial axes.";
 
 // clang-format off
 const OptionGroup options = OptionGroup("Options for controlling the sliding spatial window kernel")
@@ -65,11 +79,11 @@ const OptionGroup options = OptionGroup("Options for controlling the sliding spa
 // TODO Command-line option that allows user to specify minimum absolute number of voxels in kernel
 + Option("extent",
          "Set the patch size of the cuboid kernel; "
-         "can be either a single odd integer or a comma-separated triplet of odd integers")
+         "can be either a single integer or a comma-separated triplet of integers (see Description)")
   + Argument("window").type_sequence_int();
 // clang-format on
 
-std::shared_ptr<Base> make_kernel(const Header &H) {
+std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors) {
   auto opt = App::get_options("shape");
   const Kernel::shape_type shape = opt.empty() ? Kernel::shape_type::SPHERE : Kernel::shape_type((int)(opt[0][0]));
   std::shared_ptr<Kernel::Base> kernel;
@@ -81,43 +95,54 @@ std::shared_ptr<Base> make_kernel(const Header &H) {
       throw Exception("-extent option does not apply to spherical kernel");
     opt = get_options("radius_mm");
     if (opt.empty())
-      return std::make_shared<SphereRatio>(H, get_option_value("radius_ratio", sphere_multiplier_default));
-    return std::make_shared<SphereFixedRadius>(H, opt[0][0]);
+      return std::make_shared<SphereRatio>(
+          H, get_option_value("radius_ratio", sphere_multiplier_default), subsample_factors);
+    return std::make_shared<SphereFixedRadius>(H, opt[0][0], subsample_factors);
   }
   case Kernel::shape_type::CUBOID: {
     if (!get_options("radius_mm").empty() || !get_options("radius_ratio").empty())
       throw Exception("-radius_* options are inapplicable if cuboid kernel shape is selected");
     opt = get_options("extent");
-    std::vector<uint32_t> extent;
+    std::array<ssize_t, 3> extent;
     if (!opt.empty()) {
-      extent = parse_ints<uint32_t>(opt[0][0]);
-      if (extent.size() == 1)
-        extent = {extent[0], extent[0], extent[0]};
-      if (extent.size() != 3)
+      auto userinput = parse_ints<uint32_t>(opt[0][0]);
+      if (userinput.size() == 1)
+        extent = {userinput[0], userinput[0], userinput[0]};
+      else if (userinput.size() == 3)
+        extent = {userinput[0], userinput[1], userinput[2]};
+      else
         throw Exception("-extent must be either a scalar or a list of length 3");
-      for (int i = 0; i < 3; i++) {
-        if ((extent[i] & 1) == 0)
-          throw Exception("-extent must be a (list of) odd numbers");
-        if (extent[i] > H.size(i))
+      for (ssize_t axis = 0; axis < 3; ++axis) {
+        if (extent[axis] > H.size(axis))
           throw Exception("-extent must not exceed the image dimensions");
+        if ((subsample_factors[axis] & 1) != (extent[axis] & 1))
+          throw Exception("-extent must match subsampling factors "
+                          "(odd for no subsampling or subsampling by an odd factor; "
+                          "even for subsampling by an even factor)");
       }
     } else {
-      uint32_t e = 1;
-      while (Math::pow3(e) < H.size(3))
-        e += 2;
-      extent = {std::min(e, uint32_t(H.size(0))),  //
-                std::min(e, uint32_t(H.size(1))),  //
-                std::min(e, uint32_t(H.size(2)))}; //
+      extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
+      ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
+      while (extent[0] * extent[1] * extent[2] < std::max(H.size(3), prev_num_voxels)) {
+        prev_num_voxels = extent[0] * extent[1] * extent[2];
+        // If multiple axes are tied for spatial extent in mm, increment all of them
+        const default_type min_length =
+            std::min({extent[0] * H.spacing(0), extent[1] * H.spacing(1), extent[2] * H.spacing(2)});
+        for (ssize_t axis = 0; axis != 3; ++axis) {
+          if (extent[axis] * H.spacing(axis) == min_length && extent[axis] + 2 <= H.size(axis))
+            extent[axis] += 2;
+        }
+      }
     }
-    INFO("selected patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]) + ".");
+    INFO("selected cuboid patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]));
 
-    if (std::min<uint32_t>(H.size(3), extent[0] * extent[1] * extent[2]) < 15) {
-      WARN("The number of volumes or the patch size is small. "
-           "This may lead to discretisation effects in the noise level "
-           "and cause inconsistent denoising between adjacent voxels.");
+    if (std::min(H.size(3), extent[0] * extent[1] * extent[2]) < 15) {
+      WARN("The number of volumes or the patch size is small; "
+           "this may lead to discretisation effects in the noise level "
+           "and cause inconsistent denoising between adjacent voxels");
     }
 
-    return std::make_shared<Cuboid>(H, extent);
+    return std::make_shared<Cuboid>(H, extent, subsample_factors);
   } break;
   default:
     assert(false);

@@ -20,26 +20,59 @@
 
 namespace MR::Denoise::Kernel {
 
-SphereBase::Shared::Shared(const Header &voxel_grid, const default_type max_radius) {
+SphereBase::Shared::Shared(const Header &voxel_grid,
+                           const default_type max_radius,
+                           const std::array<ssize_t, 3> &subsample_factors) {
   const default_type max_radius_sq = Math::pow2(max_radius);
-  const Voxel::index_type half_extents({ssize_t(std::ceil(max_radius / voxel_grid.spacing(0))),   //
-                                        ssize_t(std::ceil(max_radius / voxel_grid.spacing(1))),   //
-                                        ssize_t(std::ceil(max_radius / voxel_grid.spacing(2)))}); //
+  Eigen::Array<int, 3, 2> bounding_box;
+  std::array<default_type, 3> halfvoxel_offsets;
+  for (ssize_t axis = 0; axis != 3; ++axis) {
+    if (subsample_factors[axis] % 2) {
+      bounding_box(axis, 1) = int(std::ceil(max_radius / voxel_grid.spacing(axis)));
+      bounding_box(axis, 0) = -bounding_box(axis, 1);
+      halfvoxel_offsets[axis] = 0.0;
+    } else {
+      bounding_box(axis, 0) = -int(std::ceil((max_radius / voxel_grid.spacing(axis)) - 0.5));
+      bounding_box(axis, 1) = int(std::ceil((max_radius / voxel_grid.spacing(axis)) + 0.5));
+      halfvoxel_offsets[axis] = 0.5;
+    }
+  }
   // Build the searchlight
-  data.reserve(size_t(2 * half_extents[0] + 1) * size_t(2 * half_extents[1] + 1) * size_t(2 * half_extents[2] + 1));
+  data.reserve(size_t(bounding_box(0, 1) + 1 - bounding_box(0, 0)) * //
+               size_t(bounding_box(1, 1) + 1 - bounding_box(1, 0)) * //
+               size_t(bounding_box(2, 1) + 1 - bounding_box(2, 0))); //
   Offset::index_type offset({0, 0, 0});
-  for (offset[2] = -half_extents[2]; offset[2] <= half_extents[2]; ++offset[2]) {
-    for (offset[1] = -half_extents[1]; offset[1] <= half_extents[1]; ++offset[1]) {
-      for (offset[0] = -half_extents[0]; offset[0] <= half_extents[0]; ++offset[0]) {
-        const default_type squared_distance = Math::pow2(offset[0] * voxel_grid.spacing(0))    //
-                                              + Math::pow2(offset[1] * voxel_grid.spacing(1))  //
-                                              + Math::pow2(offset[2] * voxel_grid.spacing(2)); //
+  for (offset[2] = bounding_box(2, 0); offset[2] <= bounding_box(2, 1); ++offset[2]) {
+    for (offset[1] = bounding_box(1, 0); offset[1] <= bounding_box(1, 1); ++offset[1]) {
+      for (offset[0] = bounding_box(0, 0); offset[0] <= bounding_box(0, 1); ++offset[0]) {
+        const default_type squared_distance =
+            Math::pow2((offset[0] + halfvoxel_offsets[0]) * voxel_grid.spacing(0))    //
+            + Math::pow2((offset[1] + halfvoxel_offsets[1]) * voxel_grid.spacing(1))  //
+            + Math::pow2((offset[2] + halfvoxel_offsets[2]) * voxel_grid.spacing(2)); //
         if (squared_distance <= max_radius_sq)
           data.emplace_back(Offset(offset, squared_distance));
       }
     }
   }
   std::sort(data.begin(), data.end());
+  DEBUG("Spherical searchlight construction:");
+  DEBUG("Voxel spacing: ["                   //
+        + str(voxel_grid.spacing(0)) + ","   //
+        + str(voxel_grid.spacing(1)) + ","   //
+        + str(voxel_grid.spacing(2)) + "]"); //
+  DEBUG("Maximum nominated radius: " + str(max_radius));
+  DEBUG("Halfvoxel offsets: ["              //
+        + str(halfvoxel_offsets[0]) + ","   //
+        + str(halfvoxel_offsets[1]) + ","   //
+        + str(halfvoxel_offsets[2]) + "]"); //
+  DEBUG("Bounding box for search: ["        //
+        "[" +
+        str(bounding_box(0, 0)) + " " + str(bounding_box(0, 1)) + "] " +       //
+        "[" + str(bounding_box(1, 0)) + " " + str(bounding_box(1, 1)) + "] " + //
+        "[" + str(bounding_box(2, 0)) + " " + str(bounding_box(2, 1)) + "]]"); //
+  DEBUG("First element: " + str(data.front().index.transpose()) + " @ " + str(data.front().distance()));
+  DEBUG("Last element: " + str(data.back().index.transpose()) + " @ " + str(data.back().distance()));
+  DEBUG("Number of elements: " + str(data.size()));
 }
 
 } // namespace MR::Denoise::Kernel

@@ -15,7 +15,6 @@
  */
 
 #include <string>
-#include <vector>
 
 #include "command.h"
 #include "header.h"
@@ -37,6 +36,7 @@
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_ratio.h"
 #include "denoise/recon.h"
+#include "denoise/subsample.h"
 
 using namespace MR;
 using namespace App;
@@ -67,7 +67,9 @@ void usage() {
 
   + Kernel::shape_description
 
-  + Kernel::size_description
+  + Kernel::default_size_description
+
+  + Kernel::cuboid_size_description
 
   + "By default, optimal value shrinkage based on minimisation of the Frobenius norm "
     "will be used to attenuate eigenvectors based on the estimated noise level. "
@@ -130,6 +132,7 @@ void usage() {
   + datatype_option
   + Estimator::option
   + Kernel::options
+  + subsample_option
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   // TODO Separate masks for voxels to contribute to patches vs. voxels for which to perform denoising
@@ -178,7 +181,7 @@ void usage() {
            " so a scale factor sqrt(2) applies.")
     + Argument("image").type_image_out()
   + Option("rank_input",
-           "The signal rank estimated for the denoising patch centred at each input image voxel")
+           "The signal rank estimated for each denoising patch")
     + Argument("image").type_image_out()
   + Option("rank_output",
            "An estimated rank for the output image data, accounting for multi-patch aggregation")
@@ -190,6 +193,9 @@ void usage() {
     + Argument("image").type_image_out()
   + Option("voxelcount",
            "The number of voxels that contributed to the PCA for processing of each voxel")
+    + Argument("image").type_image_out()
+  + Option("patchcount",
+           "The number of unique patches to which an image voxel contributes")
     + Argument("image").type_image_out()
   + Option("sum_aggregation",
            "The sum of aggregation weights of those patches contributing to each output voxel")
@@ -236,6 +242,7 @@ std::complex<double> operator/(const std::complex<double> &c, const float n) { r
 template <typename T>
 void run(Header &data,
          Image<bool> &mask,
+         std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
@@ -248,7 +255,7 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  Recon<T> func(data, mask, kernel, estimator, filter, aggregator, exports);
+  Recon<T> func(data, mask, subsample, kernel, estimator, filter, aggregator, exports);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
   // Rescale output if performing aggregation
   if (aggregator == aggregator_type::EXCLUSIVE)
@@ -276,7 +283,10 @@ void run() {
     check_dimensions(mask, dwi, 0, 3);
   }
 
-  auto kernel = Kernel::make_kernel(dwi);
+  auto subsample = Subsample::make(dwi);
+  assert(subsample);
+
+  auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
 
   auto estimator = Estimator::make_estimator();
@@ -289,10 +299,14 @@ void run() {
 
   aggregator_type aggregator = aggregator_type::GAUSSIAN;
   opt = get_options("aggregator");
-  if (!opt.empty())
+  if (!opt.empty()) {
     aggregator = aggregator_type(int(opt[0][0]));
+    if (aggregator == aggregator_type::EXCLUSIVE && subsample->get_factors() != std::array<ssize_t, 3>({1, 1, 1}))
+      throw Exception("Cannot combine -aggregator exclusive with subsampling; "
+                      "would result in empty output voxels");
+  }
 
-  Exports exports(dwi);
+  Exports exports(dwi, subsample->header());
   opt = get_options("noise_out");
   if (!opt.empty())
     exports.set_noise_out(opt[0][0]);
@@ -323,6 +337,9 @@ void run() {
   opt = get_options("voxelcount");
   if (!opt.empty())
     exports.set_voxelcount(opt[0][0]);
+  opt = get_options("patchcount");
+  if (!opt.empty())
+    exports.set_patchcount(opt[0][0]);
 
   opt = get_options("sum_aggregation");
   if (!opt.empty()) {
@@ -341,19 +358,19 @@ void run() {
   switch (prec) {
   case 0:
     INFO("select real float32 for processing");
-    run<float>(dwi, mask, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<float>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 1:
     INFO("select real float64 for processing");
-    run<double>(dwi, mask, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<double>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, mask, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cfloat>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, mask, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cdouble>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   }
 }

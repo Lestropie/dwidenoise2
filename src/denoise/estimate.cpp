@@ -25,11 +25,13 @@ namespace MR::Denoise {
 template <typename F>
 Estimate<F>::Estimate(const Header &header,
                       Image<bool> &mask,
+                      std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports)
     : m(header.size(3)),
       mask(mask),
+      subsample(subsample),
       kernel(kernel),
       estimator(estimator),
       X(m, kernel->estimated_size()),
@@ -39,6 +41,17 @@ Estimate<F>::Estimate(const Header &header,
       exports(exports) {}
 
 template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
+
+  // There are two options here for looping in the presence of subsampling:
+  // 1. Loop over the input image
+  //    Skip voxels that don't lie at the centre of a patch
+  //    Have to transform input image voxel indices to subsampled image voxel indices for some optional outputs
+  // 2. Loop over the subsampled image
+  //    In some use cases there may not be any image created that conforms to this voxel grid
+  //    Have to transform the subsampled voxel index into an input image voxel index for the centre of the patch
+  // Going to go with 1. for now, as for 2. may not have a suitable image over which to loop
+  if (!subsample->process(Kernel::Voxel::index_type({dwi.index(0), dwi.index(1), dwi.index(2)})))
+    return;
 
   // Process voxels in mask only
   if (mask.valid()) {
@@ -90,21 +103,29 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   const ssize_t in_rank = r - threshold.cutoff_p;
 
   // Store additional output maps if requested
+  auto ss_index = subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
   if (exports.noise_out.valid()) {
-    assign_pos_of(dwi, 0, 3).to(exports.noise_out);
+    assign_pos_of(ss_index).to(exports.noise_out);
     exports.noise_out.value() = float(std::sqrt(threshold.sigma2));
   }
   if (exports.rank_input.valid()) {
-    assign_pos_of(dwi, 0, 3).to(exports.rank_input);
+    assign_pos_of(ss_index).to(exports.rank_input);
     exports.rank_input.value() = in_rank;
   }
   if (exports.max_dist.valid()) {
-    assign_pos_of(dwi, 0, 3).to(exports.max_dist);
+    assign_pos_of(ss_index).to(exports.max_dist);
     exports.max_dist.value() = neighbourhood.max_distance;
   }
   if (exports.voxelcount.valid()) {
-    assign_pos_of(dwi, 0, 3).to(exports.voxelcount);
+    assign_pos_of(ss_index).to(exports.voxelcount);
     exports.voxelcount.value() = n;
+  }
+  if (exports.patchcount.valid()) {
+    std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
+    for (const auto &v : neighbourhood.voxels) {
+      assign_pos_of(v.index).to(exports.patchcount);
+      exports.patchcount.value() = exports.patchcount.value() + 1;
+    }
   }
 }
 

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,11 +30,13 @@ namespace MR::Denoise::Kernel {
 class Base;
 
 extern const char *const shape_description;
-extern const char *const size_description;
+extern const char *const default_size_description;
+extern const char *const cuboid_size_description;
 
 const std::vector<std::string> shapes = {"cuboid", "sphere"};
 enum class shape_type { CUBOID, SPHERE };
 extern const App::OptionGroup options;
-std::shared_ptr<Base> make_kernel(const Header &H);
+
+std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors);
 
 } // namespace MR::Denoise::Kernel

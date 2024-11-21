@@ -18,25 +18,42 @@
 
 namespace MR::Denoise::Kernel {
 
-Cuboid::Cuboid(const Header &header, const std::vector<uint32_t> &extent)
+Cuboid::Cuboid(const Header &header,
+               const std::array<ssize_t, 3> &extent,
+               const std::array<ssize_t, 3> &subsample_factors)
     : Base(header),
-      half_extent({ssize_t(extent[0] / 2), ssize_t(extent[1] / 2), ssize_t(extent[2] / 2)}),
-      size(ssize_t(extent[0]) * ssize_t(extent[1]) * ssize_t(extent[2])),
-      centre_index(size / 2) {
-  for (auto e : extent) {
-    if (!(e % 2))
-      throw Exception("Size of cubic kernel must be an odd integer");
+      size(extent[0] * extent[1] * extent[2]),
+      // Only sensible if no subsampling is performed,
+      //   and every single DWI voxel is reconstructed from a patch centred at that voxel,
+      //   with no overcomplete local PCA (aggregator == EXCLUSIVE)
+      centre_index(subsample_factors == std::array<ssize_t, 3>({1, 1, 1}) ? (size / 2) : -1) {
+  for (ssize_t axis = 0; axis != 3; ++axis) {
+    if (subsample_factors[axis] % 2) {
+      if (!(extent[axis] % 2))
+        throw Exception("For no subsampling / subsampling by an odd number, "
+                        "size of cubic kernel must be an odd integer");
+      bounding_box(axis, 0) = -extent[axis] / 2;
+      bounding_box(axis, 1) = extent[axis] / 2;
+      halfvoxel_offsets[axis] = 0.0;
+    } else {
+      if (extent[axis] % 2)
+        throw Exception("For subsampling by an even number, "
+                        "size of cubic kernel must be an even integer");
+      bounding_box(axis, 0) = 1 - extent[axis] / 2;
+      bounding_box(axis, 1) = extent[axis] / 2;
+      halfvoxel_offsets[axis] = 0.5;
+    }
   }
 }
 
 namespace {
 // patch handling at image edges
-inline ssize_t wrapindex(int p, int r, int e, int max) {
+inline ssize_t wrapindex(int p, int r, int bbminus, int bbplus, int max) {
   int rr = p + r;
   if (rr < 0)
-    rr = e - r;
+    rr = bbplus - r;
   if (rr >= max)
-    rr = (max - 1) - e - r;
+    rr = (max - 1) + bbminus - r;
   return rr;
 }
 } // namespace
@@ -45,16 +62,16 @@ Data Cuboid::operator()(const Voxel::index_type &pos) const {
   Data result(centre_index);
   Voxel::index_type voxel;
   Offset::index_type offset;
-  for (offset[2] = -half_extent[2]; offset[2] <= half_extent[2]; ++offset[2]) {
-    voxel[2] = wrapindex(pos[2], offset[2], half_extent[2], H.size(2));
-    for (offset[1] = -half_extent[1]; offset[1] <= half_extent[1]; ++offset[1]) {
-      voxel[1] = wrapindex(pos[1], offset[1], half_extent[1], H.size(1));
-      for (offset[0] = -half_extent[0]; offset[0] <= half_extent[0]; ++offset[0]) {
-        voxel[0] = wrapindex(pos[0], offset[0], half_extent[0], H.size(0));
-        // Both "pos" and "voxel" are unsigned, so beware of integer overflow
-        const default_type sq_distance = Math::pow2(std::min(pos[0] - voxel[0], voxel[0] - pos[0]) * H.spacing(0)) +
-                                         Math::pow2(std::min(pos[1] - voxel[1], voxel[1] - pos[1]) * H.spacing(1)) +
-                                         Math::pow2(std::min(pos[2] - voxel[2], voxel[2] - pos[2]) * H.spacing(2));
+  for (offset[2] = bounding_box(2, 0); offset[2] <= bounding_box(2, 1); ++offset[2]) {
+    voxel[2] = wrapindex(pos[2], offset[2], bounding_box(2, 0), bounding_box(2, 1), H.size(2));
+    for (offset[1] = bounding_box(1, 0); offset[1] <= bounding_box(1, 1); ++offset[1]) {
+      voxel[1] = wrapindex(pos[1], offset[1], bounding_box(1, 0), bounding_box(1, 1), H.size(1));
+      for (offset[0] = bounding_box(0, 0); offset[0] <= bounding_box(0, 1); ++offset[0]) {
+        voxel[0] = wrapindex(pos[0], offset[0], bounding_box(0, 0), bounding_box(0, 1), H.size(0));
+        assert(!is_out_of_bounds(H, voxel, 0, 3));
+        const default_type sq_distance = Math::pow2(pos[0] + halfvoxel_offsets[0] - voxel[0]) * H.spacing(0) +
+                                         Math::pow2(pos[1] + halfvoxel_offsets[1] - voxel[1]) * H.spacing(1) +
+                                         Math::pow2(pos[2] + halfvoxel_offsets[2] - voxel[2]) * H.spacing(2);
         result.voxels.push_back(Voxel(voxel, sq_distance));
         result.max_distance = std::max(result.max_distance, sq_distance);
       }

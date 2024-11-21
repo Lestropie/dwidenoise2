@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <vector>
+#include <array>
 
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/data.h"
@@ -27,16 +27,17 @@ namespace MR::Denoise::Kernel {
 class Cuboid : public Base {
 
 public:
-  Cuboid(const Header &header, const std::vector<uint32_t> &extent);
+  Cuboid(const Header &header, const std::array<ssize_t, 3> &extent, const std::array<ssize_t, 3> &subsample_factors);
   Cuboid(const Cuboid &) = default;
   ~Cuboid() final = default;
   Data operator()(const Voxel::index_type &pos) const override;
   ssize_t estimated_size() const override { return size; }
 
 private:
-  const Voxel::index_type half_extent;
+  Eigen::Array<int, 3, 2> bounding_box;
   const ssize_t size;
   const ssize_t centre_index;
+  std::array<default_type, 3> halfvoxel_offsets;
 };
 
 } // namespace MR::Denoise::Kernel

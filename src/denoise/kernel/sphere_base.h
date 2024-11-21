@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -29,8 +30,8 @@ namespace MR::Denoise::Kernel {
 class SphereBase : public Base {
 
 public:
-  SphereBase(const Header &voxel_grid, const default_type max_radius)
-      : Base(voxel_grid), shared(new Shared(voxel_grid, max_radius)) {}
+  SphereBase(const Header &voxel_grid, const default_type max_radius, const std::array<ssize_t, 3> &subsample_factors)
+      : Base(voxel_grid), shared(new Shared(voxel_grid, max_radius, subsample_factors)) {}
 
   SphereBase(const SphereBase &) = default;
 
@@ -40,7 +41,7 @@ protected:
   class Shared {
   public:
     using TableType = std::vector<Offset>;
-    Shared(const Header &voxel_grid, const default_type max_radius);
+    Shared(const Header &voxel_grid, const default_type max_radius, const std::array<ssize_t, 3> &subsample_factors);
     TableType::const_iterator begin() const { return data.begin(); }
     TableType::const_iterator end() const { return data.end(); }
 

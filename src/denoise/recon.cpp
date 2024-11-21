@@ -23,21 +23,27 @@ namespace MR::Denoise {
 template <typename F>
 Recon<F>::Recon(const Header &header,
                 Image<bool> &mask,
+                std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports)
-    : Estimate<F>(header, mask, kernel, estimator, exports),
+    : Estimate<F>(header, mask, subsample, kernel, estimator, exports),
       filter(filter),
       aggregator(aggregator),
-      // FWHM = 2 x cube root of voxel spacings
-      gaussian_multiplier(-std::log(2.0) /
-                          Math::pow2(std::cbrt(header.spacing(0) * header.spacing(1) * header.spacing(2)))),
+      // FWHM = 2 x cube root of spacings between kernels
+      gaussian_multiplier(-std::log(2.0) /                                                           //
+                          Math::pow2(std::cbrt(subsample->get_factors()[0] * header.spacing(0)       //
+                                               * subsample->get_factors()[1] * header.spacing(1)     //
+                                               * subsample->get_factors()[2] * header.spacing(2)))), //
       w(std::min(Estimate<F>::m, kernel->estimated_size())),
       Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
 
 template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
+
+  if (!Estimate<F>::subsample->process({dwi.index(0), dwi.index(1), dwi.index(2)}))
+    return;
 
   Estimate<F>::operator()(dwi);
 
@@ -66,25 +72,33 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     sum_weights = double(out_rank);
     break;
   case filter_type::FROBENIUS: {
-    const double beta = r / q;
-    const double transition = 1.0 + std::sqrt(beta);
-    double clam = 0.0;
-    for (ssize_t i = 0; i != r; ++i) {
-      const double lam = std::max(Estimate<F>::s[i], 0.0) / q;
-      clam += lam;
-      const double y = clam / (Estimate<F>::threshold.sigma2 * (i + 1));
-      double nu = 0.0;
-      if (y > transition) {
-        nu = std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y;
-        ++out_rank;
+    if (Estimate<F>::threshold.sigma2 == 0.0) {
+      w.head(r).setOnes();
+      out_rank = r;
+      sum_weights = double(r);
+    } else {
+      const double beta = r / q;
+      const double transition = 1.0 + std::sqrt(beta);
+      double clam = 0.0;
+      for (ssize_t i = 0; i != r; ++i) {
+        const double lam = std::max(Estimate<F>::s[i], 0.0) / q;
+        clam += lam;
+        const double y = clam / (Estimate<F>::threshold.sigma2 * (i + 1));
+        double nu = 0.0;
+        if (y > transition) {
+          nu = std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y;
+          ++out_rank;
+        }
+        w[i] = clam > 0.0 ? (nu / y) : 0.0;
+        sum_weights += w[i];
       }
-      w[i] = nu / y;
-      sum_weights += w[i];
     }
   } break;
   default:
     assert(false);
   }
+  assert(w.head(r).allFinite());
+  assert(std::isfinite(sum_weights));
 
   // recombine data using only eigenvectors above threshold
   // If only the data computed when this voxel was the centre of the patch
@@ -93,7 +107,6 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   //   if however the result from this patch is to contribute to the synthesized image
   //   for all voxels that were utilised within this patch,
   //   then we need to instead compute the full projection
-  // TODO Use a new data member local to Recon<>
   switch (aggregator) {
   case aggregator_type::EXCLUSIVE:
     if (Estimate<F>::m <= n)
@@ -108,6 +121,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
           (Estimate<F>::eig.eigenvectors() *                                                          //
            (w.head(r).cast<F>().matrix().asDiagonal() *                                               //
             Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::neighbourhood.centre_index))); //
+    assert(Xr.allFinite());
     assign_pos_of(dwi).to(out);
     out.row(3) = Xr.col(0);
     if (Estimate<F>::exports.sum_aggregation.valid()) {
@@ -120,18 +134,23 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     }
     break;
   default: {
-    if (Estimate<F>::m <= n)
-      Xr.noalias() =                                                      //
-          Estimate<F>::eig.eigenvectors() *                               //
-          (w.head(r).cast<F>().matrix().asDiagonal() *                    //
-           (Estimate<F>::eig.eigenvectors().adjoint() * Estimate<F>::X)); //
-    else
+    if (in_rank == r) {
+      Xr.leftCols(n).noalias() = Estimate<F>::X.leftCols(n);
+    } else if (Estimate<F>::m <= n) {
+      Xr.leftCols(n).noalias() =                        //
+          Estimate<F>::eig.eigenvectors() *             //
+          (w.head(r).cast<F>().matrix().asDiagonal() *  //
+           (Estimate<F>::eig.eigenvectors().adjoint() * //
+            Estimate<F>::X.leftCols(n)));               //
+    } else {
       Xr.leftCols(n).noalias() =                         //
           Estimate<F>::X.leftCols(n) *                   //
           (Estimate<F>::eig.eigenvectors() *             //
            (w.head(r).cast<F>().matrix().asDiagonal() *  //
             Estimate<F>::eig.eigenvectors().adjoint())); //
-    std::lock_guard<std::mutex> lock(mutex_aggregator);
+    }
+    assert(Xr.leftCols(n).allFinite());
+    std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
     for (size_t voxel_index = 0; voxel_index != Estimate<F>::neighbourhood.voxels.size(); ++voxel_index) {
       assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index, 0, 3).to(out);
       assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index).to(Estimate<F>::exports.sum_aggregation);
@@ -163,8 +182,9 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   } break;
   }
 
+  auto ss_index = Estimate<F>::subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
   if (Estimate<F>::exports.sum_optshrink.valid()) {
-    assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.sum_optshrink);
+    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.sum_optshrink);
     Estimate<F>::exports.sum_optshrink.value() = sum_weights;
   }
 }
