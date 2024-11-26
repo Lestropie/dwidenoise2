@@ -21,7 +21,7 @@ Usage
 Description
 -----------
 
-DWI data noise map estimation by exploiting data redundancy in the PCA domain using the prior knowledge that the eigenspectrum of random covariance matrices is described by the universal Marchenko-Pastur (MP) distribution. Fitting the MP distribution to the spectrum of patch-wise signal matrices hence provides an estimator of the noise level 'sigma'.
+DWI data noise map estimation by interrogating data redundancy in the PCA domain using the prior knowledge that the eigenspectrum of random covariance matrices is described by the universal Marchenko-Pastur (MP) distribution. Fitting the MP distribution to the spectrum of patch-wise signal matrices hence provides an estimator of the noise level 'sigma'.
 
 Unlike the MRtrix3 command dwidenoise, this command does not generate a denoised version of the input image series; its primary output is instead a map of the estimated noise level. While this can also be obtained from the dwidenoise command using option -noise_out, using instead the dwi2noise command gives the ability to obtain a noise map to which filtering can be applied, which can then be utilised for the actual image series denoising, without generating an unwanted intermiedate denoised image series.
 
@@ -29,9 +29,13 @@ Important note: noise level estimation should only be performed as the first ste
 
 Note that on complex input data, the output will be the total noise level across real and imaginary channels, so a scale factor sqrt(2) applies.
 
+If the input data are of complex type, then a linear phase term will be removed from each k-space prior to PCA. In the absence of metadata indicating otherwise, it is inferred that the first two axes correspond to acquired slices, and different slices / volumes will be demodulated individually; this behaviour can be modified using the -demod_axes option.
+
 The sliding spatial window behaves differently at the edges of the image FoV depending on the shape / size selected for that window. The default behaviour is to use a spherical kernel centred at the voxel of interest, whose size is some multiple of the number of input volumes; where some such voxels lie outside of the image FoV, the radius of the kernel will be increased until the requisite number of voxels are used. For a spherical kernel of a fixed radius, no such expansion will occur, and so for voxels near the image edge a reduced number of voxels will be present in the kernel. For a cuboid kernel, the centre of the kernel will be offset from the voxel being processed such that the entire volume of the kernel resides within the image FoV.
 
 The size of the default spherical kernel is set to select a number of voxels that is 1.0 / 0.85 ~ 1.18 times the number of volumes in the input series. If a cuboid kernel is requested, but the -extent option is not specified, the command will select the smallest isotropic patch size that exceeds the number of DW images in the input data; e.g., 5x5x5 for data with <= 125 DWI volumes, 7x7x7 for data with <= 343 DWI volumes, etc.
+
+Permissible sizes for the cuboid kernel depend on the subsampling factor. If no subsampling is performed, or the subsampling factor is odd, then the extent(s) of the kernel must be odd, such that a unique voxel lies at the very centre of each kernel. If however an even subsampling factor is used, then the extent(s) of the kernel must be even, reflecting the fact that it is a voxel corner that resides at the centre of the kernel.In either case, if the extent is specified manually, the user can either provide a single integer---which will determine the number of voxels in the kernel across all three spatial axes---or a comma-separated list of three integers,individually defining the number of voxels in the kernel for all three spatial axes.
 
 Options
 -------
@@ -44,6 +48,7 @@ Options for modifying PCA computations
 -  **-estimator algorithm** Select the noise level estimator (default = Exp2), either:  |br|
    * Exp1: the original estimator used in Veraart et al. (2016);  |br|
    * Exp2: the improved estimator introduced in Cordero-Grande et al. (2019);  |br|
+   * Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014);  |br|
    * MRM2022: the alternative estimator introduced in Olesen et al. (2022).
 
 Options for controlling the sliding spatial window kernel
@@ -55,7 +60,16 @@ Options for controlling the sliding spatial window kernel
 
 -  **-radius_ratio value** Set the spherical kernel size as a ratio of number of voxels to number of input volumes (default: 1.0/0.85 ~= 1.18)
 
--  **-extent window** Set the patch size of the cuboid kernel; can be either a single odd integer or a comma-separated triplet of odd integers
+-  **-extent window** Set the patch size of the cuboid kernel; can be either a single integer or a comma-separated triplet of integers (see Description)
+
+-  **-subsample factor** reduce the number of PCA kernels relative to the number of image voxels; can provide either an integer subsampling factor, or a comma-separated list of three factors;default: 2
+
+Options for phase demodulation of complex data
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+-  **-nodemod** disable phase demodulation
+
+-  **-demod_axes axes** comma-separated list of axis indices along which FFT can be applied for phase demodulation
 
 Options for exporting additional data regarding PCA behaviour
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -68,6 +82,8 @@ Options for debugging the operation of sliding window kernels
 -  **-max_dist image** The maximum distance between a voxel and another voxel that was included in the local denoising patch
 
 -  **-voxelcount image** The number of voxels that contributed to the PCA for processing of each voxel
+
+-  **-patchcount image** The number of unique patches to which an image voxel contributes
 
 Standard options
 ^^^^^^^^^^^^^^^^
@@ -96,6 +112,8 @@ Veraart, J.; Fieremans, E. & Novikov, D.S. Diffusion MRI noise mapping using ran
 Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. Complex diffusion-weighted image estimation via matrix recovery under general noise models. NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039
 
 * If using -estimator mrm2022: Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. Tensor denoising of multidimensional MRI data. Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172
+
+* If using -estimator med: Gavish, M.; Donoho, D.L.The Optimal Hard Threshold for Singular Values is 4/sqrt(3). IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053.
 
 Tournier, J.-D.; Smith, R. E.; Raffelt, D.; Tabbara, R.; Dhollander, T.; Pietsch, M.; Christiaens, D.; Jeurissen, B.; Yeh, C.-H. & Connelly, A. MRtrix3: A fast, flexible and open software framework for medical image processing and visualisation. NeuroImage, 2019, 202, 116137
 

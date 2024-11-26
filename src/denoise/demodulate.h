@@ -14,19 +14,19 @@
  * For more details, see http://www.mrtrix.org/.
  */
 
-#include "denoise/denoise.h"
+#pragma once
 
-#include "axes.h"
+#include <vector>
+
+#include "app.h"
+#include "header.h"
 
 namespace MR::Denoise {
 
-using namespace App;
+extern const char *const demodulation_description;
 
-const Option datatype_option = Option("datatype",
-                                      "Datatype for the eigenvalue decomposition"
-                                      " (single or double precision). "
-                                      "For complex input data,"
-                                      " this will select complex float32 or complex float64 datatypes.") +
-                               Argument("float32/float64").type_choice(dtypes);
+extern const App::OptionGroup demodulation_options;
+
+std::vector<size_t> get_demodulation_axes(const Header &);
 
 } // namespace MR::Denoise
