@@ -51,6 +51,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   const ssize_t n = Estimate<F>::neighbourhood.voxels.size();
   const ssize_t r = std::min(Estimate<F>::m, n);
   const ssize_t q = std::max(Estimate<F>::m, n);
+  const double beta = double(r) / double(q);
   const ssize_t in_rank = r - Estimate<F>::threshold.cutoff_p;
 
   if (r > w.size())
@@ -66,19 +67,14 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   double sum_weights = 0.0;
   ssize_t out_rank = 0;
   switch (filter) {
-  case filter_type::TRUNCATE:
-    out_rank = in_rank;
-    w.head(Estimate<F>::threshold.cutoff_p).setZero();
-    w.segment(Estimate<F>::threshold.cutoff_p, in_rank).setOnes();
-    sum_weights = double(out_rank);
-    break;
-  case filter_type::FROBENIUS: {
+  case filter_type::OPTSHRINK: {
     if (Estimate<F>::threshold.sigma2 == 0.0) {
       w.head(r).setOnes();
       out_rank = r;
       sum_weights = double(r);
     } else {
-      const double beta = r / q;
+      // TODO I think this is wrong;
+      //   should be just based on a ratio of the eigenvalue to sigma?
       const double transition = 1.0 + std::sqrt(beta);
       double clam = 0.0;
       for (ssize_t i = 0; i != r; ++i) {
@@ -95,6 +91,29 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       }
     }
   } break;
+  case filter_type::OPTTHRESH: {
+    const std::map<double, double>::const_iterator it = beta2lambdastar.find(beta);
+    const double lambda_star =
+        it == beta2lambdastar.end()
+            ? sqrt(2.0 * (beta + 1.0) + ((8.0 * beta) / (beta + 1.0 + std::sqrt(Math::pow2(beta) + 14.0 * beta + 1.0))))
+            : it->second;
+    const double tau_star = lambda_star * std::sqrt(q) * std::sqrt(Estimate<F>::threshold.sigma2);
+    for (ssize_t i = 0; i != r; ++i) {
+      if (Estimate<F>::s[i] >= tau_star) {
+        w[i] = 1.0;
+        ++out_rank;
+      } else {
+        w[i] = 0.0;
+      }
+    }
+    sum_weights = out_rank;
+  } break;
+  case filter_type::TRUNCATE:
+    out_rank = in_rank;
+    w.head(Estimate<F>::threshold.cutoff_p).setZero();
+    w.segment(Estimate<F>::threshold.cutoff_p, in_rank).setOnes();
+    sum_weights = double(out_rank);
+    break;
   default:
     assert(false);
   }

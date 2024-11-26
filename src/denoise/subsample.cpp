@@ -23,7 +23,7 @@ const App::Option subsample_option =
     App::Option("subsample",
                 "reduce the number of PCA kernels relative to the number of image voxels; "
                 "can provide either an integer subsampling factor, "
-                "or a comma-separated list of three factors;"
+                "or a comma-separated list of three factors; "
                 "default: 2") +
     App::Argument("factor").type_integer(1);
 

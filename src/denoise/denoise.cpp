@@ -17,6 +17,8 @@
 
 #include "denoise/denoise.h"
 
+#include "axes.h"
+
 namespace MR::Denoise {
 
 using namespace App;

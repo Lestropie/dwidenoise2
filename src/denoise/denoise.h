@@ -18,8 +18,10 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <vector>
 
 #include "app.h"
+#include "header.h"
 
 namespace MR::Denoise {
 
@@ -29,8 +31,8 @@ using vector_type = Eigen::Array<double, Eigen::Dynamic, 1>;
 const std::vector<std::string> dtypes = {"float32", "float64"};
 extern const App::Option datatype_option;
 
-const std::vector<std::string> filters = {"truncate", "frobenius"};
-enum class filter_type { TRUNCATE, FROBENIUS };
+const std::vector<std::string> filters = {"optshrink", "optthresh", "truncate"};
+enum class filter_type { OPTSHRINK, OPTTHRESH, TRUNCATE };
 
 const std::vector<std::string> aggregators = {"exclusive", "gaussian", "invl0", "rank", "uniform"};
 enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };

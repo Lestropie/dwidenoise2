@@ -101,7 +101,6 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
 
   // Marchenko-Pastur optimal threshold determination
   threshold = (*estimator)(s, m, n);
-  const ssize_t in_rank = r - threshold.cutoff_p;
 
   // Store additional output maps if requested
   auto ss_index = subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
@@ -111,7 +110,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   }
   if (exports.rank_input.valid()) {
     assign_pos_of(ss_index).to(exports.rank_input);
-    exports.rank_input.value() = in_rank;
+    exports.rank_input.value() = r - threshold.cutoff_p;
   }
   if (exports.max_dist.valid()) {
     assign_pos_of(ss_index).to(exports.max_dist);

@@ -19,6 +19,7 @@
 
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/exp.h"
+#include "denoise/estimator/med.h"
 #include "denoise/estimator/mrm2022.h"
 
 namespace MR::Denoise::Estimator {
@@ -31,6 +32,7 @@ const Option option = Option("estimator",
                              " either: \n"
                              "* Exp1: the original estimator used in Veraart et al. (2016); \n"
                              "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
+                             "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
                              "* MRM2022: the alternative estimator introduced in Olesen et al. (2022).") +
                       Argument("algorithm").type_choice(estimators);
 
@@ -42,6 +44,9 @@ std::shared_ptr<Base> make_estimator() {
     return std::make_shared<Exp<1>>();
   case estimator_type::EXP2:
     return std::make_shared<Exp<2>>();
+    break;
+  case estimator_type::MED:
+    return std::make_shared<Med>();
     break;
   case estimator_type::MRM2022:
     return std::make_shared<MRM2022>();

@@ -18,7 +18,9 @@
 #include <memory>
 
 #include "algo/threaded_loop.h"
+#include "axes.h"
 #include "command.h"
+#include "denoise/demodulate.h"
 #include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
@@ -26,6 +28,7 @@
 #include "denoise/kernel/kernel.h"
 #include "denoise/subsample.h"
 #include "exception.h"
+#include "filter/demodulate.h"
 
 using namespace MR;
 using namespace App;
@@ -60,6 +63,8 @@ void usage() {
   + "Note that on complex input data,"
     " the output will be the total noise level across real and imaginary channels,"
     " so a scale factor sqrt(2) applies."
+
+  + demodulation_description
 
   + Kernel::shape_description
 
@@ -98,7 +103,12 @@ void usage() {
   + "* If using -estimator mrm2022: "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
-    "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172";
+    "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172"
+
+  + "* If using -estimator med: "
+    "Gavish, M.; Donoho, D.L."
+    "The Optimal Hard Threshold for Singular Values is 4/sqrt(3). "
+    "IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053.";
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image").type_image_in()
@@ -110,6 +120,8 @@ void usage() {
   + Estimator::option
   + Kernel::options
   + subsample_option
+  + demodulation_options
+
 
   // TODO Implement mask option
   // Note that behaviour of -mask for dwi2noise may be different to that of dwidenoise
@@ -170,11 +182,33 @@ void run(Header &data,
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input);
 }
 
+template <typename T>
+void run(Header &data,
+         const std::vector<size_t> &demodulation_axes,
+         std::shared_ptr<Subsample> subsample,
+         std::shared_ptr<Kernel::Base> kernel,
+         std::shared_ptr<Estimator::Base> estimator,
+         Exports &exports) {
+  if (demodulation_axes.empty()) {
+    run<T>(data, subsample, kernel, estimator, exports);
+    return;
+  }
+  auto input = data.get_image<T>();
+  auto input_demod = Image<T>::scratch(data, "Phase-demodulated version of \"" + data.name() + "\"");
+  {
+    Filter::Demodulate demodulator(input, demodulation_axes);
+    demodulator(input, input_demod);
+  }
+  Image<bool> mask; // unused
+  Estimate<T> func(data, mask, subsample, kernel, estimator, exports);
+  ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input_demod);
+}
+
 void run() {
   auto dwi = Header::open(argument[0]);
-
   if (dwi.ndim() != 4 || dwi.size(3) <= 1)
     throw Exception("input image must be 4-dimensional");
+  bool complex = dwi.datatype().is_complex();
 
   auto subsample = Subsample::make(dwi);
   assert(subsample);
@@ -200,25 +234,29 @@ void run() {
   if (!opt.empty())
     exports.set_patchcount(opt[0][0]);
 
+  const std::vector<size_t> demodulation_axes = get_demodulation_axes(dwi);
+
   int prec = get_option_value("datatype", 0); // default: single precision
-  if (dwi.datatype().is_complex())
+  if (complex)
     prec += 2; // support complex input data
   switch (prec) {
   case 0:
+    assert(demodulation_axes.empty());
     INFO("select real float32 for processing");
     run<float>(dwi, subsample, kernel, estimator, exports);
     break;
   case 1:
+    assert(demodulation_axes.empty());
     INFO("select real float64 for processing");
     run<double>(dwi, subsample, kernel, estimator, exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, subsample, kernel, estimator, exports);
+    run<cfloat>(dwi, demodulation_axes, subsample, kernel, estimator, exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, subsample, kernel, estimator, exports);
+    run<cdouble>(dwi, demodulation_axes, subsample, kernel, estimator, exports);
     break;
   }
 }

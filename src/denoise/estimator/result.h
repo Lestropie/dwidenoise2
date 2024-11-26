@@ -21,7 +21,7 @@ namespace MR::Denoise::Estimator {
 
 class Result {
 public:
-  Result() : cutoff_p(0), sigma2(0.0) {}
+  Result() : cutoff_p(-1), sigma2(std::numeric_limits<double>::signaling_NaN()) {}
   ssize_t cutoff_p;
   double sigma2;
 };

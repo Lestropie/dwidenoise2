@@ -17,19 +17,17 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
 #include <vector>
 
 #include "app.h"
+#include "header.h"
 
-namespace MR::Denoise::Estimator {
+namespace MR::Denoise {
 
-class Base;
+extern const char *const demodulation_description;
 
-extern const App::Option option;
-const std::vector<std::string> estimators = {"exp1", "exp2", "med", "mrm2022"};
-enum class estimator_type { EXP1, EXP2, MED, MRM2022 };
-std::shared_ptr<Base> make_estimator();
+extern const App::OptionGroup demodulation_options;
 
-} // namespace MR::Denoise::Estimator
+std::vector<size_t> get_demodulation_axes(const Header &);
+
+} // namespace MR::Denoise

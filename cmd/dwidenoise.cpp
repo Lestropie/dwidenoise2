@@ -18,12 +18,15 @@
 #include <string>
 
 #include "command.h"
+#include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
+#include "stride.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 
+#include "denoise/demodulate.h"
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/estimator.h"
@@ -66,6 +69,8 @@ void usage() {
     " If available, including the MRI phase data can reduce such non-Gaussian biases,"
     " and the command now supports complex input data."
 
+  + demodulation_description
+
   + Kernel::shape_description
 
   + Kernel::default_size_description
@@ -77,6 +82,8 @@ void usage() {
     "Hard truncation of sub-threshold components and inclusion of supra-threshold components"
     "---which was the behaviour of the dwidenoise command in version 3.0.x---"
     "can be activated using -filter truncate."
+    "Alternatively, optimal truncation as described in Gavish and Donoho 2014 "
+    "can be utilised by specifying -filter optthresh."
 
   + "-aggregation exclusive corresponds to the behaviour of the dwidenoise command in version 3.0.x, "
     "where the output intensities for a given image voxel are determined exclusively "
@@ -137,7 +144,12 @@ void usage() {
   + "* If using anything other than -aggregation exclusive: "
     "Manjon, J.V.; Coupe, P.; Concha, L.; Buades, A.; D. Collins, D.L.; Robles, M. "
     "Diffusion Weighted Image Denoising Using Overcomplete Local PCA. "
-    "PLoS ONE, 2013, 8(9), e73021";
+    "PLoS ONE, 2013, 8(9), e73021"
+
+  + "* If using -estimator med or -filter optthresh: "
+    "Gavish, M.; Donoho, D.L."
+    "The Optimal Hard Threshold for Singular Values is 4/sqrt(3). "
+    "IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053.";
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image.").type_image_in()
@@ -149,6 +161,7 @@ void usage() {
   + Estimator::option
   + Kernel::options
   + subsample_option
+  + demodulation_options
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   // TODO Separate masks for voxels to contribute to patches vs. voxels for which to perform denoising
@@ -159,7 +172,7 @@ void usage() {
            "Modulate how component contributions are filtered "
            "based on the cumulative eigenvalues relative to the noise level; "
            "options are: " + join(filters, ",") + "; "
-           "default: frobenius (Optimal Shrinkage based on minimisation of the Frobenius norm)")
+           "default: optshrink (Optimal Shrinkage based on minimisation of the Frobenius norm)")
     + Argument("choice").type_choice(filters)
   + Option("aggregator",
            "Select how the outcomes of multiple PCA outcomes centred at different voxels "
@@ -286,6 +299,53 @@ void run(Header &data,
   }
 }
 
+template <typename T>
+void run(Header &data,
+         Image<bool> &mask,
+         const std::vector<size_t> &demodulation_axes,
+         std::shared_ptr<Subsample> subsample,
+         std::shared_ptr<Kernel::Base> kernel,
+         std::shared_ptr<Estimator::Base> estimator,
+         filter_type filter,
+         aggregator_type aggregator,
+         const std::string &output_name,
+         Exports &exports) {
+  if (demodulation_axes.empty()) {
+    run<T>(data, mask, subsample, kernel, estimator, filter, aggregator, output_name, exports);
+    return;
+  }
+  auto input = data.get_image<T>();
+  // generate scratch version of DWI with phase demodulation
+  Header H_scratch(data);
+  Stride::set(H_scratch, Stride::contiguous_along_axis(3));
+  H_scratch.datatype() = DataType::from<T>();
+  H_scratch.datatype().set_byte_order_native();
+  auto input_demodulated = Image<T>::scratch(H_scratch, "Phase-demodulated version of input DWI");
+  Filter::Demodulate demodulate(input, demodulation_axes);
+  demodulate(input, input_demodulated, false);
+  input = Image<T>(); // free memory
+  // create output
+  Header header(data);
+  header.datatype() = DataType::from<T>();
+  auto output = Image<T>::create(output_name, header);
+  // run
+  Recon<T> func(data, mask, subsample, kernel, estimator, filter, aggregator, exports);
+  ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input_demodulated, output);
+  // Re-apply phase ramps that were previously demodulated
+  demodulate(output, true);
+  // Rescale output if performing aggregation
+  if (aggregator == aggregator_type::EXCLUSIVE)
+    return;
+  for (auto l_voxel = Loop(exports.sum_aggregation)(output, exports.sum_aggregation); l_voxel; ++l_voxel) {
+    for (auto l_volume = Loop(3)(output); l_volume; ++l_volume)
+      output.value() /= float(exports.sum_aggregation.value());
+  }
+  if (exports.rank_output.valid()) {
+    for (auto l = Loop(exports.sum_aggregation)(exports.rank_output, exports.sum_aggregation); l; ++l)
+      exports.rank_output.value() /= exports.sum_aggregation.value();
+  }
+}
+
 void run() {
   auto dwi = Header::open(argument[0]);
 
@@ -308,7 +368,7 @@ void run() {
   auto estimator = Estimator::make_estimator();
   assert(estimator);
 
-  filter_type filter = filter_type::FROBENIUS;
+  filter_type filter = filter_type::OPTSHRINK;
   opt = get_options("filter");
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
@@ -368,25 +428,29 @@ void run() {
     exports.set_sum_aggregation("");
   }
 
+  const std::vector<size_t> demodulation_axes = get_demodulation_axes(dwi);
+
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())
     prec += 2; // support complex input data
   switch (prec) {
   case 0:
+    assert(demodulation_axes.empty());
     INFO("select real float32 for processing");
     run<float>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 1:
+    assert(demodulation_axes.empty());
     INFO("select real float64 for processing");
     run<double>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cfloat>(dwi, mask, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cdouble>(dwi, mask, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   }
 }
