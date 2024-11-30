@@ -50,6 +50,7 @@ public:
       lamplusprev = sigmasq * sigmasq_to_lamplus;
       result.cutoff_p = i;
       result.sigma2 = sigmasq;
+      result.lamplus = lamplusprev;
     }
     return result;
   }

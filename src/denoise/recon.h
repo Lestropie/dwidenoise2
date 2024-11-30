@@ -17,6 +17,7 @@
 #pragma once
 
 #include <limits>
+#include <map>
 #include <memory>
 
 #include <Eigen/Dense>
@@ -53,6 +54,7 @@ protected:
   // Reusable memory
   vector_type w;
   typename Estimate<F>::MatrixType Xr;
+  std::map<double, double> beta2lambdastar;
 };
 
 template class Recon<float>;
