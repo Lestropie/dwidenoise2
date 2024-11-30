@@ -54,6 +54,7 @@ public:
       if (sigsq2 < sigsq1) {
         result.sigma2 = sigsq1;
         result.cutoff_p = p + 1;
+        result.lamplus = lam;
       }
     }
     return result;

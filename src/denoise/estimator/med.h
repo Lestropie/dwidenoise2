@@ -31,11 +31,17 @@ public:
   Med() = default;
   Result operator()(const eigenvalues_type &s, const ssize_t m, const ssize_t n) const final {
     Result result;
-    const ssize_t beta = double(std::min(m, n)) / double(std::max(m, n));
+    const ssize_t r = std::min(m, n);
+    const ssize_t q = std::max(m, n);
+    const ssize_t beta = double(r) / double(q);
     // Eigenvalues should already be sorted;
     //   no need to execute a sort for median calculation
     const double ymed = s.size() & 1 ? s[s.size() / 2] : (0.5 * (s[s.size() / 2 - 1] + s[s.size() / 2]));
-    result.sigma2 = Math::pow2(ymed) / (std::max(m, n) * mu(beta));
+    result.lamplus = ymed / (q * mu(beta));
+    // Mechanism intrinsically assumes half rank
+    result.cutoff_p = r / 2;
+    // Calculate noise level based on MP distribution
+    result.sigma2 = 2.0 * s.head(s.size() / 2).sum() / (q * s.size());
     return result;
   }
 
@@ -49,8 +55,10 @@ protected:
   // Third-order polynomial fit to data generated using Matlab code supplementary to Gavish and Donohue 2014
   double mu(const double beta) const {
     const double betasq = Math::pow2(beta);
-    return ((-0.005882794526340723 * betasq * beta) - (0.007508551496715836 * betasq) - (0.3338169644754149 * beta) +
-            1.0);
+    return ((-0.005882794526340723 * betasq * beta) //
+            - (0.007508551496715836 * betasq)       //
+            - (0.3338169644754149 * beta)           //
+            + 1.0);                                 //
   }
 };
 

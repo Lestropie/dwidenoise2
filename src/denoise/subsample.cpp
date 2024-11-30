@@ -93,16 +93,16 @@ Header Subsample::make_subsample_header() const {
   H.reset_intensity_scaling();
   H.datatype() = DataType::Float32;
   H.datatype().set_byte_order_native();
+  std::array<double, 3> halfvoxel_offsets;
   for (ssize_t axis = 0; axis != 3; ++axis) {
     H.size(axis) = size[axis];
     H.spacing(axis) *= factors[axis];
+    halfvoxel_offsets[axis] = factors[axis] & 1 ? 0.0 : 0.5;
   }
-  // Need to move the transform origin from voxel [0,0,0] in the input image
-  //   to voxel [0,0,0] in the subsampled voxel grid;
-  //   this is just a voxel2scanner transformation of "origin"
-  H.transform().translation() = H.transform() * Eigen::Matrix<default_type, 3, 1>({origin[0] * H_in.spacing(0),   //
-                                                                                   origin[1] * H_in.spacing(1),   //
-                                                                                   origin[2] * H_in.spacing(2)}); //
+  H.transform().translation() =
+      H_in.transform() * Eigen::Matrix<default_type, 3, 1>({(origin[0] + halfvoxel_offsets[0]) * H_in.spacing(0),   //
+                                                            (origin[1] + halfvoxel_offsets[1]) * H_in.spacing(1),   //
+                                                            (origin[2] + halfvoxel_offsets[2]) * H_in.spacing(2)}); //
   return H;
 }
 

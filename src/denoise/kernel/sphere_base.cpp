@@ -47,9 +47,9 @@ SphereBase::Shared::Shared(const Header &voxel_grid,
     for (offset[1] = bounding_box(1, 0); offset[1] <= bounding_box(1, 1); ++offset[1]) {
       for (offset[0] = bounding_box(0, 0); offset[0] <= bounding_box(0, 1); ++offset[0]) {
         const default_type squared_distance =
-            Math::pow2((offset[0] + halfvoxel_offsets[0]) * voxel_grid.spacing(0))    //
-            + Math::pow2((offset[1] + halfvoxel_offsets[1]) * voxel_grid.spacing(1))  //
-            + Math::pow2((offset[2] + halfvoxel_offsets[2]) * voxel_grid.spacing(2)); //
+            Math::pow2((offset[0] - halfvoxel_offsets[0]) * voxel_grid.spacing(0))    //
+            + Math::pow2((offset[1] - halfvoxel_offsets[1]) * voxel_grid.spacing(1))  //
+            + Math::pow2((offset[2] - halfvoxel_offsets[2]) * voxel_grid.spacing(2)); //
         if (squared_distance <= max_radius_sq)
           data.emplace_back(Offset(offset, squared_distance));
       }

@@ -132,10 +132,10 @@ void usage() {
     + Argument("image").type_image_out()
   + OptionGroup("Options for debugging the operation of sliding window kernels")
   + Option("max_dist",
-           "The maximum distance between a voxel and another voxel that was included in the local denoising patch")
+           "The maximum distance between the centre of the patch and a voxel that was included within that patch")
     + Argument("image").type_image_out()
   + Option("voxelcount",
-           "The number of voxels that contributed to the PCA for processing of each voxel")
+           "The number of voxels that contributed to the PCA for processing of each patch")
     + Argument("image").type_image_out()
   + Option("patchcount",
            "The number of unique patches to which an image voxel contributes")

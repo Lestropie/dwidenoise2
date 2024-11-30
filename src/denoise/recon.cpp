@@ -66,56 +66,61 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   // Generate weights vector
   double sum_weights = 0.0;
   ssize_t out_rank = 0;
-  switch (filter) {
-  case filter_type::OPTSHRINK: {
-    if (Estimate<F>::threshold.sigma2 == 0.0) {
-      w.head(r).setOnes();
-      out_rank = r;
-      sum_weights = double(r);
-    } else {
-      // TODO I think this is wrong;
-      //   should be just based on a ratio of the eigenvalue to sigma?
+  if (Estimate<F>::threshold.sigma2 == 0.0 || !std::isfinite(Estimate<F>::threshold.sigma2)) {
+    w.head(r).setOnes();
+    out_rank = r;
+    sum_weights = double(r);
+  } else {
+    switch (filter) {
+    case filter_type::OPTSHRINK: {
       const double transition = 1.0 + std::sqrt(beta);
-      double clam = 0.0;
       for (ssize_t i = 0; i != r; ++i) {
         const double lam = std::max(Estimate<F>::s[i], 0.0) / q;
-        clam += lam;
-        const double y = clam / (Estimate<F>::threshold.sigma2 * (i + 1));
+        // TODO Should this be based on the noise level,
+        //   or on the estimated upper bound of the MP distribution?
+        // If based on upper bound,
+        //   there will be an issue with importing this information from a pre-estimated noise map
+        const double y = lam / Estimate<F>::threshold.lamplus;
         double nu = 0.0;
         if (y > transition) {
           nu = std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y;
           ++out_rank;
         }
-        w[i] = clam > 0.0 ? (nu / y) : 0.0;
+        w[i] = lam > 0.0 ? (nu / y) : 0.0;
+        assert(w[i] >= 0.0 && w[i] <= 1.0);
         sum_weights += w[i];
       }
-    }
-  } break;
-  case filter_type::OPTTHRESH: {
-    const std::map<double, double>::const_iterator it = beta2lambdastar.find(beta);
-    const double lambda_star =
-        it == beta2lambdastar.end()
-            ? sqrt(2.0 * (beta + 1.0) + ((8.0 * beta) / (beta + 1.0 + std::sqrt(Math::pow2(beta) + 14.0 * beta + 1.0))))
-            : it->second;
-    const double tau_star = lambda_star * std::sqrt(q) * std::sqrt(Estimate<F>::threshold.sigma2);
-    for (ssize_t i = 0; i != r; ++i) {
-      if (Estimate<F>::s[i] >= tau_star) {
-        w[i] = 1.0;
-        ++out_rank;
+    } break;
+    case filter_type::OPTTHRESH: {
+      const std::map<double, double>::const_iterator it = beta2lambdastar.find(beta);
+      double lambda_star = 0.0;
+      if (it == beta2lambdastar.end()) {
+        lambda_star =
+            sqrt(2.0 * (beta + 1.0) + ((8.0 * beta) / (beta + 1.0 + std::sqrt(Math::pow2(beta) + 14.0 * beta + 1.0))));
+        beta2lambdastar[beta] = lambda_star;
       } else {
-        w[i] = 0.0;
+        lambda_star = it->second;
       }
+      const double tau_star_sq = Math::pow2(lambda_star) * q * Estimate<F>::threshold.sigma2;
+      for (ssize_t i = 0; i != r; ++i) {
+        if (Estimate<F>::s[i] >= tau_star_sq) {
+          w[i] = 1.0;
+          ++out_rank;
+        } else {
+          w[i] = 0.0;
+        }
+      }
+      sum_weights = out_rank;
+    } break;
+    case filter_type::TRUNCATE:
+      out_rank = in_rank;
+      w.head(Estimate<F>::threshold.cutoff_p).setZero();
+      w.segment(Estimate<F>::threshold.cutoff_p, in_rank).setOnes();
+      sum_weights = double(out_rank);
+      break;
+    default:
+      assert(false);
     }
-    sum_weights = out_rank;
-  } break;
-  case filter_type::TRUNCATE:
-    out_rank = in_rank;
-    w.head(Estimate<F>::threshold.cutoff_p).setZero();
-    w.segment(Estimate<F>::threshold.cutoff_p, in_rank).setOnes();
-    sum_weights = double(out_rank);
-    break;
-  default:
-    assert(false);
   }
   assert(w.head(r).allFinite());
   assert(std::isfinite(sum_weights));
