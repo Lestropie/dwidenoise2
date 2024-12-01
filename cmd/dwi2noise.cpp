@@ -122,10 +122,6 @@ void usage() {
   + subsample_option
   + demodulation_options
 
-
-  // TODO Implement mask option
-  // Note that behaviour of -mask for dwi2noise may be different to that of dwidenoise
-
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("rank",
            "The signal rank estimated for the denoising patch centred at each input image voxel")
@@ -177,8 +173,7 @@ void run(Header &data,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
   auto input = data.get_image<T>().with_direct_io(3);
-  Image<bool> mask; // unused
-  Estimate<T> func(data, mask, subsample, kernel, estimator, exports);
+  Estimate<T> func(data, subsample, kernel, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input);
 }
 
@@ -199,8 +194,7 @@ void run(Header &data,
     Filter::Demodulate demodulator(input, demodulation_axes);
     demodulator(input, input_demod);
   }
-  Image<bool> mask; // unused
-  Estimate<T> func(data, mask, subsample, kernel, estimator, exports);
+  Estimate<T> func(data, subsample, kernel, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input_demod);
 }
 

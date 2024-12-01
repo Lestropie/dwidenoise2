@@ -25,13 +25,11 @@ namespace MR::Denoise {
 
 template <typename F>
 Estimate<F>::Estimate(const Header &header,
-                      Image<bool> &mask,
                       std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports)
     : m(header.size(3)),
-      mask(mask),
       subsample(subsample),
       kernel(kernel),
       estimator(estimator),
@@ -54,13 +52,6 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   Kernel::Voxel::index_type voxel({dwi.index(0), dwi.index(1), dwi.index(2)});
   if (!subsample->process(voxel))
     return;
-
-  // Process voxels in mask only
-  if (mask.valid()) {
-    assign_pos_of(voxel).to(mask);
-    if (!mask.value())
-      return;
-  }
 
   // Load list of voxels from which to load data
   neighbourhood = (*kernel)(voxel);

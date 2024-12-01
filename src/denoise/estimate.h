@@ -41,7 +41,6 @@ public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
 
   Estimate(const Header &header,
-           Image<bool> &mask,
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
            std::shared_ptr<Estimator::Base> estimator,
@@ -53,7 +52,6 @@ protected:
   const ssize_t m;
 
   // Denoising configuration
-  Image<bool> mask;
   std::shared_ptr<Subsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;

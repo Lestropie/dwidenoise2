@@ -23,14 +23,13 @@ namespace MR::Denoise {
 
 template <typename F>
 Recon<F>::Recon(const Header &header,
-                Image<bool> &mask,
                 std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports)
-    : Estimate<F>(header, mask, subsample, kernel, estimator, exports),
+    : Estimate<F>(header, subsample, kernel, estimator, exports),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels

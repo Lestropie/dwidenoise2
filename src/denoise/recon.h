@@ -36,7 +36,6 @@ template <typename F> class Recon : public Estimate<F> {
 
 public:
   Recon(const Header &header,
-        Image<bool> &mask,
         std::shared_ptr<Subsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
         std::shared_ptr<Estimator::Base> estimator,

@@ -167,10 +167,6 @@ void usage() {
     + Argument("image").type_image_in()
 
   + OptionGroup("Options that affect reconstruction of the output image series")
-  // TODO Separate masks for voxels to contribute to patches vs. voxels for which to perform denoising
-  + Option("mask",
-           "Only denoise voxels within the specified binary brain mask image.")
-    + Argument("image").type_image_in()
   + Option("filter",
            "Modulate how component contributions are filtered "
            "based on the cumulative eigenvalues relative to the noise level; "
@@ -273,7 +269,6 @@ std::complex<double> operator/(const std::complex<double> &c, const float n) { r
 
 template <typename T>
 void run(Header &data,
-         Image<bool> &mask,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
          std::shared_ptr<Estimator::Base> estimator,
@@ -287,7 +282,7 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  Recon<T> func(data, mask, subsample, kernel, estimator, filter, aggregator, exports);
+  Recon<T> func(data, subsample, kernel, estimator, filter, aggregator, exports);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
   // Rescale output if performing aggregation
   if (aggregator == aggregator_type::EXCLUSIVE)
@@ -304,7 +299,6 @@ void run(Header &data,
 
 template <typename T>
 void run(Header &data,
-         Image<bool> &mask,
          const std::vector<size_t> &demodulation_axes,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
@@ -314,7 +308,7 @@ void run(Header &data,
          const std::string &output_name,
          Exports &exports) {
   if (demodulation_axes.empty()) {
-    run<T>(data, mask, subsample, kernel, estimator, filter, aggregator, output_name, exports);
+    run<T>(data, subsample, kernel, estimator, filter, aggregator, output_name, exports);
     return;
   }
   auto input = data.get_image<T>();
@@ -332,7 +326,7 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  Recon<T> func(data, mask, subsample, kernel, estimator, filter, aggregator, exports);
+  Recon<T> func(data, subsample, kernel, estimator, filter, aggregator, exports);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input_demodulated, output);
   // Re-apply phase ramps that were previously demodulated
   demodulate(output, true);
@@ -355,13 +349,6 @@ void run() {
   if (dwi.ndim() != 4 || dwi.size(3) <= 1)
     throw Exception("input image must be 4-dimensional");
 
-  Image<bool> mask;
-  auto opt = get_options("mask");
-  if (!opt.empty()) {
-    mask = Image<bool>::open(opt[0][0]);
-    check_dimensions(mask, dwi, 0, 3);
-  }
-
   auto subsample = Subsample::make(dwi);
   assert(subsample);
 
@@ -372,7 +359,7 @@ void run() {
   assert(estimator);
 
   filter_type filter = filter_type::OPTSHRINK;
-  opt = get_options("filter");
+  auto opt = get_options("filter");
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
 
@@ -440,20 +427,20 @@ void run() {
   case 0:
     assert(demodulation_axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<float>(dwi, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 1:
     assert(demodulation_axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, mask, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<double>(dwi, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, mask, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cfloat>(dwi, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, mask, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cdouble>(dwi, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
     break;
   }
 }
