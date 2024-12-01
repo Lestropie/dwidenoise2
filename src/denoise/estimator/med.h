@@ -29,7 +29,10 @@ namespace MR::Denoise::Estimator {
 class Med : public Base {
 public:
   Med() = default;
-  Result operator()(const eigenvalues_type &s, const ssize_t m, const ssize_t n) const final {
+  Result operator()(const eigenvalues_type &s,
+                    const ssize_t m,
+                    const ssize_t n,
+                    const Eigen::Vector3d & /*unused*/) const final {
     Result result;
     const ssize_t r = std::min(m, n);
     const ssize_t q = std::max(m, n);

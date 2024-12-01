@@ -40,12 +40,15 @@ public:
   // - Convert subsampled header voxel position to centre voxel in input image
   // TODO May want to move definition of Kernel::Voxel out of Kernel namespace
   bool process(const Kernel::Voxel::index_type &pos) const;
-  // TODO Rename these
   std::array<ssize_t, 3> in2ss(const Kernel::Voxel::index_type &pos) const;
   std::array<ssize_t, 3> ss2in(const Kernel::Voxel::index_type &pos) const;
   const std::array<ssize_t, 3> &get_factors() const { return factors; }
 
   static std::shared_ptr<Subsample> make(const Header &in);
+
+  // TODO From a processed input voxel,
+  //   get the realspace position of the centre of the patch
+  Eigen::Vector3d patch_centre(const Kernel::Voxel::index_type &pos) const;
 
 protected:
   const Header H_in;

@@ -162,6 +162,9 @@ void usage() {
   + Kernel::options
   + subsample_option
   + demodulation_options
+  + Option("noise_in",
+           "import a pre-estimated noise level map rather than estimating this level during denoising")
+    + Argument("image").type_image_in()
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   // TODO Separate masks for voxels to contribute to patches vs. voxels for which to perform denoising

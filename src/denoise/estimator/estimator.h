@@ -28,8 +28,8 @@ namespace MR::Denoise::Estimator {
 class Base;
 
 extern const App::Option option;
-const std::vector<std::string> estimators = {"exp1", "exp2", "med", "mrm2022"};
-enum class estimator_type { EXP1, EXP2, MED, MRM2022 };
+const std::vector<std::string> estimators = {"exp1", "exp2", "import", "med", "mrm2022"};
+enum class estimator_type { EXP1, EXP2, IMPORT, MED, MRM2022 };
 std::shared_ptr<Base> make_estimator();
 
 } // namespace MR::Denoise::Estimator

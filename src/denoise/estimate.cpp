@@ -51,18 +51,19 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   //    In some use cases there may not be any image created that conforms to this voxel grid
   //    Have to transform the subsampled voxel index into an input image voxel index for the centre of the patch
   // Going to go with 1. for now, as for 2. may not have a suitable image over which to loop
-  if (!subsample->process(Kernel::Voxel::index_type({dwi.index(0), dwi.index(1), dwi.index(2)})))
+  Kernel::Voxel::index_type voxel({dwi.index(0), dwi.index(1), dwi.index(2)});
+  if (!subsample->process(voxel))
     return;
 
   // Process voxels in mask only
   if (mask.valid()) {
-    assign_pos_of(dwi, 0, 3).to(mask);
+    assign_pos_of(voxel).to(mask);
     if (!mask.value())
       return;
   }
 
   // Load list of voxels from which to load data
-  neighbourhood = (*kernel)({dwi.index(0), dwi.index(1), dwi.index(2)});
+  neighbourhood = (*kernel)(voxel);
   const ssize_t n = neighbourhood.voxels.size();
   const ssize_t r = std::min(m, n);
   const ssize_t q = std::max(m, n);
@@ -99,11 +100,15 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   // eigenvalues sorted in increasing order:
   s.head(r) = eig.eigenvalues().template cast<double>();
 
+  // Centre of patch in realspace
+  //   (might be used by estimator)
+  const Eigen::Vector3d pos(subsample->patch_centre(voxel));
+
   // Marchenko-Pastur optimal threshold determination
-  threshold = (*estimator)(s, m, n);
+  threshold = (*estimator)(s, m, n, pos);
 
   // Store additional output maps if requested
-  auto ss_index = subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
+  auto ss_index = subsample->in2ss(voxel);
   if (exports.noise_out.valid()) {
     assign_pos_of(ss_index).to(exports.noise_out);
     exports.noise_out.value() = float(std::sqrt(threshold.sigma2));
