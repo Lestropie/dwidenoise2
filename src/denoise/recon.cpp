@@ -79,7 +79,9 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         //   or on the estimated upper bound of the MP distribution?
         // If based on upper bound,
         //   there will be an issue with importing this information from a pre-estimated noise map
-        const double y = lam / Estimate<F>::threshold.lamplus;
+        // TODO Unexpected absence of sqrt() here
+        // const double y = lam / std::sqrt(Estimate<F>::threshold.sigma2);
+        const double y = lam / Estimate<F>::threshold.sigma2;
         double nu = 0.0;
         if (y > transition) {
           nu = std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y;
@@ -100,9 +102,11 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       } else {
         lambda_star = it->second;
       }
-      const double tau_star_sq = Math::pow2(lambda_star) * q * Estimate<F>::threshold.sigma2;
+      const double tau_star = lambda_star * std::sqrt(q) * std::sqrt(Estimate<F>::threshold.sigma2);
+      // TODO Unexpected requisite square applied to q here
+      const double threshold = tau_star * Math::pow2(q);
       for (ssize_t i = 0; i != r; ++i) {
-        if (Estimate<F>::s[i] >= tau_star_sq) {
+        if (Estimate<F>::s[i] >= threshold) {
           w[i] = 1.0;
           ++out_rank;
         } else {
