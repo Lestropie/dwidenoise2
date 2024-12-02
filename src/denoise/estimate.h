@@ -62,7 +62,6 @@ protected:
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
   eigenvalues_type s;
   Estimator::Result threshold;
-  vector_type clam;
 
   // Export images
   Exports exports;
