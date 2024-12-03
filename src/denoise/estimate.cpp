@@ -19,6 +19,7 @@
 
 #include <limits>
 
+#include "interp/cubic.h"
 #include "math/math.h"
 
 namespace MR::Denoise {
@@ -27,12 +28,14 @@ template <typename F>
 Estimate<F>::Estimate(const Header &header,
                       std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
+                      Image<float> &nonstationarity_image,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports)
     : m(header.size(3)),
       subsample(subsample),
       kernel(kernel),
       estimator(estimator),
+      nonstationarity_image(nonstationarity_image),
       X(m, kernel->estimated_size()),
       XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
       eig(std::min(m, kernel->estimated_size())),
@@ -53,9 +56,9 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   if (!subsample->process(voxel))
     return;
 
-  // Load list of voxels from which to load data
-  neighbourhood = (*kernel)(voxel);
-  const ssize_t n = neighbourhood.voxels.size();
+  // Load list of voxels from which to import data
+  patch = (*kernel)(voxel);
+  const ssize_t n = patch.voxels.size();
   const ssize_t r = std::min(m, n);
   const ssize_t q = std::max(m, n);
 
@@ -80,7 +83,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   s.fill(std::numeric_limits<default_type>::signaling_NaN());
 #endif
 
-  load_data(dwi, neighbourhood.voxels);
+  load_data(dwi);
 
   // Compute Eigendecomposition:
   if (m <= n)
@@ -91,12 +94,8 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   // eigenvalues sorted in increasing order:
   s.head(r) = eig.eigenvalues().template cast<double>();
 
-  // Centre of patch in realspace
-  //   (might be used by estimator)
-  const Eigen::Vector3d pos(subsample->patch_centre(voxel));
-
   // Marchenko-Pastur optimal threshold determination
-  threshold = (*estimator)(s, m, n, pos);
+  threshold = (*estimator)(s, m, n, patch.centre_realspace);
 
   // Store additional output maps if requested
   auto ss_index = subsample->in2ss(voxel);
@@ -110,7 +109,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   }
   if (exports.max_dist.valid()) {
     assign_pos_of(ss_index).to(exports.max_dist);
-    exports.max_dist.value() = neighbourhood.max_distance;
+    exports.max_dist.value() = patch.max_distance;
   }
   if (exports.voxelcount.valid()) {
     assign_pos_of(ss_index).to(exports.voxelcount);
@@ -118,18 +117,37 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   }
   if (exports.patchcount.valid()) {
     std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
-    for (const auto &v : neighbourhood.voxels) {
+    for (const auto &v : patch.voxels) {
       assign_pos_of(v.index).to(exports.patchcount);
       exports.patchcount.value() = exports.patchcount.value() + 1;
     }
   }
 }
 
-template <typename F> void Estimate<F>::load_data(Image<F> &image, const std::vector<Kernel::Voxel> &voxels) {
+template <typename F> void Estimate<F>::load_data(Image<F> &image) {
   const Kernel::Voxel::index_type pos({image.index(0), image.index(1), image.index(2)});
-  for (ssize_t i = 0; i != voxels.size(); ++i) {
-    assign_pos_of(voxels[i].index, 0, 3).to(image);
-    X.col(i) = image.row(3);
+  if (nonstationarity_image.valid()) {
+    assert(patch.centre_realspace.allFinite());
+    Interp::Cubic<Image<float>> interp(nonstationarity_image);
+    interp.scanner(patch.centre_realspace);
+    assert(!(!interp));
+    patch.centre_noise = interp.value();
+    for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
+      interp.scanner(image.transform() * patch.voxels[i].index.cast<default_type>());
+      // TODO Trying to pull intensity information from voxels beyond the extremities of the subsampled image
+      //   may cause problems
+      assert(!(!interp));
+      const double voxel_noise = interp.value();
+      patch.voxels[i].noise_level = voxel_noise;
+      assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
+      X.col(i) = image.row(3);
+      X.col(i) *= patch.centre_noise / voxel_noise;
+    }
+  } else {
+    for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
+      assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
+      X.col(i) = image.row(3);
+    }
   }
   assign_pos_of(pos, 0, 3).to(image);
 }

@@ -121,10 +121,15 @@ void usage() {
   + Kernel::options
   + subsample_option
   + demodulation_options
+  + Option("nonstationarity",
+           "import an estimated map of noise nonstationarity; "
+           "note that this will be used for within-patch non-stationariy correction only, "
+           "the output noise level estimate will still be derived from the input data")
+    + Argument("image").type_image_in()
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("rank",
-           "The signal rank estimated for the denoising patch centred at each input image voxel")
+           "The signal rank estimated for each denoising patch")
     + Argument("image").type_image_out()
   + OptionGroup("Options for debugging the operation of sliding window kernels")
   + Option("max_dist",
@@ -134,7 +139,7 @@ void usage() {
            "The number of voxels that contributed to the PCA for processing of each patch")
     + Argument("image").type_image_out()
   + Option("patchcount",
-           "The number of unique patches to which an image voxel contributes")
+           "The number of unique patches to which an input image voxel contributes")
     + Argument("image").type_image_out();
 
   COPYRIGHT =
@@ -170,10 +175,11 @@ template <typename T>
 void run(Header &data,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
+         Image<float> &nonstationarity_image,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
   auto input = data.get_image<T>().with_direct_io(3);
-  Estimate<T> func(data, subsample, kernel, estimator, exports);
+  Estimate<T> func(data, subsample, kernel, nonstationarity_image, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input);
 }
 
@@ -182,10 +188,11 @@ void run(Header &data,
          const std::vector<size_t> &demodulation_axes,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
+         Image<float> &nonstationarity_image,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
   if (demodulation_axes.empty()) {
-    run<T>(data, subsample, kernel, estimator, exports);
+    run<T>(data, subsample, kernel, nonstationarity_image, estimator, exports);
     return;
   }
   auto input = data.get_image<T>();
@@ -194,7 +201,7 @@ void run(Header &data,
     Filter::Demodulate demodulator(input, demodulation_axes);
     demodulator(input, input_demod);
   }
-  Estimate<T> func(data, subsample, kernel, estimator, exports);
+  Estimate<T> func(data, subsample, kernel, nonstationarity_image, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input_demod);
 }
 
@@ -204,18 +211,23 @@ void run() {
     throw Exception("input image must be 4-dimensional");
   bool complex = dwi.datatype().is_complex();
 
+  Image<float> nonstationarity_image;
+  auto opt = get_options("nonstationarity");
+  if (!opt.empty())
+    nonstationarity_image = Image<float>::open(opt[0][0]);
+
   auto subsample = Subsample::make(dwi);
   assert(subsample);
 
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
 
-  auto estimator = Estimator::make_estimator();
+  auto estimator = Estimator::make_estimator(false);
   assert(estimator);
 
   Exports exports(dwi, subsample->header());
   exports.set_noise_out(argument[1]);
-  auto opt = get_options("rank");
+  opt = get_options("rank");
   if (!opt.empty())
     exports.set_rank_input(opt[0][0]);
   opt = get_options("max_dist");
@@ -237,20 +249,20 @@ void run() {
   case 0:
     assert(demodulation_axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, subsample, kernel, estimator, exports);
+    run<float>(dwi, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   case 1:
     assert(demodulation_axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, subsample, kernel, estimator, exports);
+    run<double>(dwi, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation_axes, subsample, kernel, estimator, exports);
+    run<cfloat>(dwi, demodulation_axes, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation_axes, subsample, kernel, estimator, exports);
+    run<cdouble>(dwi, demodulation_axes, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   }
 }

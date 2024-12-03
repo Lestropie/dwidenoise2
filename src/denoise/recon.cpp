@@ -25,11 +25,12 @@ template <typename F>
 Recon<F>::Recon(const Header &header,
                 std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
+                Image<float> &nonstationarity_image,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports)
-    : Estimate<F>(header, subsample, kernel, estimator, exports),
+    : Estimate<F>(header, subsample, kernel, nonstationarity_image, estimator, exports),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -47,7 +48,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
   Estimate<F>::operator()(dwi);
 
-  const ssize_t n = Estimate<F>::neighbourhood.voxels.size();
+  const ssize_t n = Estimate<F>::patch.voxels.size();
   const ssize_t r = std::min(Estimate<F>::m, n);
   const ssize_t q = std::max(Estimate<F>::m, n);
   const double beta = double(r) / double(q);
@@ -137,18 +138,19 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   //   then we need to instead compute the full projection
   switch (aggregator) {
   case aggregator_type::EXCLUSIVE:
+    assert(Estimate<F>::patch.centre_index >= 0);
     if (Estimate<F>::m <= n)
-      Xr.noalias() =                                                       //
-          Estimate<F>::eig.eigenvectors() *                                //
-          (w.head(r).cast<F>().matrix().asDiagonal() *                     //
-           (Estimate<F>::eig.eigenvectors().adjoint() *                    //
-            Estimate<F>::X.col(Estimate<F>::neighbourhood.centre_index))); //
+      Xr.noalias() =                                               //
+          Estimate<F>::eig.eigenvectors() *                        //
+          (w.head(r).cast<F>().matrix().asDiagonal() *             //
+           (Estimate<F>::eig.eigenvectors().adjoint() *            //
+            Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
     else
-      Xr.noalias() =                                                                                  //
-          Estimate<F>::X.leftCols(n) *                                                                //
-          (Estimate<F>::eig.eigenvectors() *                                                          //
-           (w.head(r).cast<F>().matrix().asDiagonal() *                                               //
-            Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::neighbourhood.centre_index))); //
+      Xr.noalias() =                                                                          //
+          Estimate<F>::X.leftCols(n) *                                                        //
+          (Estimate<F>::eig.eigenvectors() *                                                  //
+           (w.head(r).cast<F>().matrix().asDiagonal() *                                       //
+            Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
     assert(Xr.allFinite());
     assign_pos_of(dwi).to(out);
     out.row(3) = Xr.col(0);
@@ -178,17 +180,22 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
             Estimate<F>::eig.eigenvectors().adjoint())); //
     }
     assert(Xr.leftCols(n).allFinite());
+    // Undo prior within-patch non-stationarity correction
+    if (std::isfinite(Estimate<F>::patch.centre_noise)) {
+      for (ssize_t i = 0; i != n; ++i)
+        Xr.col(i) *= Estimate<F>::patch.voxels[i].noise_level / Estimate<F>::patch.centre_noise;
+    }
     std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
-    for (size_t voxel_index = 0; voxel_index != Estimate<F>::neighbourhood.voxels.size(); ++voxel_index) {
-      assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index, 0, 3).to(out);
-      assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index).to(Estimate<F>::exports.sum_aggregation);
+    for (size_t voxel_index = 0; voxel_index != Estimate<F>::patch.voxels.size(); ++voxel_index) {
+      assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(out);
+      assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index).to(Estimate<F>::exports.sum_aggregation);
       double weight = std::numeric_limits<double>::signaling_NaN();
       switch (aggregator) {
       case aggregator_type::EXCLUSIVE:
         assert(false);
         break;
       case aggregator_type::GAUSSIAN:
-        weight = std::exp(gaussian_multiplier * Estimate<F>::neighbourhood.voxels[voxel_index].sq_distance);
+        weight = std::exp(gaussian_multiplier * Estimate<F>::patch.voxels[voxel_index].sq_distance);
         break;
       case aggregator_type::INVL0:
         weight = 1.0 / (1 + out_rank);
@@ -203,7 +210,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       out.row(3) += weight * Xr.col(voxel_index);
       Estimate<F>::exports.sum_aggregation.value() += weight;
       if (Estimate<F>::exports.rank_output.valid()) {
-        assign_pos_of(Estimate<F>::neighbourhood.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
         Estimate<F>::exports.rank_output.value() += weight * out_rank;
       }
     }

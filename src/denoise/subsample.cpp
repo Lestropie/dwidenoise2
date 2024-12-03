@@ -106,12 +106,4 @@ Header Subsample::make_subsample_header() const {
   return H;
 }
 
-Eigen::Vector3d Subsample::patch_centre(const Kernel::Voxel::index_type &pos) const {
-  assert(process(pos));
-  const Eigen::Vector3d centre({double(pos[0]) + (factors[0] & 1 ? 0.0 : 0.5),
-                                double(pos[1]) + (factors[1] & 1 ? 0.0 : 0.5),
-                                double(pos[2]) + (factors[2] & 1 ? 0.0 : 0.5)});
-  return H_in.transform() * centre;
-}
-
 } // namespace MR::Denoise

@@ -20,7 +20,7 @@
 namespace MR::Denoise::Kernel {
 
 Data SphereFixedRadius::operator()(const Voxel::index_type &pos) const {
-  Data result(0);
+  Data result(voxel2real(pos), centre_index);
   result.voxels.reserve(maximum_size);
   for (auto map_it = shared->begin(); map_it != shared->end(); ++map_it) {
     const Voxel::index_type voxel({pos[0] + map_it->index[0],   //

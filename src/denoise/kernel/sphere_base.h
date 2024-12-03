@@ -31,8 +31,10 @@ namespace MR::Denoise::Kernel {
 class SphereBase : public Base {
 
 public:
-  SphereBase(const Header &voxel_grid, const default_type max_radius, const std::array<ssize_t, 3> &subsample_factors)
-      : Base(voxel_grid), shared(new Shared(voxel_grid, max_radius, subsample_factors)) {}
+  SphereBase(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const default_type max_radius)
+      : Base(voxel_grid, subsample_factors),
+        shared(new Shared(voxel_grid, subsample_factors, halfvoxel_offsets, max_radius)),
+        centre_index(subsample_factors == std::array<ssize_t, 3>({1, 1, 1}) ? 0 : -1) {}
 
   SphereBase(const SphereBase &) = default;
 
@@ -42,7 +44,10 @@ protected:
   class Shared {
   public:
     using TableType = std::vector<Offset>;
-    Shared(const Header &voxel_grid, const default_type max_radius, const std::array<ssize_t, 3> &subsample_factors);
+    Shared(const Header &voxel_grid,
+           const std::array<ssize_t, 3> &subsample_factors,
+           const std::array<default_type, 3> &halfvoxel_offsets,
+           const default_type max_radius);
     TableType::const_iterator begin() const { return data.begin(); }
     TableType::const_iterator end() const { return data.end(); }
 
@@ -51,6 +56,7 @@ protected:
   };
 
   std::shared_ptr<Shared> shared;
+  const ssize_t centre_index;
 };
 
 } // namespace MR::Denoise::Kernel

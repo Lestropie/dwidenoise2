@@ -28,8 +28,8 @@ constexpr default_type sphere_multiplier_default = 1.0 / 0.85;
 class SphereRatio : public SphereBase {
 
 public:
-  SphereRatio(const Header &voxel_grid, const default_type min_ratio, const std::array<ssize_t, 3> &subsample_factors)
-      : SphereBase(voxel_grid, compute_max_radius(voxel_grid, min_ratio), subsample_factors),
+  SphereRatio(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const default_type min_ratio)
+      : SphereBase(voxel_grid, subsample_factors, compute_max_radius(voxel_grid, min_ratio)),
         min_size(std::ceil(voxel_grid.size(3) * min_ratio)) {}
 
   SphereRatio(const SphereRatio &) = default;

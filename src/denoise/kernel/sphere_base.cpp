@@ -22,20 +22,18 @@
 namespace MR::Denoise::Kernel {
 
 SphereBase::Shared::Shared(const Header &voxel_grid,
-                           const default_type max_radius,
-                           const std::array<ssize_t, 3> &subsample_factors) {
+                           const std::array<ssize_t, 3> &subsample_factors,
+                           const std::array<default_type, 3> &halfvoxel_offsets,
+                           const default_type max_radius) {
   const default_type max_radius_sq = Math::pow2(max_radius);
   Eigen::Array<int, 3, 2> bounding_box;
-  std::array<default_type, 3> halfvoxel_offsets;
   for (ssize_t axis = 0; axis != 3; ++axis) {
     if (subsample_factors[axis] % 2) {
       bounding_box(axis, 1) = int(std::ceil(max_radius / voxel_grid.spacing(axis)));
       bounding_box(axis, 0) = -bounding_box(axis, 1);
-      halfvoxel_offsets[axis] = 0.0;
     } else {
       bounding_box(axis, 0) = -int(std::ceil((max_radius / voxel_grid.spacing(axis)) - 0.5));
       bounding_box(axis, 1) = int(std::ceil((max_radius / voxel_grid.spacing(axis)) + 0.5));
-      halfvoxel_offsets[axis] = 0.5;
     }
   }
   // Build the searchlight

@@ -97,8 +97,8 @@ std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> 
     opt = get_options("radius_mm");
     if (opt.empty())
       return std::make_shared<SphereRatio>(
-          H, get_option_value("radius_ratio", sphere_multiplier_default), subsample_factors);
-    return std::make_shared<SphereFixedRadius>(H, opt[0][0], subsample_factors);
+          H, subsample_factors, get_option_value("radius_ratio", sphere_multiplier_default));
+    return std::make_shared<SphereFixedRadius>(H, subsample_factors, opt[0][0]);
   }
   case Kernel::shape_type::CUBOID: {
     if (!get_options("radius_mm").empty() || !get_options("radius_ratio").empty())
@@ -143,7 +143,7 @@ std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> 
            "and cause inconsistent denoising between adjacent voxels");
     }
 
-    return std::make_shared<Cuboid>(H, extent, subsample_factors);
+    return std::make_shared<Cuboid>(H, subsample_factors, extent);
   } break;
   default:
     assert(false);

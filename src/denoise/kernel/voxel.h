@@ -49,7 +49,20 @@ public:
 
 // Need signed integer to represent offsets from the centre of the kernel;
 //   however absolute voxel indices should be unsigned
-using Voxel = VoxelBase<ssize_t>;
+// For nonstationarity correction,
+//   "Voxel" also needs a noise level estimate per voxel in the patch,
+//   as the scaling on insertion of data into the matrix
+//   needs to be reversed when reconstructing the denoised signal from the eigenvectors
+class Voxel : public VoxelBase<ssize_t> {
+public:
+  using index_type = VoxelBase<ssize_t>::index_type;
+  Voxel(const index_type &index, const default_type sq_distance, const default_type noise_level)
+      : VoxelBase<ssize_t>(index, sq_distance), noise_level(noise_level) {}
+  Voxel(const index_type &index, const default_type sq_distance)
+      : VoxelBase<ssize_t>(index, sq_distance), noise_level(std::numeric_limits<default_type>::signaling_NaN()) {}
+  default_type noise_level;
+};
+
 using Offset = VoxelBase<int>;
 
 } // namespace MR::Denoise::Kernel

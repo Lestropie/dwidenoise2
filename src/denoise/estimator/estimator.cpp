@@ -33,29 +33,26 @@ const Option option = Option("estimator",
                              " either: \n"
                              "* Exp1: the original estimator used in Veraart et al. (2016); \n"
                              "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
-                             "* Import: import from a pre-estimated noise level map; \n"
                              "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
                              "* MRM2022: the alternative estimator introduced in Olesen et al. (2022).") +
                       Argument("algorithm").type_choice(estimators);
 
-std::shared_ptr<Base> make_estimator() {
-  auto opt = App::get_options("estimator");
-  const estimator_type est = opt.empty() ? estimator_type::EXP2 : estimator_type((int)(opt[0][0]));
-  auto noise_in = get_options("noise_in");
-  // TODO Remove once -noise_in is used in other ways
-  if (!noise_in.empty() && est != estimator_type::IMPORT) {
-    WARN("-noise_in option has no effect unless -estimator import is specified");
+std::shared_ptr<Base> make_estimator(const bool permit_noise_in) {
+  auto opt = get_options("estimator");
+  if (permit_noise_in) {
+    auto noise_in = get_options("noise_in");
+    if (!noise_in.empty()) {
+      if (!opt.empty())
+        throw Exception("Cannot both provide an input noise level image and specify a noise level estimator");
+      return std::make_shared<Import>(noise_in[0][0]);
+    }
   }
+  const estimator_type est = opt.empty() ? estimator_type::EXP2 : estimator_type((int)(opt[0][0]));
   switch (est) {
   case estimator_type::EXP1:
     return std::make_shared<Exp<1>>();
   case estimator_type::EXP2:
     return std::make_shared<Exp<2>>();
-  case estimator_type::IMPORT:
-    if (noise_in.empty())
-      throw Exception("-estimator import requires a pre-estimated noise level image "
-                      "to be provided via the -noise_in option");
-    return std::make_shared<Import>(noise_in[0][0]);
   case estimator_type::MED:
     return std::make_shared<Med>();
   case estimator_type::MRM2022:

@@ -162,8 +162,16 @@ void usage() {
   + Kernel::options
   + subsample_option
   + demodulation_options
+  // TODO If explicitly regressing the mean prior to Casorati formation,
+  //   this should happen _before_ rescaling based on noise level
+  + Option("nonstationarity",
+           "import an estimated map of noise nonstationarity; "
+           "note that this will be used for within-patch non-stationariy correction only, "
+           "if noise level estimate is to be used for denoising also "
+           "it must be additionally provided via the -noise_in option")
+    + Argument("image").type_image_in()
   + Option("noise_in",
-           "import a pre-estimated noise level map rather than estimating this level during denoising")
+           "import a pre-estimated noise level map for noise removal rather than estimating this level from data")
     + Argument("image").type_image_in()
 
   + OptionGroup("Options that affect reconstruction of the output image series")
@@ -181,25 +189,6 @@ void usage() {
   // TODO For specifically the Gaussian aggregator,
   //   should ideally be possible to select the FWHM of the aggregator
 
-  // TODO Consider restructuring & encapsulating in classes
-  // Also bear in mind how use of subsampling could affect this
-  // TODO If using downsampling,
-  //   may be preferable to explicitly downsample the voxel grid on which to yield these data
-  // - -noise: This is a patch-wise estimate;
-  //           could however elect to make it an aggreate mean if aggregation is being performed
-  //           (or just forbid it if downsampling is performed?)
-  // - -rank: This is a patch-wise estimate (see -noise above)
-  // - -weightedrank: This is explicitly a multi-patch aggregation,
-  //   so doesn't apply to noise level estimation only;
-  //   it may be better to distinguish between "input rank" and "output rank"?
-  // - -sumweights: Explicitly a multi-patch aggregation
-  // - -max_dist: This is a property of the local patch;
-  //              this could be hidden behind a #define TBH
-  // - -voxels: This is a property of the local patch (see -max_dist above)
-  // - -aggregation_sum: This is explicitly a multi-patch aggregation
-  // TODO Consider an option group for "debugging of sliding window kernel behaviour"
-  // TODO Potential issue wherein optimal shrinkage may set to 0
-  //   some components above the determined noise level...
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise_out",
            "The output noise map,"
@@ -271,6 +260,7 @@ template <typename T>
 void run(Header &data,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
+         Image<float> &nonstationarity_image,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
@@ -282,9 +272,9 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  Recon<T> func(data, subsample, kernel, estimator, filter, aggregator, exports);
+  Recon<T> func(data, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, exports);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
-  // Rescale output if performing aggregation
+  // Rescale output if aggregation was performed
   if (aggregator == aggregator_type::EXCLUSIVE)
     return;
   for (auto l_voxel = Loop(exports.sum_aggregation)(output, exports.sum_aggregation); l_voxel; ++l_voxel) {
@@ -302,13 +292,14 @@ void run(Header &data,
          const std::vector<size_t> &demodulation_axes,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
+         Image<float> &nonstationarity_image,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
          const std::string &output_name,
          Exports &exports) {
   if (demodulation_axes.empty()) {
-    run<T>(data, subsample, kernel, estimator, filter, aggregator, output_name, exports);
+    run<T>(data, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, output_name, exports);
     return;
   }
   auto input = data.get_image<T>();
@@ -326,7 +317,7 @@ void run(Header &data,
   header.datatype() = DataType::from<T>();
   auto output = Image<T>::create(output_name, header);
   // run
-  Recon<T> func(data, subsample, kernel, estimator, filter, aggregator, exports);
+  Recon<T> func(data, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, exports);
   ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input_demodulated, output);
   // Re-apply phase ramps that were previously demodulated
   demodulate(output, true);
@@ -355,11 +346,16 @@ void run() {
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
 
-  auto estimator = Estimator::make_estimator();
+  Image<float> nonstationarity_image;
+  auto opt = get_options("nonstationarity");
+  if (!opt.empty())
+    nonstationarity_image = Image<float>::open(opt[0][0]);
+
+  auto estimator = Estimator::make_estimator(true);
   assert(estimator);
 
   filter_type filter = filter_type::OPTSHRINK;
-  auto opt = get_options("filter");
+  opt = get_options("filter");
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
 
@@ -427,20 +423,38 @@ void run() {
   case 0:
     assert(demodulation_axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<float>(dwi, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, argument[1], exports);
     break;
   case 1:
     assert(demodulation_axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<double>(dwi, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, argument[1], exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cfloat>(dwi,
+                demodulation_axes,
+                subsample,
+                kernel,
+                nonstationarity_image,
+                estimator,
+                filter,
+                aggregator,
+                argument[1],
+                exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation_axes, subsample, kernel, estimator, filter, aggregator, argument[1], exports);
+    run<cdouble>(dwi,
+                 demodulation_axes,
+                 subsample,
+                 kernel,
+                 nonstationarity_image,
+                 estimator,
+                 filter,
+                 aggregator,
+                 argument[1],
+                 exports);
     break;
   }
 }

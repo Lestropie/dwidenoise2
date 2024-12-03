@@ -20,7 +20,7 @@
 namespace MR::Denoise::Kernel {
 
 Data SphereRatio::operator()(const Voxel::index_type &pos) const {
-  Data result(0);
+  Data result(voxel2real(pos), centre_index);
   auto table_it = shared->begin();
   while (table_it != shared->end()) {
     // If there's a tie in distances, want to include all such offsets in the kernel,

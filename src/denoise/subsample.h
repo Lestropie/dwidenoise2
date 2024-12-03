@@ -34,10 +34,6 @@ public:
 
   const Header &header() const { return H_ss; }
 
-  // TODO What other functionalities does this class need?
-  // - Decide whether a given 3-vector voxel position should be sampled vs. not
-  // - Convert input image 3-vector voxel position to output subsampled header voxel position
-  // - Convert subsampled header voxel position to centre voxel in input image
   // TODO May want to move definition of Kernel::Voxel out of Kernel namespace
   bool process(const Kernel::Voxel::index_type &pos) const;
   std::array<ssize_t, 3> in2ss(const Kernel::Voxel::index_type &pos) const;
@@ -45,10 +41,6 @@ public:
   const std::array<ssize_t, 3> &get_factors() const { return factors; }
 
   static std::shared_ptr<Subsample> make(const Header &in);
-
-  // TODO From a processed input voxel,
-  //   get the realspace position of the centre of the patch
-  Eigen::Vector3d patch_centre(const Kernel::Voxel::index_type &pos) const;
 
 protected:
   const Header H_in;

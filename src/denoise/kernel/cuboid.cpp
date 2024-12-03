@@ -20,9 +20,9 @@
 namespace MR::Denoise::Kernel {
 
 Cuboid::Cuboid(const Header &header,
-               const std::array<ssize_t, 3> &extent,
-               const std::array<ssize_t, 3> &subsample_factors)
-    : Base(header),
+               const std::array<ssize_t, 3> &subsample_factors,
+               const std::array<ssize_t, 3> &extent)
+    : Base(header, subsample_factors),
       size(extent[0] * extent[1] * extent[2]),
       // Only sensible if no subsampling is performed,
       //   and every single DWI voxel is reconstructed from a patch centred at that voxel,
@@ -35,14 +35,12 @@ Cuboid::Cuboid(const Header &header,
                         "size of cubic kernel must be an odd integer");
       bounding_box(axis, 0) = -extent[axis] / 2;
       bounding_box(axis, 1) = extent[axis] / 2;
-      halfvoxel_offsets[axis] = 0.0;
     } else {
       if (extent[axis] % 2)
         throw Exception("For subsampling by an even number, "
                         "size of cubic kernel must be an even integer");
       bounding_box(axis, 0) = 1 - extent[axis] / 2;
       bounding_box(axis, 1) = extent[axis] / 2;
-      halfvoxel_offsets[axis] = 0.5;
     }
   }
 }
@@ -60,7 +58,7 @@ inline ssize_t wrapindex(int p, int r, int bbminus, int bbplus, int max) {
 } // namespace
 
 Data Cuboid::operator()(const Voxel::index_type &pos) const {
-  Data result(centre_index);
+  Data result(voxel2real(pos), centre_index);
   Voxel::index_type voxel;
   Offset::index_type offset;
   for (offset[2] = bounding_box(2, 0); offset[2] <= bounding_box(2, 1); ++offset[2]) {
