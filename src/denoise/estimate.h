@@ -42,6 +42,7 @@ public:
   Estimate(const Header &header,
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
+           Image<float> &nonstationarity_image,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports);
 
@@ -56,7 +57,8 @@ protected:
   std::shared_ptr<Estimator::Base> estimator;
 
   // Reusable memory
-  Kernel::Data neighbourhood;
+  Kernel::Data patch;
+  Image<float> nonstationarity_image;
   MatrixType X;
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
@@ -69,7 +71,7 @@ protected:
   // Some data can only be written in a thread-safe manner
   static std::mutex mutex;
 
-  void load_data(Image<F> &image, const std::vector<Kernel::Voxel> &voxels);
+  void load_data(Image<F> &image);
 };
 
 template <typename F> std::mutex Estimate<F>::mutex;
