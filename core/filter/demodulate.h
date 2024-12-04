@@ -22,6 +22,7 @@
 #include "algo/copy.h"
 #include "algo/loop.h"
 #include "filter/base.h"
+#include "filter/kspace.h"
 #include "filter/smooth.h"
 #include "image.h"
 #include "interp/cubic.h"
@@ -32,13 +33,21 @@ namespace MR::Filter {
 /** \addtogroup Filters
 @{ */
 
+// From Manzano-Patron et al. 2024
+constexpr default_type default_tukey_FWHM_demodulate = 0.58;
+constexpr default_type default_tukey_alpha_demodulate = 2.0 * (1.0 - default_tukey_FWHM_demodulate);
+
 /*! Estimate a linear phase ramp of a complex image and demodulate by such
  */
 class Demodulate : public Base {
 public:
   template <class ImageType>
-  Demodulate(ImageType &in, const std::vector<size_t> &inner_axes)
-      : Base(in), phase(Image<cfloat>::scratch(in, "Scratch image storing linear phase for demodulator")) {
+  Demodulate(ImageType &in, const std::vector<size_t> &inner_axes, const bool linear)
+      : Base(in),
+        phase(Image<cfloat>::scratch(in,
+                                     std::string("Scratch image storing ")   //
+                                         + (linear ? "linear" : "nonlinear") //
+                                         + " phase for demodulator")) {      //
 
     using value_type = typename ImageType::value_type;
     using real_type = typename ImageType::value_type::value_type;
@@ -56,7 +65,8 @@ public:
         outer_axes.push_back(axis);
     }
 
-    ProgressBar progress("estimating linear phase modulation", inner_axes.size() + 1);
+    ProgressBar progress(std::string("estimating ") + (linear ? "linear" : "nonlinear") + " phase modulation",
+                         inner_axes.size() + 1 + (linear ? 0 : inner_axes.size()));
 
     // FFT currently hard-wired to double precision;
     //   have to manually load into cdouble memory
@@ -84,12 +94,15 @@ public:
           std::swap(temp, kspace);
           break;
         }
-        Math::FFT(temp, kspace, inner_axes[n], FFTW_FORWARD, true);
+        // Centred FFT if linear (so we can do peak-finding without wraparound);
+        //   not centred if non-linear (for compatibility with window filter generation function)
+        Math::FFT(temp, kspace, inner_axes[n], FFTW_FORWARD, linear);
         ++progress;
       }
     }
 
-    auto gen_phase =
+    // TODO Can likely remove "input" from here
+    auto gen_linear_phase =
         [&](Image<value_type> &input, Image<cdouble> &kspace, Image<cfloat> &phase, const std::vector<size_t> &axes) {
           std::array<bool, 3> axis_mask({false, false, false});
           for (auto axis : axes) {
@@ -172,13 +185,33 @@ public:
           }
         };
 
-    if (outer_axes.size()) {
-      // TODO Multi-thread
-      // ThreadedLoop("Estimating phase ramps", input, outer_axes).run(gen_phase, input, kspace);
-      for (auto l_outer = Loop(outer_axes)(input, kspace, phase); l_outer; ++l_outer)
-        gen_phase(input, kspace, phase, inner_axes);
+    auto gen_nonlinear_phase =
+        [&](Image<value_type> &input, Image<cdouble> &kspace, Image<cfloat> &phase, const std::vector<size_t> &axes) {
+          Image<double> window = Filter::KSpace::window_tukey(input, axes, default_tukey_alpha_demodulate);
+          Adapter::Replicate<Image<double>> replicating_window(window, in);
+          for (auto l = Loop(kspace)(kspace, replicating_window); l; ++l)
+            kspace.value() *= double(replicating_window.value());
+          for (auto axis : axes) {
+            Math::FFT(kspace, kspace, axis, FFTW_BACKWARD, false);
+            ++progress;
+          }
+          for (auto l = Loop(kspace)(kspace, phase); l; ++l) {
+            cdouble value = cdouble(kspace.value());
+            value /= std::sqrt(norm(value));
+            phase.value() = {float(value.real()), float(value.imag())};
+          }
+        };
+
+    if (linear) {
+      if (outer_axes.size()) {
+        // TODO Multi-thread
+        for (auto l_outer = Loop(outer_axes)(input, kspace, phase); l_outer; ++l_outer)
+          gen_linear_phase(input, kspace, phase, inner_axes);
+      } else {
+        gen_linear_phase(input, kspace, phase, inner_axes);
+      }
     } else {
-      gen_phase(input, kspace, phase, inner_axes);
+      gen_nonlinear_phase(input, kspace, phase, inner_axes);
     }
   }
 

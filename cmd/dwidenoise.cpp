@@ -289,7 +289,7 @@ void run(Header &data,
 
 template <typename T>
 void run(Header &data,
-         const std::vector<size_t> &demodulation_axes,
+         const Demodulation &demodulation,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
          Image<float> &nonstationarity_image,
@@ -298,7 +298,7 @@ void run(Header &data,
          aggregator_type aggregator,
          const std::string &output_name,
          Exports &exports) {
-  if (demodulation_axes.empty()) {
+  if (!demodulation) {
     run<T>(data, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, output_name, exports);
     return;
   }
@@ -309,7 +309,7 @@ void run(Header &data,
   H_scratch.datatype() = DataType::from<T>();
   H_scratch.datatype().set_byte_order_native();
   auto input_demodulated = Image<T>::scratch(H_scratch, "Phase-demodulated version of input DWI");
-  Filter::Demodulate demodulate(input, demodulation_axes);
+  Filter::Demodulate demodulate(input, demodulation.axes, demodulation.mode == demodulation_t::LINEAR);
   demodulate(input, input_demodulated, false);
   input = Image<T>(); // free memory
   // create output
@@ -336,9 +336,10 @@ void run(Header &data,
 
 void run() {
   auto dwi = Header::open(argument[0]);
-
   if (dwi.ndim() != 4 || dwi.size(3) <= 1)
     throw Exception("input image must be 4-dimensional");
+
+  const Demodulation demodulation = get_demodulation(dwi);
 
   auto subsample = Subsample::make(dwi);
   assert(subsample);
@@ -414,8 +415,6 @@ void run() {
     exports.set_sum_aggregation("");
   }
 
-  const std::vector<size_t> demodulation_axes = get_demodulation_axes(dwi);
-
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())
     prec += 2; // support complex input data
@@ -433,7 +432,7 @@ void run() {
   case 2:
     INFO("select complex float32 for processing");
     run<cfloat>(dwi,
-                demodulation_axes,
+                demodulation,
                 subsample,
                 kernel,
                 nonstationarity_image,
@@ -446,7 +445,7 @@ void run() {
   case 3:
     INFO("select complex float64 for processing");
     run<cdouble>(dwi,
-                 demodulation_axes,
+                 demodulation,
                  subsample,
                  kernel,
                  nonstationarity_image,

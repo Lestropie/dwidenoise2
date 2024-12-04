@@ -185,20 +185,20 @@ void run(Header &data,
 
 template <typename T>
 void run(Header &data,
-         const std::vector<size_t> &demodulation_axes,
+         const Demodulation &demodulation,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
          Image<float> &nonstationarity_image,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
-  if (demodulation_axes.empty()) {
+  if (!demodulation) {
     run<T>(data, subsample, kernel, nonstationarity_image, estimator, exports);
     return;
   }
   auto input = data.get_image<T>();
   auto input_demod = Image<T>::scratch(data, "Phase-demodulated version of \"" + data.name() + "\"");
   {
-    Filter::Demodulate demodulator(input, demodulation_axes);
+    Filter::Demodulate demodulator(input, demodulation.axes, demodulation.mode == demodulation_t::LINEAR);
     demodulator(input, input_demod);
   }
   Estimate<T> func(data, subsample, kernel, nonstationarity_image, estimator, exports);
@@ -211,16 +211,18 @@ void run() {
     throw Exception("input image must be 4-dimensional");
   bool complex = dwi.datatype().is_complex();
 
-  Image<float> nonstationarity_image;
-  auto opt = get_options("nonstationarity");
-  if (!opt.empty())
-    nonstationarity_image = Image<float>::open(opt[0][0]);
+  const Demodulation demodulation = get_demodulation(dwi);
 
   auto subsample = Subsample::make(dwi);
   assert(subsample);
 
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
+
+  Image<float> nonstationarity_image;
+  auto opt = get_options("nonstationarity");
+  if (!opt.empty())
+    nonstationarity_image = Image<float>::open(opt[0][0]);
 
   auto estimator = Estimator::make_estimator(false);
   assert(estimator);
@@ -240,8 +242,6 @@ void run() {
   if (!opt.empty())
     exports.set_patchcount(opt[0][0]);
 
-  const std::vector<size_t> demodulation_axes = get_demodulation_axes(dwi);
-
   int prec = get_option_value("datatype", 0); // default: single precision
   if (complex)
     prec += 2; // support complex input data
@@ -258,11 +258,11 @@ void run() {
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation_axes, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<cfloat>(dwi, demodulation, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation_axes, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<cdouble>(dwi, demodulation, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   }
 }

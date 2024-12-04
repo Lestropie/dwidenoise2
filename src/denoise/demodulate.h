@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "app.h"
@@ -26,8 +27,21 @@ namespace MR::Denoise {
 
 extern const char *const demodulation_description;
 
+const std::vector<std::string> demodulation_choices({"none", "linear", "nonlinear"});
+enum class demodulation_t { NONE, LINEAR, NONLINEAR };
+
 extern const App::OptionGroup demodulation_options;
 
-std::vector<size_t> get_demodulation_axes(const Header &);
+class Demodulation {
+public:
+  Demodulation(demodulation_t mode) : mode(mode) {}
+  Demodulation() : mode(demodulation_t::NONE) {}
+  explicit operator bool() const { return mode != demodulation_t::NONE; }
+  bool operator!() const { return mode == demodulation_t::NONE; }
+  demodulation_t mode;
+  std::vector<size_t> axes;
+};
+
+Demodulation get_demodulation(const Header &);
 
 } // namespace MR::Denoise
