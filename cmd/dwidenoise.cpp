@@ -31,6 +31,7 @@
 #include "denoise/estimator/estimator.h"
 #include "denoise/estimator/exp.h"
 #include "denoise/estimator/mrm2022.h"
+#include "denoise/estimator/rank.h"
 #include "denoise/estimator/result.h"
 #include "denoise/exports.h"
 #include "denoise/kernel/cuboid.h"
@@ -142,7 +143,7 @@ void usage() {
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
   + datatype_option
-  + Estimator::option
+  + Estimator::estimator_denoise_options
   + Kernel::options
   + subsample_option
   + demodulation_options
@@ -153,9 +154,6 @@ void usage() {
            "note that this will be used for within-patch non-stationariy correction only, "
            "if noise level estimate is to be used for denoising also "
            "it must be additionally provided via the -noise_in option")
-    + Argument("image").type_image_in()
-  + Option("noise_in",
-           "import a pre-estimated noise level map for noise removal rather than estimating this level from data")
     + Argument("image").type_image_in()
 
   + OptionGroup("Options that affect reconstruction of the output image series")
@@ -339,7 +337,7 @@ void run() {
   auto estimator = Estimator::make_estimator(true);
   assert(estimator);
 
-  filter_type filter = filter_type::OPTSHRINK;
+  filter_type filter = get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE;
   opt = get_options("filter");
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
