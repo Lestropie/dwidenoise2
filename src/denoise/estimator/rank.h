@@ -17,20 +17,33 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-#include <vector>
-
-#include "app.h"
+#include "denoise/estimator/base.h"
+#include "denoise/estimator/result.h"
 
 namespace MR::Denoise::Estimator {
 
-class Base;
+class Rank : public Base {
+public:
+  Rank(const ssize_t r) : rank(r) {}
+  Result operator()(const eigenvalues_type &s,
+                    const ssize_t m,
+                    const ssize_t n,
+                    const Eigen::Vector3d & /*unused*/) const final {
+    Result result;
+    const ssize_t r = std::min(m, n);
+    const ssize_t q = std::max(m, n);
+    result.cutoff_p = r - rank;
+    double clam = 0.0;
+    for (ssize_t p = 0; p <= result.cutoff_p; ++p)
+      clam += std::max(s[p], 0.0);
+    clam /= q;
+    result.sigma2 = clam / (result.cutoff_p + 1);
+    result.lamplus = std::max(s[result.cutoff_p], 0.0);
+    return result;
+  }
 
-extern const App::Option estimator_option;
-extern const App::OptionGroup estimator_denoise_options;
-const std::vector<std::string> estimators = {"exp1", "exp2", "med", "mrm2022"};
-enum class estimator_type { EXP1, EXP2, MED, MRM2022 };
-std::shared_ptr<Base> make_estimator(const bool permit_bypass);
+protected:
+  const ssize_t rank;
+};
 
 } // namespace MR::Denoise::Estimator

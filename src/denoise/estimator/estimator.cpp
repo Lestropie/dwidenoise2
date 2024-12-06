@@ -22,29 +22,54 @@
 #include "denoise/estimator/import.h"
 #include "denoise/estimator/med.h"
 #include "denoise/estimator/mrm2022.h"
+#include "denoise/estimator/rank.h"
 
 namespace MR::Denoise::Estimator {
 
 using namespace App;
 
-const Option option = Option("estimator",
-                             "Select the noise level estimator"
-                             " (default = Exp2),"
-                             " either: \n"
-                             "* Exp1: the original estimator used in Veraart et al. (2016); \n"
-                             "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
-                             "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
-                             "* MRM2022: the alternative estimator introduced in Olesen et al. (2022).") +
-                      Argument("algorithm").type_choice(estimators);
+// clang-format off
+const Option estimator_option =
+    Option("estimator",
+           "Select the noise level estimator"
+           " (default = Exp2),"
+           " either: \n"
+           "* Exp1: the original estimator used in Veraart et al. (2016); \n"
+           "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
+           "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
+           "* MRM2022: the alternative estimator introduced in Olesen et al. (2022). \n"
+           "Operation will be bypassed if -noise_in or -fixed_rank are specified")
+      + Argument("algorithm").type_choice(estimators);
 
-std::shared_ptr<Base> make_estimator(const bool permit_noise_in) {
+const OptionGroup estimator_denoise_options =
+    OptionGroup("Options relating to signal / noise level estimation for denoising")
+
+    + estimator_option
+
+    + Option("noise_in",
+             "import a pre-estimated noise level map for denoising rather than estimating this level from data")
+      + Argument("image").type_image_in()
+
+    + Option("fixed_rank",
+             "set a fixed input signal rank rather than estimating the noise level from the data")
+      + Argument("value").type_integer(1);
+
+std::shared_ptr<Base> make_estimator(const bool permit_bypass) {
   auto opt = get_options("estimator");
-  if (permit_noise_in) {
+  if (permit_bypass) {
     auto noise_in = get_options("noise_in");
+    auto fixed_rank = get_options("fixed_rank");
     if (!noise_in.empty()) {
       if (!opt.empty())
         throw Exception("Cannot both provide an input noise level image and specify a noise level estimator");
+      if (!fixed_rank.empty())
+        throw Exception("Cannot both provide an input noise level image and request a fixed signal rank");
       return std::make_shared<Import>(noise_in[0][0]);
+    }
+    if (!fixed_rank.empty()) {
+      if (!opt.empty())
+        throw Exception("Cannot both provide an input signal rank and specify a noise level estimator");
+      return std::make_shared<Rank>(fixed_rank[0][0]);
     }
   }
   const estimator_type est = opt.empty() ? estimator_type::EXP2 : estimator_type((int)(opt[0][0]));

@@ -117,7 +117,7 @@ void usage() {
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
   + datatype_option
-  + Estimator::option
+  + Estimator::estimator_option
   + Kernel::options
   + subsample_option
   + demodulation_options

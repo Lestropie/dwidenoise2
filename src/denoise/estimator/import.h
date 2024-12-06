@@ -53,7 +53,6 @@ public:
     //   estimate the upper bound of the MP distribution and rank of signal
     //   given the ordered list of eigenvalues
     double cumulative_lambda = 0.0;
-    double recalc_sigmasq = 0.0;
     for (ssize_t p = 0; p != r; ++p) {
       const double lambda = std::max(s[p], 0.0) / q;
       cumulative_lambda += lambda;
@@ -61,7 +60,6 @@ public:
       if (sigma_sq < result.sigma2) {
         result.cutoff_p = p;
         result.lamplus = lambda;
-        recalc_sigmasq = sigma_sq;
       }
     }
     // TODO It would be nice if the upper bound, lambda_plus,
