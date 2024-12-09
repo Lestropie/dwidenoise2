@@ -163,8 +163,7 @@ void usage() {
   + Kernel::options
   + subsample_option
   + demodulation_options
-  // TODO If explicitly regressing the mean prior to Casorati formation,
-  //   this should happen _before_ rescaling based on noise level
+
   + Option("nonstationarity",
            "import an estimated map of noise nonstationarity; "
            "note that this will be used for within-patch non-stationariy correction only, "
@@ -218,6 +217,10 @@ void usage() {
   + Option("sum_optshrink",
            "the sum of eigenvector weights computed for the denoising patch centred at each voxel "
            "as a result of performing optimal shrinkage")
+    + Argument("image").type_image_out()
+    + Option("noise_cov",
+           "export an image of the Coefficient of Variation (CoV) of noise level within each patch "
+           "(only applicable if -nonstationarity is specified)")
     + Argument("image").type_image_out();
 
   COPYRIGHT =
@@ -413,17 +416,24 @@ void run() {
     exports.set_sum_aggregation("");
   }
 
+  opt = get_options("noise_cov");
+  if (!opt.empty()) {
+    if (!nonstationarity_image.valid())
+      throw Exception("-noise_variance can only be specified if -nonstationarity option is used");
+    exports.set_noise_cov(opt[0][0]);
+  }
+
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())
     prec += 2; // support complex input data
   switch (prec) {
   case 0:
-    assert(demodulation_axes.empty());
+    assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
     run<float>(dwi, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, argument[1], exports);
     break;
   case 1:
-    assert(demodulation_axes.empty());
+    assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
     run<double>(dwi, subsample, kernel, nonstationarity_image, estimator, filter, aggregator, argument[1], exports);
     break;

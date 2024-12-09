@@ -35,6 +35,7 @@ Estimate<F>::Estimate(const Header &header,
       subsample(subsample),
       kernel(kernel),
       estimator(estimator),
+      transform(std::make_shared<Transform>(header)),
       nonstationarity_image(nonstationarity_image),
       X(m, kernel->estimated_size()),
       XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
@@ -122,6 +123,14 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
       exports.patchcount.value() = exports.patchcount.value() + 1;
     }
   }
+  if (exports.noise_cov.valid()) {
+    double variance(double(0));
+    for (auto v : patch.voxels)
+      variance += Math::pow2(v.noise_level - patch.centre_noise);
+    variance /= (patch.voxels.size() - 1);
+    assign_pos_of(ss_index).to(exports.noise_cov);
+    exports.noise_cov.value() = std::sqrt(variance) / patch.centre_noise;
+  }
 }
 
 template <typename F> void Estimate<F>::load_data(Image<F> &image) {
@@ -133,15 +142,16 @@ template <typename F> void Estimate<F>::load_data(Image<F> &image) {
     assert(!(!interp));
     patch.centre_noise = interp.value();
     for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
-      interp.scanner(image.transform() * patch.voxels[i].index.cast<default_type>());
+      interp.scanner(transform->voxel2scanner * patch.voxels[i].index.cast<default_type>());
       // TODO Trying to pull intensity information from voxels beyond the extremities of the subsampled image
       //   may cause problems
       assert(!(!interp));
       const double voxel_noise = interp.value();
       patch.voxels[i].noise_level = voxel_noise;
+      const double scaling_factor = patch.centre_noise / voxel_noise;
       assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
       X.col(i) = image.row(3);
-      X.col(i) *= patch.centre_noise / voxel_noise;
+      X.col(i) *= scaling_factor;
     }
   } else {
     for (ssize_t i = 0; i != patch.voxels.size(); ++i) {

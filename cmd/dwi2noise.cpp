@@ -247,12 +247,12 @@ void run() {
     prec += 2; // support complex input data
   switch (prec) {
   case 0:
-    assert(demodulation_axes.empty());
+    assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
     run<float>(dwi, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
   case 1:
-    assert(demodulation_axes.empty());
+    assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
     run<double>(dwi, subsample, kernel, nonstationarity_image, estimator, exports);
     break;
