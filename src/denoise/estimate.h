@@ -31,6 +31,7 @@
 #include "denoise/subsample.h"
 #include "header.h"
 #include "image.h"
+#include "transform.h"
 
 namespace MR::Denoise {
 
@@ -56,6 +57,9 @@ protected:
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;
 
+  // Necessary for transform from input voxel locations to nonstationarity image
+  std::shared_ptr<Transform> transform;
+
   // Reusable memory
   Kernel::Data patch;
   Image<float> nonstationarity_image;
@@ -66,6 +70,8 @@ protected:
   Estimator::Result threshold;
 
   // Export images
+  // Note: One instance created per thread,
+  //   so that when possible output image data can be written without mutex-locking
   Exports exports;
 
   // Some data can only be written in a thread-safe manner

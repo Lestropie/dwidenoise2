@@ -59,6 +59,7 @@ public:
     else
       sum_aggregation = Image<float>::create(path, H_in);
   }
+  void set_noise_cov(const std::string &path) { noise_cov = Image<float>::create(path, H_ss); }
 
   Image<float> noise_out;
   Image<uint16_t> rank_input;
@@ -68,6 +69,7 @@ public:
   Image<uint16_t> voxelcount;
   Image<uint16_t> patchcount;
   Image<float> sum_aggregation;
+  Image<float> noise_cov;
 
 protected:
   Header H_in;
