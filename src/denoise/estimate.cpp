@@ -85,6 +85,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
 #endif
 
   load_data(dwi);
+  assert(X.leftCols(n).allFinite());
 
   // Compute Eigendecomposition:
   if (m <= n)
@@ -141,23 +142,27 @@ template <typename F> void Estimate<F>::load_data(Image<F> &image) {
     interp.scanner(patch.centre_realspace);
     assert(!(!interp));
     patch.centre_noise = interp.value();
-    for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
-      interp.scanner(transform->voxel2scanner * patch.voxels[i].index.cast<default_type>());
-      // TODO Trying to pull intensity information from voxels beyond the extremities of the subsampled image
-      //   may cause problems
-      assert(!(!interp));
-      const double voxel_noise = interp.value();
-      patch.voxels[i].noise_level = voxel_noise;
-      const double scaling_factor = patch.centre_noise / voxel_noise;
-      assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
-      X.col(i) = image.row(3);
-      X.col(i) *= scaling_factor;
+    if (patch.centre_noise > 0.0) {
+      for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
+        interp.scanner(transform->voxel2scanner * patch.voxels[i].index.cast<default_type>());
+        // TODO Trying to pull intensity information from voxels beyond the extremities of the subsampled image
+        //   may cause problems
+        assert(!(!interp));
+        const double voxel_noise = interp.value();
+        patch.voxels[i].noise_level = voxel_noise;
+        const double scaling_factor = voxel_noise > 0.0 ? (patch.centre_noise / voxel_noise) : 1.0;
+        assert(std::isfinite(scaling_factor));
+        assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
+        X.col(i) = image.row(3);
+        X.col(i) *= scaling_factor;
+      }
+      assign_pos_of(pos, 0, 3).to(image);
+      return;
     }
-  } else {
-    for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
-      assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
-      X.col(i) = image.row(3);
-    }
+  }
+  for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
+    assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
+    X.col(i) = image.row(3);
   }
   assign_pos_of(pos, 0, 3).to(image);
 }

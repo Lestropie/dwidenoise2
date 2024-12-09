@@ -25,6 +25,7 @@ namespace MR::Denoise::Estimator {
 class Base {
 public:
   Base() = default;
+  Base(const Base &) = delete;
   virtual Result operator()(const eigenvalues_type &eigenvalues,
                             const ssize_t m,
                             const ssize_t n,
