@@ -44,7 +44,7 @@ public:
   Estimate(const Header &header,
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
-           Image<float> &nonstationarity_image,
+           Image<float> &vst_noise_image,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports);
 
@@ -63,7 +63,7 @@ protected:
 
   // Reusable memory
   Kernel::Data patch;
-  Image<float> nonstationarity_image;
+  Image<float> vst_noise_image;
   MatrixType X;
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;

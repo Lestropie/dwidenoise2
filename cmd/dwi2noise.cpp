@@ -106,7 +106,7 @@ void usage() {
     "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172"
 
   + "* If using -estimator med: "
-    "Gavish, M.; Donoho, D.L."
+    "Gavish, M.; Donoho, D.L. "
     "The Optimal Hard Threshold for Singular Values is 4/sqrt(3). "
     "IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053.";
 
@@ -121,8 +121,8 @@ void usage() {
   + Kernel::options
   + subsample_option
   + demodulation_options
-  + Option("nonstationarity",
-           "import an estimated map of noise nonstationarity; "
+  + Option("vst",
+           "apply a within-patch variance-stabilising transformation based on a pre-estimated noise level map; "
            "note that this will be used for within-patch non-stationariy correction only, "
            "the output noise level estimate will still be derived from the input data")
     + Argument("image").type_image_in()
@@ -175,11 +175,11 @@ template <typename T>
 void run(Header &data,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
-         Image<float> &nonstationarity_image,
+         Image<float> &vst_noise_image,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
   auto input = data.get_image<T>().with_direct_io(3);
-  Estimate<T> func(data, subsample, kernel, nonstationarity_image, estimator, exports);
+  Estimate<T> func(data, subsample, kernel, vst_noise_image, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input);
 }
 
@@ -188,11 +188,11 @@ void run(Header &data,
          const Demodulation &demodulation,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
-         Image<float> &nonstationarity_image,
+         Image<float> &vst_noise_image,
          std::shared_ptr<Estimator::Base> estimator,
          Exports &exports) {
   if (!demodulation) {
-    run<T>(data, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<T>(data, subsample, kernel, vst_noise_image, estimator, exports);
     return;
   }
   auto input = data.get_image<T>();
@@ -201,7 +201,7 @@ void run(Header &data,
     Filter::Demodulate demodulator(input, demodulation.axes, demodulation.mode == demodulation_t::LINEAR);
     demodulator(input, input_demod);
   }
-  Estimate<T> func(data, subsample, kernel, nonstationarity_image, estimator, exports);
+  Estimate<T> func(data, subsample, kernel, vst_noise_image, estimator, exports);
   ThreadedLoop("running MP-PCA noise level estimation", data, 0, 3).run(func, input_demod);
 }
 
@@ -219,10 +219,10 @@ void run() {
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
 
-  Image<float> nonstationarity_image;
-  auto opt = get_options("nonstationarity");
+  Image<float> vst_noise_image;
+  auto opt = get_options("vst");
   if (!opt.empty())
-    nonstationarity_image = Image<float>::open(opt[0][0]);
+    vst_noise_image = Image<float>::open(opt[0][0]);
 
   auto estimator = Estimator::make_estimator(false);
   assert(estimator);
@@ -249,20 +249,20 @@ void run() {
   case 0:
     assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<float>(dwi, subsample, kernel, vst_noise_image, estimator, exports);
     break;
   case 1:
     assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<double>(dwi, subsample, kernel, vst_noise_image, estimator, exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<cfloat>(dwi, demodulation, subsample, kernel, vst_noise_image, estimator, exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation, subsample, kernel, nonstationarity_image, estimator, exports);
+    run<cdouble>(dwi, demodulation, subsample, kernel, vst_noise_image, estimator, exports);
     break;
   }
 }

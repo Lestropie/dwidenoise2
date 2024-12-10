@@ -38,7 +38,7 @@ public:
   Recon(const Header &header,
         std::shared_ptr<Subsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
-        Image<float> &nonstationarity_image,
+        Image<float> &vst_noise_image,
         std::shared_ptr<Estimator::Base> estimator,
         filter_type filter,
         aggregator_type aggregator,

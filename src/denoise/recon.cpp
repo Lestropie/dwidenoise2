@@ -25,12 +25,12 @@ template <typename F>
 Recon<F>::Recon(const Header &header,
                 std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
-                Image<float> &nonstationarity_image,
+                Image<float> &vst_noise_image,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports)
-    : Estimate<F>(header, subsample, kernel, nonstationarity_image, estimator, exports),
+    : Estimate<F>(header, subsample, kernel, vst_noise_image, estimator, exports),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -180,7 +180,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
             Estimate<F>::eig.eigenvectors().adjoint())); //
     }
     assert(Xr.leftCols(n).allFinite());
-    // Undo prior within-patch non-stationarity correction
+    // Undo prior within-patch variance-stabilising transform
     if (std::isfinite(Estimate<F>::patch.centre_noise)) {
       for (ssize_t i = 0; i != n; ++i)
         if (Estimate<F>::patch.voxels[i].noise_level > 0.0)

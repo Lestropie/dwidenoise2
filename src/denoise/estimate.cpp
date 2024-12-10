@@ -28,7 +28,7 @@ template <typename F>
 Estimate<F>::Estimate(const Header &header,
                       std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
-                      Image<float> &nonstationarity_image,
+                      Image<float> &vst_noise_image,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports)
     : m(header.size(3)),
@@ -36,7 +36,7 @@ Estimate<F>::Estimate(const Header &header,
       kernel(kernel),
       estimator(estimator),
       transform(std::make_shared<Transform>(header)),
-      nonstationarity_image(nonstationarity_image),
+      vst_noise_image(vst_noise_image),
       X(m, kernel->estimated_size()),
       XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
       eig(std::min(m, kernel->estimated_size())),
@@ -136,9 +136,9 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
 
 template <typename F> void Estimate<F>::load_data(Image<F> &image) {
   const Kernel::Voxel::index_type pos({image.index(0), image.index(1), image.index(2)});
-  if (nonstationarity_image.valid()) {
+  if (vst_noise_image.valid()) {
     assert(patch.centre_realspace.allFinite());
-    Interp::Cubic<Image<float>> interp(nonstationarity_image);
+    Interp::Cubic<Image<float>> interp(vst_noise_image);
     interp.scanner(patch.centre_realspace);
     assert(!(!interp));
     patch.centre_noise = interp.value();
