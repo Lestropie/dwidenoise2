@@ -17,6 +17,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <string>
 #include <vector>
 
 #include "app.h"

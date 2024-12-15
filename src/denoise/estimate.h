@@ -43,7 +43,6 @@ public:
   Estimate(const Header &header,
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
-           Image<float> &vst_noise_image,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports);
 
@@ -57,12 +56,8 @@ protected:
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;
 
-  // Necessary for transform from input voxel locations to nonstationarity image
-  std::shared_ptr<Transform> transform;
-
   // Reusable memory
   Kernel::Data patch;
-  Image<float> vst_noise_image;
   MatrixType X;
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
