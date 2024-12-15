@@ -25,12 +25,11 @@ template <typename F>
 Recon<F>::Recon(const Header &header,
                 std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
-                Image<float> &vst_noise_image,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports)
-    : Estimate<F>(header, subsample, kernel, vst_noise_image, estimator, exports),
+    : Estimate<F>(header, subsample, kernel, estimator, exports),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -76,12 +75,6 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       const double transition = 1.0 + std::sqrt(beta);
       for (ssize_t i = 0; i != r; ++i) {
         const double lam = std::max(Estimate<F>::s[i], 0.0) / q;
-        // TODO Should this be based on the noise level,
-        //   or on the estimated upper bound of the MP distribution?
-        // If based on upper bound,
-        //   there will be an issue with importing this information from a pre-estimated noise map
-        // TODO Unexpected absence of sqrt() here
-        // const double y = lam / std::sqrt(Estimate<F>::threshold.sigma2);
         const double y = lam / Estimate<F>::threshold.sigma2;
         double nu = 0.0;
         if (y > transition) {

@@ -35,6 +35,9 @@ namespace MR::Filter {
 
 // From Manzano-Patron et al. 2024
 constexpr default_type default_tukey_FWHM_demodulate = 0.58;
+// TODO Ideally do more experimentation to figure out a reasonable default here
+// Too high and everything ends up in the real axis;
+//   too low and disjointed phase cound drive up signal rank
 constexpr default_type default_tukey_alpha_demodulate = 2.0 * (1.0 - default_tukey_FWHM_demodulate);
 
 /*! Estimate a linear phase ramp of a complex image and demodulate by such
@@ -245,6 +248,8 @@ public:
                                            typename ImageType::value_type(std::conj(cfloat(phase.value()))));
     }
   }
+
+  Image<cfloat> operator()() const { return phase; }
 
 protected:
   // TODO Change to Image<float>; can produce complex value at processing time

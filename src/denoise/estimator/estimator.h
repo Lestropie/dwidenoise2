@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "app.h"
+#include "image.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -31,6 +32,6 @@ extern const App::Option estimator_option;
 extern const App::OptionGroup estimator_denoise_options;
 const std::vector<std::string> estimators = {"exp1", "exp2", "med", "mrm2022"};
 enum class estimator_type { EXP1, EXP2, MED, MRM2022 };
-std::shared_ptr<Base> make_estimator(const bool permit_bypass);
+std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool permit_bypass);
 
 } // namespace MR::Denoise::Estimator

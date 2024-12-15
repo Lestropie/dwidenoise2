@@ -54,7 +54,7 @@ const OptionGroup estimator_denoise_options =
              "set a fixed input signal rank rather than estimating the noise level from the data")
       + Argument("value").type_integer(1);
 
-std::shared_ptr<Base> make_estimator(const bool permit_bypass) {
+std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool permit_bypass) {
   auto opt = get_options("estimator");
   if (permit_bypass) {
     auto noise_in = get_options("noise_in");
@@ -64,7 +64,7 @@ std::shared_ptr<Base> make_estimator(const bool permit_bypass) {
         throw Exception("Cannot both provide an input noise level image and specify a noise level estimator");
       if (!fixed_rank.empty())
         throw Exception("Cannot both provide an input noise level image and request a fixed signal rank");
-      return std::make_shared<Import>(noise_in[0][0]);
+      return std::make_shared<Import>(noise_in[0][0], vst_noise_in);
     }
     if (!fixed_rank.empty()) {
       if (!opt.empty())

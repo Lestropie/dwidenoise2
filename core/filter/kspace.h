@@ -29,7 +29,7 @@
 
 namespace MR::Filter {
 
-std::vector<std::string> kspace_window_choices({"tukey"});
+const std::vector<std::string> kspace_window_choices({"tukey"});
 enum class kspace_windowfn_t { TUKEY };
 constexpr default_type default_tukey_width = 0.5;
 

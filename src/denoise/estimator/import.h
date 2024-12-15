@@ -29,7 +29,9 @@ namespace MR::Denoise::Estimator {
 
 class Import : public Base {
 public:
-  Import(const std::string &path) : noise_image(Image<float>::open(path)) {}
+  Import(const std::string &path, Image<float> &vst_noise_in) //
+      : noise_image(Image<float>::open(path)),                //
+        vst_noise_image(vst_noise_in) {}                      //
   Result operator()(const eigenvalues_type &s,                //
                     const ssize_t m,                          //
                     const ssize_t n,                          //
@@ -47,7 +49,17 @@ public:
       //   where the patch centre is too close to the image edge for cubic interpolation
       if (!interp.scanner(pos))
         return result;
-      result.sigma2 = Math::pow2(interp.value());
+      // If the data have been preconditioned at input based on a pre-estimated noise level,
+      //   then we need to rescale the threshold that we load from this image
+      //   based on knowledge of that rescaling
+      if (vst_noise_image.valid()) {
+        Interp::Cubic<Image<float>> vst_interp(vst_noise_image);
+        if (!vst_interp.scanner(pos))
+          return result;
+        result.sigma2 = Math::pow2(interp.value() / vst_interp.value());
+      } else {
+        result.sigma2 = Math::pow2(interp.value());
+      }
     }
     // From this noise level,
     //   estimate the upper bound of the MP distribution and rank of signal
@@ -70,6 +82,7 @@ public:
 
 private:
   Image<float> noise_image;
+  Image<float> vst_noise_image;
 };
 
 } // namespace MR::Denoise::Estimator

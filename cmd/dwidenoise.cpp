@@ -26,7 +26,6 @@
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 
-#include "denoise/demodulate.h"
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/estimator.h"
@@ -40,6 +39,7 @@
 #include "denoise/kernel/kernel.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_ratio.h"
+#include "denoise/precondition.h"
 #include "denoise/recon.h"
 #include "denoise/subsample.h"
 
@@ -162,14 +162,7 @@ void usage() {
   + Estimator::estimator_denoise_options
   + Kernel::options
   + subsample_option
-  + demodulation_options
-
-  + Option("vst",
-           "apply a within-patch variance-stabilising transformation based on a pre-estimated noise level map; "
-           "note that this will be used for within-patch non-stationariy correction only, "
-           "if noise level estimate is to be used for denoising also "
-           "it must be additionally provided via the -noise_in option")
-    + Argument("image").type_image_in()
+  + precondition_options
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   + Option("filter",
@@ -217,10 +210,6 @@ void usage() {
   + Option("sum_optshrink",
            "the sum of eigenvector weights computed for the denoising patch centred at each voxel "
            "as a result of performing optimal shrinkage")
-    + Argument("image").type_image_out()
-    + Option("noise_cov",
-           "export an image of the Coefficient of Variation (CoV) of noise level within each patch "
-           "(only applicable if -nonstationarity is specified)")
     + Argument("image").type_image_out();
 
   COPYRIGHT =
@@ -258,23 +247,16 @@ void usage() {
 std::complex<double> operator/(const std::complex<double> &c, const float n) { return c / double(n); }
 
 template <typename T>
-void run(Header &data,
+void run(Image<T> &input,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
-         Image<float> &vst_noise_image,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
-         const std::string &output_name,
+         Image<T> &output,
          Exports &exports) {
-  auto input = data.get_image<T>().with_direct_io(3);
-  // create output
-  Header header(data);
-  header.datatype() = DataType::from<T>();
-  auto output = Image<T>::create(output_name, header);
-  // run
-  Recon<T> func(data, subsample, kernel, vst_noise_image, estimator, filter, aggregator, exports);
-  ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input, output);
+  Recon<T> func(input, subsample, kernel, estimator, filter, aggregator, exports);
+  ThreadedLoop("running MP-PCA denoising", input, 0, 3).run(func, input, output);
   // Rescale output if aggregation was performed
   if (aggregator == aggregator_type::EXCLUSIVE)
     return;
@@ -289,49 +271,75 @@ void run(Header &data,
 }
 
 template <typename T>
-void run(Header &data,
+void run(Header &dwi,
          const Demodulation &demodulation,
+         const demean_type demean,
+         Image<float> &vst_noise_image,
          std::shared_ptr<Subsample> subsample,
          std::shared_ptr<Kernel::Base> kernel,
-         Image<float> &vst_noise_image,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
          const std::string &output_name,
          Exports &exports) {
-  if (!demodulation) {
-    run<T>(data, subsample, kernel, vst_noise_image, estimator, filter, aggregator, output_name, exports);
+  auto opt_preconditioned = get_options("preconditioned");
+  if (!demodulation && demean == demean_type::NONE && !vst_noise_image.valid()) {
+    if (!opt_preconditioned.empty()) {
+      WARN("-preconditioned option ignored: no preconditioning taking place");
+    }
+    auto input = dwi.get_image<T>().with_direct_io(3);
+    Header H(dwi);
+    H.datatype() = DataType::from<T>();
+    auto output = Image<T>::create(output_name, H);
+    run<T>(input, subsample, kernel, estimator, filter, aggregator, output, exports);
     return;
   }
-  auto input = data.get_image<T>();
-  // generate scratch version of DWI with phase demodulation
-  Header H_scratch(data);
-  Stride::set(H_scratch, Stride::contiguous_along_axis(3));
-  H_scratch.datatype() = DataType::from<T>();
-  H_scratch.datatype().set_byte_order_native();
-  auto input_demodulated = Image<T>::scratch(H_scratch, "Phase-demodulated version of input DWI");
-  Filter::Demodulate demodulate(input, demodulation.axes, demodulation.mode == demodulation_t::LINEAR);
-  demodulate(input, input_demodulated, false);
-  input = Image<T>(); // free memory
+  auto input = dwi.get_image<T>();
+  // perform preconditioning
+  const Precondition<T> preconditioner(input, demodulation, demean, vst_noise_image);
+  Header H_preconditioned(dwi);
+  Stride::set(H_preconditioned, Stride::contiguous_along_axis(3));
+  H_preconditioned.datatype() = DataType::from<T>();
+  H_preconditioned.datatype().set_byte_order_native();
+  Image<T> input_preconditioned;
+  input_preconditioned = opt_preconditioned.empty()
+                             ? Image<T>::scratch(H_preconditioned, "Preconditioned version of \"" + dwi.name() + "\"")
+                             : Image<T>::create(opt_preconditioned[0][0], H_preconditioned);
+  preconditioner(input, input_preconditioned, false);
   // create output
-  Header header(data);
-  header.datatype() = DataType::from<T>();
-  auto output = Image<T>::create(output_name, header);
+  Header H(dwi);
+  H.datatype() = DataType::from<T>();
+  auto output = Image<T>::create(output_name, H);
   // run
-  Recon<T> func(data, subsample, kernel, vst_noise_image, estimator, filter, aggregator, exports);
-  ThreadedLoop("running MP-PCA denoising", data, 0, 3).run(func, input_demodulated, output);
-  // Re-apply phase ramps that were previously demodulated
-  demodulate(output, true);
-  // Rescale output if performing aggregation
-  if (aggregator == aggregator_type::EXCLUSIVE)
-    return;
-  for (auto l_voxel = Loop(exports.sum_aggregation)(output, exports.sum_aggregation); l_voxel; ++l_voxel) {
-    for (auto l_volume = Loop(3)(output); l_volume; ++l_volume)
-      output.value() /= float(exports.sum_aggregation.value());
+  run(input_preconditioned, subsample, kernel, estimator, filter, aggregator, output, exports);
+  // reverse effects of preconditioning
+  Image<T> output2(output);
+  preconditioner(output, output2, true);
+  // compensate for effects of preconditioning where relevant
+  if (exports.noise_out.valid() && vst_noise_image.valid()) {
+    Interp::Cubic<Image<float>> vst(vst_noise_image);
+    const Transform transform(exports.noise_out);
+    for (auto l = Loop(exports.noise_out)(exports.noise_out); l; ++l) {
+      vst.scanner(transform.voxel2scanner * Eigen::Vector3d{default_type(exports.noise_out.index(0)),
+                                                            default_type(exports.noise_out.index(1)),
+                                                            default_type(exports.noise_out.index(2))});
+      exports.noise_out.value() *= vst.value();
+    }
   }
-  if (exports.rank_output.valid()) {
-    for (auto l = Loop(exports.sum_aggregation)(exports.rank_output, exports.sum_aggregation); l; ++l)
-      exports.rank_output.value() /= exports.sum_aggregation.value();
+  if (preconditioner.rank() == 1) {
+    if (exports.rank_input.valid()) {
+      for (auto l = Loop(exports.rank_input)(exports.rank_input); l; ++l)
+        exports.rank_input.value() =
+            std::min<uint16_t>(uint16_t(exports.rank_input.value()) + uint16_t(1), uint16_t(dwi.size(3)));
+    }
+    if (exports.rank_output.valid()) {
+      for (auto l = Loop(exports.rank_output)(exports.rank_output); l; ++l)
+        exports.rank_output.value() = std::min<float>(float(exports.rank_output.value()) + 1.0f, float(dwi.size(3)));
+    }
+    if (exports.sum_optshrink.valid()) {
+      for (auto l = Loop(exports.sum_optshrink)(exports.sum_optshrink); l; ++l)
+        exports.sum_optshrink.value() = float(exports.sum_optshrink.value()) + 1.0f;
+    }
   }
 }
 
@@ -340,7 +348,12 @@ void run() {
   if (dwi.ndim() != 4 || dwi.size(3) <= 1)
     throw Exception("input image must be 4-dimensional");
 
-  const Demodulation demodulation = get_demodulation(dwi);
+  const Demodulation demodulation = select_demodulation(dwi);
+  const demean_type demean = select_demean(dwi);
+  Image<float> vst_noise_image;
+  auto opt = get_options("vst");
+  if (!opt.empty())
+    vst_noise_image = Image<float>::open(opt[0][0]);
 
   auto subsample = Subsample::make(dwi);
   assert(subsample);
@@ -348,12 +361,7 @@ void run() {
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
 
-  Image<float> vst_noise_image;
-  auto opt = get_options("vst");
-  if (!opt.empty())
-    vst_noise_image = Image<float>::open(opt[0][0]);
-
-  auto estimator = Estimator::make_estimator(true);
+  auto estimator = Estimator::make_estimator(vst_noise_image, true);
   assert(estimator);
 
   filter_type filter = get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE;
@@ -416,13 +424,6 @@ void run() {
     exports.set_sum_aggregation("");
   }
 
-  opt = get_options("noise_cov");
-  if (!opt.empty()) {
-    if (!vst_noise_image.valid())
-      throw Exception("-noise_variance can only be specified if -nonstationarity option is used");
-    exports.set_noise_cov(opt[0][0]);
-  }
-
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())
     prec += 2; // support complex input data
@@ -432,9 +433,11 @@ void run() {
     INFO("select real float32 for processing");
     run<float>(          //
         dwi,             //
+        demodulation,    //
+        demean,          //
+        vst_noise_image, //
         subsample,       //
         kernel,          //
-        vst_noise_image, //
         estimator,       //
         filter,          //
         aggregator,      //
@@ -446,9 +449,11 @@ void run() {
     INFO("select real float64 for processing");
     run<double>(         //
         dwi,             //
+        demodulation,    //
+        demean,          //
+        vst_noise_image, //
         subsample,       //
         kernel,          //
-        vst_noise_image, //
         estimator,       //
         filter,          //
         aggregator,      //
@@ -460,9 +465,10 @@ void run() {
     run<cfloat>(         //
         dwi,             //
         demodulation,    //
+        demean,          //
+        vst_noise_image, //
         subsample,       //
         kernel,          //
-        vst_noise_image, //
         estimator,       //
         filter,          //
         aggregator,      //
@@ -474,9 +480,10 @@ void run() {
     run<cdouble>(        //
         dwi,             //
         demodulation,    //
+        demean,          //
+        vst_noise_image, //
         subsample,       //
         kernel,          //
-        vst_noise_image, //
         estimator,       //
         filter,          //
         aggregator,      //

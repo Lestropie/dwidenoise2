@@ -28,15 +28,12 @@ template <typename F>
 Estimate<F>::Estimate(const Header &header,
                       std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
-                      Image<float> &vst_noise_image,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports)
     : m(header.size(3)),
       subsample(subsample),
       kernel(kernel),
       estimator(estimator),
-      transform(std::make_shared<Transform>(header)),
-      vst_noise_image(vst_noise_image),
       X(m, kernel->estimated_size()),
       XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
       eig(std::min(m, kernel->estimated_size())),
@@ -124,42 +121,10 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
       exports.patchcount.value() = exports.patchcount.value() + 1;
     }
   }
-  if (exports.noise_cov.valid()) {
-    double variance(double(0));
-    for (auto v : patch.voxels)
-      variance += Math::pow2(v.noise_level - patch.centre_noise);
-    variance /= (patch.voxels.size() - 1);
-    assign_pos_of(ss_index).to(exports.noise_cov);
-    exports.noise_cov.value() = std::sqrt(variance) / patch.centre_noise;
-  }
 }
 
 template <typename F> void Estimate<F>::load_data(Image<F> &image) {
   const Kernel::Voxel::index_type pos({image.index(0), image.index(1), image.index(2)});
-  if (vst_noise_image.valid()) {
-    assert(patch.centre_realspace.allFinite());
-    Interp::Cubic<Image<float>> interp(vst_noise_image);
-    interp.scanner(patch.centre_realspace);
-    assert(!(!interp));
-    patch.centre_noise = interp.value();
-    if (patch.centre_noise > 0.0) {
-      for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
-        interp.scanner(transform->voxel2scanner * patch.voxels[i].index.cast<default_type>());
-        // TODO Trying to pull intensity information from voxels beyond the extremities of the subsampled image
-        //   may cause problems
-        assert(!(!interp));
-        const double voxel_noise = interp.value();
-        patch.voxels[i].noise_level = voxel_noise;
-        const double scaling_factor = voxel_noise > 0.0 ? (patch.centre_noise / voxel_noise) : 1.0;
-        assert(std::isfinite(scaling_factor));
-        assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
-        X.col(i) = image.row(3);
-        X.col(i) *= scaling_factor;
-      }
-      assign_pos_of(pos, 0, 3).to(image);
-      return;
-    }
-  }
   for (ssize_t i = 0; i != patch.voxels.size(); ++i) {
     assign_pos_of(patch.voxels[i].index, 0, 3).to(image);
     X.col(i) = image.row(3);
