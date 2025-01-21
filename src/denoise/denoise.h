@@ -29,6 +29,11 @@ namespace MR::Denoise {
 using eigenvalues_type = Eigen::Matrix<double, Eigen::Dynamic, 1>;
 using vector_type = Eigen::Array<double, Eigen::Dynamic, 1>;
 
+extern const char *first_step_description;
+extern const char *non_gaussian_noise_description;
+extern const char *filter_description;
+extern const char *aggregation_description;
+
 const std::vector<std::string> dtypes = {"float32", "float64"};
 extern const App::Option datatype_option;
 
