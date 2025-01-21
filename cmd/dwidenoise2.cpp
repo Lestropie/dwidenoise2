@@ -50,9 +50,26 @@ using namespace MR::Denoise;
 // clang-format off
 void usage() {
 
-  SYNOPSIS = "dMRI noise level estimation and denoising using Marchenko-Pastur PCA";
+  SYNOPSIS = "Improved dMRI denoising using Marchenko-Pastur PCA";
+
+  AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)"
+           " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
+           " and Jelle Veraart (jelle.veraart@nyumc.org)"
+           " and J-Donald Tournier (jdtournier@gmail.com)";
 
   DESCRIPTION
+  + "This command includes many capabilities absent from the original dwidenoise command. "
+    "These include:"
+    " - Multiple sliding window kernel shapes,"
+      " including a spherical kernel that dilates at image edges to preserve aspect ratio;"
+    " - A greater number of mechanisms for noise level estimation,"
+      " including taking a pre-estimated noise map as input;"
+    " - Preconditioning, including (per-shell) demeaning,"
+      " phase demodulation (linear or nonlinear),"
+      " and variance-stabilising transform to compensate for within-patch heteroscedasticity;"
+    " - Overcomplete local PCA;"
+    " - Subsampling (performing fewer PCAs than there are input voxels)."
+
   + "DWI data denoising and noise map estimation"
     " by exploiting data redundancy in the PCA domain"
     " using the prior knowledge that the eigenspectrum of random covariance matrices"
@@ -104,11 +121,13 @@ void usage() {
       "regardless of distance between the output voxel and the centre of the decomposition kernel; "
     "'uniform': All decompositions that include the output voxel in the sliding spatial window contribute equally.";
 
-  AUTHOR = " Robert E. Smith (robert.smith@florey.edu.au)"
-           " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
-           " and Jelle Veraart (jelle.veraart@nyumc.org)"
-           " and J-Donald Tournier (jdtournier@gmail.com)"
-           " and Robert E. Smith (robert.smith@florey.edu.au)";
+  EXAMPLES
+  + Example("To approximately replicate the behaviour of the original dwidenoise command",
+            "dwidenoise2 DWI.mif out.mif -shape cuboid -subsample 1 -demodulate none -demean none -filter truncate -aggregator exclusive",
+            "While this is neither guaranteed to match exactly the output of the original dwidenoise command"
+            " nor is it a recommended use case,"
+            " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
+            " that must be explicitly disabled in order to approximate that behaviour.");
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"
@@ -212,32 +231,6 @@ void usage() {
            "as a result of performing optimal shrinkage")
     + Argument("image").type_image_out();
 
-  COPYRIGHT =
-      "Copyright (c) 2016 New York University, University of Antwerp, and the MRtrix3 contributors \n \n"
-      "Permission is hereby granted, free of charge, to any non-commercial entity ('Recipient') obtaining a copy of "
-      "this software and "
-      "associated documentation files (the 'Software'), to the Software solely for non-commercial research, including "
-      "the rights to "
-      "use, copy and modify the Software, subject to the following conditions: \n \n"
-      "\t 1. The above copyright notice and this permission notice shall be included by Recipient in all copies or "
-      "substantial portions of "
-      "the Software. \n \n"
-      "\t 2. THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT "
-      "LIMITED TO THE WARRANTIES"
-      "OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR "
-      "COPYRIGHT HOLDERS BE"
-      "LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING "
-      "FROM, OUT OF OR"
-      "IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. \n \n"
-      "\t 3. In no event shall NYU be liable for direct, indirect, special, incidental or consequential damages in "
-      "connection with the Software. "
-      "Recipient will defend, indemnify and hold NYU harmless from any claims or liability resulting from the use of "
-      "the Software by recipient. \n \n"
-      "\t 4. Neither anything contained herein nor the delivery of the Software to recipient shall be deemed to grant "
-      "the Recipient any right or "
-      "licenses under any patents or patent application owned by NYU. \n \n"
-      "\t 5. The Software may only be used for non-commercial research and may not be used for clinical care. \n \n"
-      "\t 6. Any publication by Recipient of research involving the Software shall cite the references listed below.";
 }
 // clang-format on
 
