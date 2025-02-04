@@ -29,7 +29,7 @@ Recon<F>::Recon(const Header &header,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports)
-    : Estimate<F>(header, subsample, kernel, estimator, exports),
+    : Estimate<F>(header, subsample, kernel, estimator, exports, true),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -51,7 +51,9 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   const ssize_t r = std::min(Estimate<F>::m, n);
   const ssize_t q = std::max(Estimate<F>::m, n);
   const double beta = double(r) / double(q);
-  const ssize_t in_rank = r - Estimate<F>::threshold.cutoff_p;
+  const ssize_t in_rank = bool(Estimate<F>::threshold)                //
+                              ? (r - Estimate<F>::threshold.cutoff_p) //
+                              : -1;                                   //
 
   if (r > w.size())
     w.resize(r);
@@ -65,11 +67,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   // Generate weights vector
   double sum_weights = 0.0;
   ssize_t out_rank = 0;
-  if (Estimate<F>::threshold.sigma2 == 0.0 || !std::isfinite(Estimate<F>::threshold.sigma2)) {
-    w.head(r).setOnes();
-    out_rank = r;
-    sum_weights = double(r);
-  } else {
+  if (bool(Estimate<F>::threshold)) {
     switch (filter) {
     case filter_type::OPTSHRINK: {
       const double transition = 1.0 + std::sqrt(beta);
@@ -78,7 +76,9 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         const double y = lam / Estimate<F>::threshold.sigma2;
         double nu = 0.0;
         if (y > transition) {
-          nu = std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y;
+          // Occasionally floating-point precision will drive this calculation to fractionally greater than y,
+          //   which will erroneously yield a weight fractionally greater than 1.0
+          nu = std::min(y, std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y);
           ++out_rank;
         }
         w[i] = lam > 0.0 ? (nu / y) : 0.0;
@@ -118,9 +118,17 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     default:
       assert(false);
     }
+    assert(std::isfinite(sum_weights));
+  } else { // Threshold for this patch is invalid
+    // Erring on the conservative side:
+    //   If the decomposition fails, or a threshold can't be found,
+    //   copy the input data to the output data as-is,
+    //   regardless of whether performing overcomplete local PCA
+    w.head(r).setOnes();
+    out_rank = r;
+    sum_weights = r;
   }
   assert(w.head(r).allFinite());
-  assert(std::isfinite(sum_weights));
 
   // recombine data using only eigenvectors above threshold
   // If only the data computed when this voxel was the centre of the patch
@@ -129,22 +137,47 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   //   if however the result from this patch is to contribute to the synthesized image
   //   for all voxels that were utilised within this patch,
   //   then we need to instead compute the full projection
+#ifdef DWIDENOISE2_USE_BDCSVD
+  const Eigen::Matrix<F, Eigen::Dynamic, 1> wrev = w.head(r).reverse().cast<F>();
+#endif
   switch (aggregator) {
-  case aggregator_type::EXCLUSIVE:
+  case aggregator_type::EXCLUSIVE: {
     assert(Estimate<F>::patch.centre_index >= 0);
-    if (Estimate<F>::m <= n)
-      Xr.noalias() =                                               //
-          Estimate<F>::eig.eigenvectors() *                        //
-          (w.head(r).cast<F>().matrix().asDiagonal() *             //
-           (Estimate<F>::eig.eigenvectors().adjoint() *            //
-            Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
-    else
-      Xr.noalias() =                                                                          //
-          Estimate<F>::X.leftCols(n) *                                                        //
-          (Estimate<F>::eig.eigenvectors() *                                                  //
-           (w.head(r).cast<F>().matrix().asDiagonal() *                                       //
-            Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
-    assert(Xr.allFinite());
+    if (bool(Estimate<F>::threshold)) {
+#ifdef DWIDENOISE2_USE_BDCSVD
+      assert(Estimate<F>::SVD.matrixU().allFinite());
+      assert(Estimate<F>::SVD.matrixV().allFinite());
+      assert(wrev.allFinite());
+      assert(Estimate<F>::SVD.singularValues().allFinite());
+      // TODO Re-try reconstruction without use of V:
+      //   https://github.com/MRtrix3/mrtrix3/pull/2906/commits/eb34f3c57dd460d2b3bd86b9653066be15e916c6
+      // It might be that in the case of anything other than EXCLUSIVE,
+      //   computing V is no more expensive than doing the full patch reconstruction in its absence,
+      //   whereas for EXCLUSIVE since only a small portion of V is used it's worthwhile
+      Xr.noalias() = Estimate<F>::SVD.matrixU() *                                                       //
+                     (wrev.array() * Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
+                     Estimate<F>::SVD.matrixV().row(Estimate<F>::patch.centre_index).adjoint();         //
+#else
+      if (Estimate<F>::m <= n)
+        Xr.noalias() =                                               //
+            Estimate<F>::eig.eigenvectors() *                        //
+            (w.head(r).cast<F>().matrix().asDiagonal() *             //
+             (Estimate<F>::eig.eigenvectors().adjoint() *            //
+              Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
+      else
+        Xr.noalias() =                                                                          //
+            Estimate<F>::X.leftCols(n) *                                                        //
+            (Estimate<F>::eig.eigenvectors() *                                                  //
+             (w.head(r).cast<F>().matrix().asDiagonal() *                                       //
+              Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
+#endif
+      assert(Xr.allFinite());
+    } else {
+      // In the case of -aggregator exclusive,
+      //   where a decomposition fails or we can't find a threshold,
+      //   we simply copy the input data into the output image
+      Xr.noalias() = Estimate<F>::X.col(Estimate<F>::patch.centre_index);
+    }
     assign_pos_of(dwi).to(out);
     out.row(3) = Xr.col(0);
     if (Estimate<F>::exports.sum_aggregation.valid()) {
@@ -155,10 +188,16 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.rank_output);
       Estimate<F>::exports.rank_output.value() = out_rank;
     }
-    break;
-  default: {
-    if (in_rank == r) {
+  } break;
+  default: { // All aggregators other than EXCLUSIVE
+    if (!Estimate<F>::threshold) {
       Xr.leftCols(n).noalias() = Estimate<F>::X.leftCols(n);
+#ifdef DWIDENOISE2_USE_BDCSVD
+    } else {
+      Xr.leftCols(n).noalias() = Estimate<F>::SVD.matrixU() *                                                       //
+                                 (wrev.array() * Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
+                                 Estimate<F>::SVD.matrixV().adjoint();                                              //
+#else
     } else if (Estimate<F>::m <= n) {
       Xr.leftCols(n).noalias() =                        //
           Estimate<F>::eig.eigenvectors() *             //
@@ -171,6 +210,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
           (Estimate<F>::eig.eigenvectors() *             //
            (w.head(r).cast<F>().matrix().asDiagonal() *  //
             Estimate<F>::eig.eigenvectors().adjoint())); //
+#endif
     }
     assert(Xr.leftCols(n).allFinite());
     // Undo prior within-patch variance-stabilising transform

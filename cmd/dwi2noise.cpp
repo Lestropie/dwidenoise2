@@ -238,7 +238,7 @@ void run() {
   if (!opt.empty())
     vst_noise_image = Image<float>::open(opt[0][0]);
 
-  auto subsample = Subsample::make(dwi);
+  auto subsample = Subsample::make(dwi, Denoise::default_subsample_ratio);
   assert(subsample);
 
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());

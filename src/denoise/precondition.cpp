@@ -186,7 +186,7 @@ Precondition<T>::Precondition(Image<T> &image,
       H_mean.size(3) = shells.count();
       DWI::stash_DW_scheme(H_mean, grad);
       mean_image = Image<T>::scratch(H_mean, "Scratch image for per-shell mean intensity");
-      for (auto l_voxel = Loop("Computing mean intensities across shells", H_mean, 0, 3)(dephased, mean_image); //
+      for (auto l_voxel = Loop("Computing mean intensities within shells", H_mean, 0, 3)(dephased, mean_image); //
            l_voxel;                                                                                             //
            ++l_voxel) {                                                                                         //
         for (ssize_t volume_idx = 0; volume_idx != image.size(3); ++volume_idx) {

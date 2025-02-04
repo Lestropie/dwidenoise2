@@ -26,40 +26,17 @@ namespace MR::Denoise {
 
 class Exports {
 public:
-  Exports(const Header &in, const Header &ss) : H_in(in), H_ss(ss) {
-    H_in.ndim() = 3;
-    H_in.reset_intensity_scaling();
-    H_in.datatype() = DataType::Float32;
-    H_in.datatype().set_byte_order_native();
-  }
-  void set_noise_out(const std::string &path) { noise_out = Image<float>::create(path, H_ss); }
-  void set_rank_input(const std::string &path) {
-    Header H(H_ss);
-    H.datatype() = DataType::UInt16;
-    H.datatype().set_byte_order_native();
-    rank_input = Image<uint16_t>::create(path, H);
-  }
-  void set_rank_output(const std::string &path) { rank_output = Image<float>::create(path, H_in); }
-  void set_sum_optshrink(const std::string &path) { sum_optshrink = Image<float>::create(path, H_ss); }
-  void set_max_dist(const std::string &path) { max_dist = Image<float>::create(path, H_ss); }
-  void set_voxelcount(const std::string &path) {
-    Header H(H_ss);
-    H.datatype() = DataType::UInt16;
-    H.datatype().set_byte_order_native();
-    voxelcount = Image<uint16_t>::create(path, H);
-  }
-  void set_patchcount(const std::string &path) {
-    Header H(H_in);
-    H.datatype() = DataType::UInt16;
-    H.datatype().set_byte_order_native();
-    patchcount = Image<uint16_t>::create(path, H);
-  }
-  void set_sum_aggregation(const std::string &path) {
-    if (path.empty())
-      sum_aggregation = Image<float>::scratch(H_in, "Scratch image for patch aggregation sums");
-    else
-      sum_aggregation = Image<float>::create(path, H_in);
-  }
+  Exports(const Header &in, const Header &ss);
+  Exports(const Exports &that) = default;
+
+  void set_noise_out(const std::string &path);
+  void set_rank_input(const std::string &path);
+  void set_rank_output(const std::string &path);
+  void set_sum_optshrink(const std::string &path);
+  void set_max_dist(const std::string &path);
+  void set_voxelcount(const std::string &path);
+  void set_patchcount(const std::string &path);
+  void set_sum_aggregation(const std::string &path);
 
   Image<float> noise_out;
   Image<uint16_t> rank_input;
@@ -71,8 +48,8 @@ public:
   Image<float> sum_aggregation;
 
 protected:
-  Header H_in;
-  Header H_ss;
+  std::shared_ptr<Header> H_in;
+  std::shared_ptr<Header> H_ss;
 };
 
 } // namespace MR::Denoise

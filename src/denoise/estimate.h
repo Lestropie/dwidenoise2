@@ -17,10 +17,18 @@
 
 #pragma once
 
+// Switch from SelfAdjointEigenSolver to BDCSVD
+#define DWIDENOISE2_USE_BDCSVD
+
 #include <memory>
 #include <mutex>
 
 #include <Eigen/Dense>
+#ifdef DWIDENOISE2_USE_BDCSVD
+#include <Eigen/SVD>
+#else
+#include <Eigen/Eigenvalues>
+#endif
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
@@ -45,7 +53,10 @@ public:
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
            std::shared_ptr<Estimator::Base> estimator,
-           Exports &exports);
+           Exports &exports,
+           const bool enable_recon = false);
+
+  Estimate(const Estimate &);
 
   void operator()(Image<F> &dwi);
 
@@ -56,12 +67,31 @@ protected:
   std::shared_ptr<Subsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;
+#ifdef DWIDENOISE2_USE_BDCSVD
+  bool svd_saves_uv;
+#endif
 
   // Reusable memory
   Kernel::Data patch;
   MatrixType X;
+  // TODO For both BDCSVD and SelfAdjointEigenSolver,
+  //   the template type is MatrixType,
+  //   and it doesn't seem to be possible to define an Eigen::Block as this template type;
+  //   as such, most likely in both circumstances it is actually constructing a MatrixType from Eigen::Block
+  //   in order to construct the decomposition
+  // What could conceivably be done instead,
+  //   given that these matrices are relatively small
+  //   and the number of unique patch sizes is small (though not necessarily one),
+  //   would be to construct a std::map<> from patch size to PCA memory;
+  //   each processing thread would allocate new memory for new patch sizes not yet encountered by it,
+  //   but the total memory consumption should still be relatively small;
+  //   note that "X" would be subsumed within such a mechanism also
+#ifdef DWIDENOISE2_USE_BDCSVD
+  Eigen::BDCSVD<MatrixType> SVD;
+#else
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
+#endif
   eigenvalues_type s;
   Estimator::Result threshold;
 

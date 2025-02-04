@@ -62,9 +62,9 @@ std::array<ssize_t, 3> Subsample::ss2in(const Kernel::Voxel::index_type &pos) co
                                  pos[2] * factors[2] + origin[2]}); //
 }
 
-std::shared_ptr<Subsample> Subsample::make(const Header &in) {
+std::shared_ptr<Subsample> Subsample::make(const Header &in, const ssize_t default_ratio) {
   auto opt = App::get_options("subsample");
-  std::array<ssize_t, 3> factors({2, 2, 2});
+  std::array<ssize_t, 3> factors({default_ratio, default_ratio, default_ratio});
   if (!opt.empty()) {
     const std::vector<ssize_t> userinput = parse_ints<ssize_t>(opt[0][0]);
     if (userinput.size() == 1)

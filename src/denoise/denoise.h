@@ -26,6 +26,8 @@
 
 namespace MR::Denoise {
 
+constexpr ssize_t default_subsample_ratio = 2;
+
 using eigenvalues_type = Eigen::Matrix<double, Eigen::Dynamic, 1>;
 using vector_type = Eigen::Array<double, Eigen::Dynamic, 1>;
 

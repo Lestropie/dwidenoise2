@@ -27,6 +27,7 @@
 #include <Eigen/Eigenvalues>
 
 #include "denoise/denoise.h"
+#include "denoise/estimate.h"
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/estimator.h"
 #include "denoise/estimator/exp.h"
@@ -299,17 +300,15 @@ void run(Header &dwi,
   }
   if (preconditioner.rank() == 1) {
     if (exports.rank_input.valid()) {
-      for (auto l = Loop(exports.rank_input)(exports.rank_input); l; ++l)
-        exports.rank_input.value() =
-            std::min<uint16_t>(uint16_t(exports.rank_input.value()) + uint16_t(1), uint16_t(dwi.size(3)));
+      for (auto l = Loop(exports.rank_input)(exports.rank_input); l; ++l) {
+        if (exports.rank_input.value() > 0)
+          exports.rank_input.value() =
+              std::min<uint16_t>(uint16_t(exports.rank_input.value()) + uint16_t(1), uint16_t(dwi.size(3)));
+      }
     }
     if (exports.rank_output.valid()) {
       for (auto l = Loop(exports.rank_output)(exports.rank_output); l; ++l)
         exports.rank_output.value() = std::min<float>(float(exports.rank_output.value()) + 1.0f, float(dwi.size(3)));
-    }
-    if (exports.sum_optshrink.valid()) {
-      for (auto l = Loop(exports.sum_optshrink)(exports.sum_optshrink); l; ++l)
-        exports.sum_optshrink.value() = float(exports.sum_optshrink.value()) + 1.0f;
     }
   }
 }
@@ -326,8 +325,19 @@ void run() {
   if (!opt.empty())
     vst_noise_image = Image<float>::open(opt[0][0]);
 
-  auto subsample = Subsample::make(dwi);
+  aggregator_type aggregator = aggregator_type::GAUSSIAN;
+  opt = get_options("aggregator");
+  if (!opt.empty())
+    aggregator = aggregator_type(int(opt[0][0]));
+
+  auto subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
   assert(subsample);
+  if (aggregator == aggregator_type::EXCLUSIVE &&
+      *std::max_element(subsample->get_factors().begin(), subsample->get_factors().end()) > 1) {
+    WARN("Utilising subsampling in conjunction with -aggregator exclusive "
+         "will result in an output image with holes, "
+         "as not all input voxels will have their own patch");
+  }
 
   auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
   assert(kernel);
@@ -339,15 +349,6 @@ void run() {
   opt = get_options("filter");
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
-
-  aggregator_type aggregator = aggregator_type::GAUSSIAN;
-  opt = get_options("aggregator");
-  if (!opt.empty()) {
-    aggregator = aggregator_type(int(opt[0][0]));
-    if (aggregator == aggregator_type::EXCLUSIVE && subsample->get_factors() != std::array<ssize_t, 3>({1, 1, 1}))
-      throw Exception("Cannot combine -aggregator exclusive with subsampling; "
-                      "would result in empty output voxels");
-  }
 
   Exports exports(dwi, subsample->header());
   opt = get_options("noise_out");

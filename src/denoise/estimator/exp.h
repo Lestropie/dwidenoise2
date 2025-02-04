@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include <atomic>
-
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/result.h"
 
@@ -26,20 +24,12 @@ namespace MR::Denoise::Estimator {
 
 template <ssize_t version> class Exp : public Base {
 public:
-  Exp() : failure_count(0) {}
-  ~Exp() {
-    const ssize_t total = failure_count.load();
-    if (total > 0) {
-      WARN("Noise level estimator failed to converge for " + str(total) + " patches");
-    }
-  }
+  Exp() {}
+  ~Exp() {}
   Result operator()(const eigenvalues_type &s,
                     const ssize_t m,
                     const ssize_t n,
                     const Eigen::Vector3d & /*unused*/) const final;
-
-protected:
-  mutable std::atomic<ssize_t> failure_count;
 };
 
 } // namespace MR::Denoise::Estimator

@@ -54,12 +54,6 @@ Result Exp<version>::operator()(const eigenvalues_type &s,
       result.lamplus = lam;
     }
   }
-  if (result.cutoff_p == -1) {
-    result.cutoff_p = 0;
-    result.sigma2 = 0.0;
-    result.lamplus = 0.0;
-    failure_count.fetch_add(1);
-  }
   return result;
 }
 

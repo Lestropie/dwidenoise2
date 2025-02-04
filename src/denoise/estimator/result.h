@@ -25,6 +25,8 @@ public:
       : cutoff_p(-1),
         sigma2(std::numeric_limits<double>::signaling_NaN()),
         lamplus(std::numeric_limits<double>::signaling_NaN()) {}
+  operator bool() const { return std::isfinite(sigma2); }
+  bool operator!() const { return !bool(*this); }
   ssize_t cutoff_p;
   double sigma2;
   double lamplus;
