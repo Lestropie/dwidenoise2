@@ -19,6 +19,7 @@
 #include "algo/threaded_loop.h"
 #include "axes.h"
 #include "command.h"
+#include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
 #include "denoise/exports.h"
@@ -71,10 +72,10 @@ void usage() {
 
   + Kernel::cuboid_size_description;
 
-  AUTHOR = "Daan Christiaens (daan.christiaens@kcl.ac.uk)"
+  AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)"
+           " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
            " and Jelle Veraart (jelle.veraart@nyumc.org)"
-           " and J-Donald Tournier (jdtournier@gmail.com)"
-           " and Robert E. Smith (robert.smith@florey.edu.au)";
+           " and J-Donald Tournier (jdtournier@gmail.com)";
 
   REFERENCES
   + "Veraart, J.; Fieremans, E. & Novikov, D.S. " // Internal
@@ -125,32 +126,6 @@ void usage() {
            "The number of unique patches to which an input image voxel contributes")
     + Argument("image").type_image_out();
 
-  COPYRIGHT =
-      "Copyright (c) 2016 New York University, University of Antwerp, and the MRtrix3 contributors \n \n"
-      "Permission is hereby granted, free of charge, to any non-commercial entity ('Recipient') obtaining a copy of "
-      "this software and "
-      "associated documentation files (the 'Software'), to the Software solely for non-commercial research, including "
-      "the rights to "
-      "use, copy and modify the Software, subject to the following conditions: \n \n"
-      "\t 1. The above copyright notice and this permission notice shall be included by Recipient in all copies or "
-      "substantial portions of "
-      "the Software. \n \n"
-      "\t 2. THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT "
-      "LIMITED TO THE WARRANTIES"
-      "OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR "
-      "COPYRIGHT HOLDERS BE"
-      "LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING "
-      "FROM, OUT OF OR"
-      "IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. \n \n"
-      "\t 3. In no event shall NYU be liable for direct, indirect, special, incidental or consequential damages in "
-      "connection with the Software. "
-      "Recipient will defend, indemnify and hold NYU harmless from any claims or liability resulting from the use of "
-      "the Software by recipient. \n \n"
-      "\t 4. Neither anything contained herein nor the delivery of the Software to recipient shall be deemed to grant "
-      "the Recipient any right or "
-      "licenses under any patents or patent application owned by NYU. \n \n"
-      "\t 5. The Software may only be used for non-commercial research and may not be used for clinical care. \n \n"
-      "\t 6. Any publication by Recipient of research involving the Software shall cite the references listed below.";
 }
 // clang-format on
 
