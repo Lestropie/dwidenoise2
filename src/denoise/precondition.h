@@ -35,10 +35,10 @@ extern const char *const demodulation_description;
 const std::vector<std::string> demodulation_choices({"none", "linear", "nonlinear"});
 enum class demodulation_t { NONE, LINEAR, NONLINEAR };
 
-const std::vector<std::string> demean_choices = {"none", "shells", "all"};
-enum class demean_type { NONE, SHELLS, ALL };
+const std::vector<std::string> demean_choices = {"none", "volume_groups", "shells", "all"};
+enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
 
-extern const App::OptionGroup precondition_options;
+App::OptionGroup precondition_options(const bool include_output);
 
 class Demodulation {
 public:
@@ -77,13 +77,19 @@ public:
   Precondition(Precondition &) = default;
   void operator()(Image<T> input, Image<T> output, const bool inverse = false) const;
   ssize_t rank() const { return phase_image.valid() || mean_image.valid() ? 1 : 0; }
+  const Header &header() const { return H_out; }
 
 private:
-  const Header H;
+  const Header H_in;
+  Header H_out;
+  // For serialisation of >4D images
+  ssize_t num_volume_groups;
+  Image<ssize_t> serialise_image;
   // First step: Phase demodulation
   Image<cfloat> phase_image;
   // Second step: Demeaning
-  std::vector<ssize_t> vol2shellidx;
+  std::vector<ssize_t> index2shell;
+  std::vector<ssize_t> index2group;
   Image<T> mean_image;
   // Third step: Variance-stabilising transform
   Image<float> vst_image;

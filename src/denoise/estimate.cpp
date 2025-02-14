@@ -98,9 +98,12 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   if (r > XtX.cols()) {
     DEBUG("Expanding decomposition matrix storage from " + str(X.rows()) + " to " + str(r));
     XtX.resize(r, r);
-    s.resize(r);
   }
 #endif
+  if (r > s.size()) {
+    DEBUG("Expanding eigenvalue storage from " + str(s.size()) + " to " + str(r));
+    s.resize(r);
+  }
 
   // Fill matrices with NaN when in debug mode;
   //   make sure results from one voxel are not creeping into another

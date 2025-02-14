@@ -121,7 +121,7 @@ void usage() {
   + Estimator::estimator_option
   + Kernel::options
   + subsample_option
-  + precondition_options
+  + precondition_options(false)
 
   + DWI::GradImportOptions()
   + DWI::GradExportOptions()

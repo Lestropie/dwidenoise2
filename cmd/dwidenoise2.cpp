@@ -160,7 +160,7 @@ void usage() {
   + Estimator::estimator_denoise_options
   + Kernel::options
   + subsample_option
-  + precondition_options
+  + precondition_options(true)
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   + Option("filter",
@@ -254,10 +254,14 @@ void run(Header &dwi,
          aggregator_type aggregator,
          const std::string &output_name,
          Exports &exports) {
-  auto opt_preconditioned = get_options("preconditioned");
+  auto opt_preconditioned_input = get_options("preconditioned_input");
+  auto opt_preconditioned_output = get_options("preconditioned_output");
   if (!demodulation && demean == demean_type::NONE && !vst_noise_image.valid()) {
-    if (!opt_preconditioned.empty()) {
-      WARN("-preconditioned option ignored: no preconditioning taking place");
+    if (!opt_preconditioned_input.empty()) {
+      WARN("-preconditioned_input option ignored: no preconditioning taking place");
+    }
+    if (!opt_preconditioned_output.empty()) {
+      WARN("-preconditioned_output option ignored: no preconditioning taking place");
     }
     auto input = dwi.get_image<T>().with_direct_io(3);
     Header H(dwi);
@@ -269,24 +273,29 @@ void run(Header &dwi,
   auto input = dwi.get_image<T>();
   // perform preconditioning
   const Precondition<T> preconditioner(input, demodulation, demean, vst_noise_image);
-  Header H_preconditioned(dwi);
-  Stride::set(H_preconditioned, Stride::contiguous_along_axis(3));
-  H_preconditioned.datatype() = DataType::from<T>();
-  H_preconditioned.datatype().set_byte_order_native();
   Image<T> input_preconditioned;
-  input_preconditioned = opt_preconditioned.empty()
-                             ? Image<T>::scratch(H_preconditioned, "Preconditioned version of \"" + dwi.name() + "\"")
-                             : Image<T>::create(opt_preconditioned[0][0], H_preconditioned);
+  input_preconditioned =
+      opt_preconditioned_input.empty()
+          ? Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"")
+          : Image<T>::create(opt_preconditioned_input[0][0], preconditioner.header());
   preconditioner(input, input_preconditioned, false);
-  // create output
-  Header H(dwi);
-  H.datatype() = DataType::from<T>();
-  auto output = Image<T>::create(output_name, H);
-  // run
-  run(input_preconditioned, subsample, kernel, estimator, filter, aggregator, output, exports);
+  Image<T> output = Image<T>::create(output_name, dwi);
+  Image<T> output_preconditioned;
+  if (!opt_preconditioned_output.empty())
+    output_preconditioned = Image<T>::create(opt_preconditioned_output[0][0], preconditioner.header());
+  // If we can make use of the output image for preconditioned denoised data
+  //   rather than explicitly allocating an intermediate scratch buffer for that purpose,
+  //   then do so
+  else if (DataType::from<T>() == dwi.datatype() && dwi.ndim() == 4)
+    output_preconditioned = output;
+  else
+    output_preconditioned = Image<T>::scratch(                              //
+        preconditioner.header(),                                            //
+        "Scratch buffer for denoised data before undoing preconditioning"); //
+  // do the denoising itself
+  run(input_preconditioned, subsample, kernel, estimator, filter, aggregator, output_preconditioned, exports);
   // reverse effects of preconditioning
-  Image<T> output2(output);
-  preconditioner(output, output2, true);
+  preconditioner(output_preconditioned, output, true);
   // compensate for effects of preconditioning where relevant
   if (exports.noise_out.valid() && vst_noise_image.valid()) {
     Interp::Cubic<Image<float>> vst(vst_noise_image);
@@ -315,15 +324,23 @@ void run(Header &dwi,
 
 void run() {
   auto dwi = Header::open(argument[0]);
-  if (dwi.ndim() != 4 || dwi.size(3) <= 1)
-    throw Exception("input image must be 4-dimensional");
+  if (dwi.ndim() < 4)
+    throw Exception("input image must be at least 4-dimensional");
+  ssize_t intensities_per_voxel = dwi.size(3);
+  for (ssize_t axis = 4; axis != dwi.ndim(); ++axis)
+    intensities_per_voxel *= dwi.size(axis);
+  if (intensities_per_voxel == 1)
+    throw Exception("input image must be non-singleton across non-spatial dimensions");
 
   const Demodulation demodulation = select_demodulation(dwi);
   const demean_type demean = select_demean(dwi);
   Image<float> vst_noise_image;
   auto opt = get_options("vst");
-  if (!opt.empty())
+  if (!opt.empty()) {
     vst_noise_image = Image<float>::open(opt[0][0]);
+    if (vst_noise_image.ndim() != 3)
+      throw Exception("Variance-stabilising noise image must be 3D");
+  }
 
   aggregator_type aggregator = aggregator_type::GAUSSIAN;
   opt = get_options("aggregator");
