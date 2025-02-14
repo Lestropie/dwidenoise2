@@ -106,7 +106,16 @@ void usage() {
             "While this is neither guaranteed to match exactly the output of the original dwidenoise command"
             " nor is it a recommended use case,"
             " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
-            " that must be explicitly disabled in order to approximate that behaviour.");
+            " that must be explicitly disabled in order to approximate that behaviour.")
+
+  + Example("Denoising multi-echo fMRI data",
+            "mrcat original_TE1.mif original_TE2.mif original_TE3.mif original_all.mif -axis 4;"
+            " dwidenoise2 original_all.mif denoised_all.mif;"
+            " for_each 1 2 3 : mrconvert denoised_all.mif denoised_TEIN.mif -coord 4 IN -axes 0,1,2,3",
+            "By concatenating echoes along a new fifth image axis,"
+            " the program will by default calculate the mean intensity per echo "
+            " and regress this from the data prior to PCA; "
+            " this should reduce the signal rank and increase PCA precision.");
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"
