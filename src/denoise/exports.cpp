@@ -17,7 +17,9 @@
 
 #include "denoise/exports.h"
 
+#include "app.h"
 #include "dwi/gradient.h"
+#include "file/ofstream.h"
 
 namespace MR::Denoise {
 
@@ -32,6 +34,16 @@ Exports::Exports(const Header &in, const Header &ss) //
 }
 
 void Exports::set_noise_out(const std::string &path) { noise_out = Image<float>::create(path, *H_ss); }
+void Exports::set_noise_out() { noise_out = Image<float>::scratch(*H_ss, "Scratch image for noise level output"); }
+
+void Exports::set_lamplus(const std::string &path) { lamplus = Image<float>::create(path, *H_ss); }
+
+void Exports::set_rank_pcanonzero(const std::string &path) {
+  Header H(*H_ss);
+  H.datatype() = DataType::UInt16;
+  H.datatype().set_byte_order_native();
+  rank_pcanonzero = Image<uint16_t>::create(path, H);
+}
 
 void Exports::set_rank_input(const std::string &path) {
   Header H(*H_ss);
@@ -60,11 +72,36 @@ void Exports::set_patchcount(const std::string &path) {
   patchcount = Image<uint16_t>::create(path, H);
 }
 
-void Exports::set_sum_aggregation(const std::string &path) {
-  if (path.empty())
-    sum_aggregation = Image<float>::scratch(*H_in, "Scratch image for patch aggregation sums");
-  else
-    sum_aggregation = Image<float>::create(path, *H_in);
+void Exports::set_sum_aggregation(const std::string &path) { sum_aggregation = Image<float>::create(path, *H_in); }
+void Exports::set_sum_aggregation() {
+  sum_aggregation = Image<float>::scratch(*H_in, "Scratch image for patch aggregation sums");
+}
+
+void Exports::set_variance_removed(const std::string &path) { variance_removed = Image<float>::create(path, *H_ss); }
+
+void Exports::set_eigenspectra_path(const std::string &path) {
+  assert(!eigenspectra);
+  eigenspectra.reset(new Eigenspectra(path));
+}
+
+void Exports::add_eigenspectrum(const eigenvalues_type &s) {
+  assert(eigenspectra);
+  eigenspectra->add(s);
+}
+
+Exports::Eigenspectra::Eigenspectra(const std::string &path) : path(path) {}
+
+void Exports::Eigenspectra::add(const eigenvalues_type &s) { data.push_back(s); }
+
+Exports::Eigenspectra::~Eigenspectra() {
+  File::OFStream out(path);
+  out << "# " << App::command_history_string << "\n";
+  for (const auto &s : data) {
+    out << s[0];
+    for (ssize_t i = 1; i != s.size(); ++i)
+      out << "," << s[i];
+    out << "\n";
+  }
 }
 
 } // namespace MR::Denoise

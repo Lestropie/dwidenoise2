@@ -20,6 +20,9 @@
 namespace MR::Denoise::Kernel {
 
 Data SphereFixedRadius::operator()(const Voxel::index_type &pos) const {
+  assert(mask_image.valid());
+  // For thread-safety
+  Image<bool> mask(mask_image);
   Data result(voxel2real(pos), centre_index);
   result.voxels.reserve(maximum_size);
   for (auto map_it = shared->begin(); map_it != shared->end(); ++map_it) {
@@ -27,8 +30,11 @@ Data SphereFixedRadius::operator()(const Voxel::index_type &pos) const {
                                    pos[1] + map_it->index[1],   //
                                    pos[2] + map_it->index[2]}); //
     if (!is_out_of_bounds(H, voxel, 0, 3)) {
-      result.voxels.push_back(Voxel(voxel, map_it->sq_distance));
-      result.max_distance = map_it->sq_distance;
+      assign_pos_of(voxel).to(mask);
+      if (mask.value()) {
+        result.voxels.push_back(Voxel(voxel, map_it->sq_distance));
+        result.max_distance = map_it->sq_distance;
+      }
     }
   }
   result.max_distance = std::sqrt(result.max_distance);

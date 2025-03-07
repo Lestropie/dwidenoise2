@@ -72,6 +72,14 @@ SphereBase::Shared::Shared(const Header &voxel_grid,
   DEBUG("First element: " + str(data.front().index.transpose()) + " @ " + str(data.front().distance()));
   DEBUG("Last element: " + str(data.back().index.transpose()) + " @ " + str(data.back().distance()));
   DEBUG("Number of elements: " + str(data.size()));
+  const size_t voxel_count = voxel_grid.size(0) * voxel_grid.size(1) * voxel_grid.size(2);
+  if (data.size() > voxel_count) {
+    WARN(std::string("Spherical sliding window larger than input image ")                          //
+         + "(" + str(data.size()) + " > "                                                          //
+         + str(voxel_grid.size(0)) + "x" + str(voxel_grid.size(1)) + "x" + str(voxel_grid.size(2)) //
+         + "=" + str(voxel_count) + "); "                                                          //
+         + "operation likely to be equivalent to running PCA on entire image");                    //
+  }
 }
 
 } // namespace MR::Denoise::Kernel

@@ -24,6 +24,7 @@
 #include "axes.h"
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
+#include "interp/linear.h"
 #include "transform.h"
 
 using namespace MR::App;
@@ -50,15 +51,15 @@ OptionGroup precondition_options(const bool include_output)
            "select form of phase demodulation; "
            "options are: " + join(demodulation_choices, ",") + " "
            "(default: nonlinear)")
-    + Argument("mode").type_choice(demodulation_choices);
+    + Argument("mode").type_choice(demodulation_choices)
   + Option("demod_axes",
            "comma-separated list of axis indices along which FFT can be applied for phase demodulation")
-    + Argument("axes").type_sequence_int();
+    + Argument("axes").type_sequence_int()
   + Option("demean",
            "select method of demeaning prior to PCA; "
            "options are: " + join(demean_choices, ",") + " "
            "(default: 'shells' if DWI gradient table available; 'volume_groups' if volume groups present; 'all' otherwise)")
-    + Argument("mode").type_choice(demean_choices);
+    + Argument("mode").type_choice(demean_choices)
   + Option("vst",
            "apply a within-patch variance-stabilising transformation based on a pre-estimated noise level map")
     + Argument("image").type_image_in();
@@ -360,9 +361,9 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
   Image<ssize_t> serialise(serialise_image);
   Image<cfloat> phase(phase_image);
   Image<T> mean(mean_image);
-  std::unique_ptr<Interp::Cubic<Image<float>>> vst;
+  std::unique_ptr<Interp::Linear<Image<float>>> vst;
   if (vst_image.valid())
-    vst.reset(new Interp::Cubic<Image<float>>(vst_image));
+    vst.reset(new Interp::Linear<Image<float>>(vst_image));
 
   Eigen::Array<T, Eigen::Dynamic, 1> data(H_out.size(3));
   if (inverse) {
@@ -378,10 +379,10 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
                      Eigen::Vector3d({default_type(input.index(0)),    //
                                       default_type(input.index(1)),    //
                                       default_type(input.index(2))})); //
-        const T multiplier = T(vst->value());
+        const T sigma = T(vst->value());
         for (ssize_t v = 0; v != H_out.size(3); ++v) {
           input.index(3) = v;
-          data[v] = T(input.value()) * multiplier;
+          data[v] = T(input.value()) * sigma;
         }
       } else {
         for (ssize_t v = 0; v != H_out.size(3); ++v) {
@@ -512,7 +513,8 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
                    * Eigen::Vector3d({default_type(input.index(0)),    //
                                       default_type(input.index(1)),    //
                                       default_type(input.index(2))})); //
-      const default_type multiplier = 1.0 / vst->value();
+      const default_type sigma = vst->value();
+      const default_type multiplier = 1.0 / sigma;
       data *= multiplier;
     }
 

@@ -25,24 +25,24 @@
 namespace MR::Denoise {
 
 template <typename F>
-Estimate<F>::Estimate(const Header &header,
+Estimate<F>::Estimate(const Image<F> &image,
                       std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports,
+                      const ssize_t preconditioner_rank,
                       const bool enable_recon)
-    : m(header.size(3)),
+    : m(image.size(3)),
       subsample(subsample),
       kernel(kernel),
       estimator(estimator),
-#ifdef DWIDENOISE2_USE_BDCSVD
-      svd_saves_uv(enable_recon),
-#endif
+      preconditioner_rank(preconditioner_rank),
+      enable_recon(enable_recon),
       X(m, kernel->estimated_size()),
 #ifdef DWIDENOISE2_USE_BDCSVD
       SVD(m,
           kernel->estimated_size(),
-          svd_saves_uv ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly),
+          enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly),
 #else
       XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
       eig(std::min(m, kernel->estimated_size())),
@@ -57,9 +57,8 @@ Estimate<F>::Estimate(const Estimate<F> &that)
       subsample(that.subsample),
       kernel(that.kernel),
       estimator(that.estimator),
-#ifdef DWIDENOISE2_USE_BDCSVD
-      svd_saves_uv(that.svd_saves_uv),
-#endif
+      preconditioner_rank(that.preconditioner_rank),
+      enable_recon(that.enable_recon),
       X(m, kernel->estimated_size()),
 #ifndef DWIDENOISE2_USE_BDCSVD
       XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
@@ -87,7 +86,6 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   patch = (*kernel)(voxel);
   const ssize_t n = patch.voxels.size();
   const ssize_t r = std::min(m, n);
-  const ssize_t q = std::max(m, n);
 
   // Expand local storage if necessary
   if (n > X.cols()) {
@@ -122,7 +120,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
 
   // Compute Eigendecomposition
 #ifdef DWIDENOISE2_USE_BDCSVD
-  SVD.compute(X.leftCols(n), svd_saves_uv ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
+  SVD.compute(X.leftCols(n), enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
   bool successful_decomposition = SVD.info() == Eigen::Success;
   if (successful_decomposition) {
     // eigenvalues sorted in increasing order:
@@ -132,32 +130,15 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n) * X.leftCols(n).adjoint();
   else
     XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n).adjoint() * X.leftCols(n);
-  eig.compute(XtX.topLeftCorner(r, r));
+  eig.compute(XtX.topLeftCorner(r, r), enable_recon ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
   bool successful_decomposition = eig.info() == Eigen::Success;
   if (successful_decomposition) {
     // eigenvalues sorted in increasing order:
     s.head(r) = eig.eigenvalues().template cast<double>();
 #endif
 
-#ifndef NDEBUG
-    // Make sure that eigenvalues are in fact sorted;
-    //   may be some instances in which decomposition fails to flag an issue,
-    //   but subsequent threhsold determination is predicated on these data being sorted
-    double prev = s[0];
-    bool sorted = true;
-    for (ssize_t i = 1; i != r; ++i) {
-      if (s[i] < prev) {
-        sorted = false;
-        break;
-      }
-      prev = s[i];
-    }
-    if (!sorted)
-      throw Exception("Decomposition reports success but eigenvalues are not sorted");
-#endif
-
     // Threshold determination, possibly via Marchenko-Pastur
-    threshold = (*estimator)(s, m, n, patch.centre_realspace);
+    threshold = (*estimator)(s.head(r), m, n, preconditioner_rank, patch.centre_realspace);
   } else {
     s.head(r).fill(std::numeric_limits<double>::signaling_NaN());
     threshold = Estimator::Result();
@@ -170,6 +151,14 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     exports.noise_out.value() = bool(threshold)                                //
                                     ? float(std::sqrt(threshold.sigma2))       //
                                     : std::numeric_limits<float>::quiet_NaN(); //
+  }
+  if (exports.lamplus.valid()) {
+    assign_pos_of(ss_index).to(exports.lamplus);
+    exports.lamplus.value() = threshold.lamplus;
+  }
+  if (exports.rank_pcanonzero.valid()) {
+    assign_pos_of(ss_index).to(exports.rank_pcanonzero);
+    exports.rank_pcanonzero.value() = rank_nonzero(m, n, preconditioner_rank);
   }
   if (exports.rank_input.valid()) {
     assign_pos_of(ss_index).to(exports.rank_input);
@@ -194,6 +183,10 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
       assign_pos_of(v.index).to(exports.patchcount);
       exports.patchcount.value() = exports.patchcount.value() + 1;
     }
+  }
+  if (exports.saving_eigenspectra()) {
+    std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
+    exports.add_eigenspectrum(s);
   }
 }
 

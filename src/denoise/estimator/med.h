@@ -19,6 +19,7 @@
 
 #include <limits>
 
+#include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/result.h"
 #include "math/math.h"
@@ -29,22 +30,43 @@ namespace MR::Denoise::Estimator {
 class Med : public Base {
 public:
   Med() = default;
-  Result operator()(const eigenvalues_type &s,
+  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,
                     const ssize_t m,
                     const ssize_t n,
+                    const ssize_t rp,
                     const Eigen::Vector3d & /*unused*/) const final {
-    Result result;
-    const ssize_t r = std::min(m, n);
-    const ssize_t q = std::max(m, n);
-    const ssize_t beta = double(r) / double(q);
+    assert(s.size() == r);
+    const ssize_t qnz = dimlong_nonzero(m, n, rp);
+    const ssize_t rz = rank_zero(m, n, rp);
+    const ssize_t rnz = rank_nonzero(m, n, rp);
     // Eigenvalues should already be sorted;
     //   no need to execute a sort for median calculation
-    const double ymed = s.size() & 1 ? s[s.size() / 2] : (0.5 * (s[s.size() / 2 - 1] + s[s.size() / 2]));
-    result.lamplus = ymed / (q * mu(beta));
-    // Mechanism intrinsically assumes half rank
-    result.cutoff_p = r / 2;
+    // Do however need to skip any components assumed to be zero based on preconditioning
+    const double ymed = (s.size() - rz) & 1                                                            //
+                            ? s[rz + (s.size() - rz) / 2]                                              //
+                            : (0.5 * (s[rz + (s.size() - rz) / 2 - 1] + s[rz + (s.size() - rz) / 2])); //
+    const ssize_t beta = double(rnz) / double(qnz);
+    Result result;
+    result.lamplus = ymed / (qnz * mu(beta));
+    // It is not true that cutoff_p can be set as half of the rank
+    //   based on this estimator being derived from the median eigenvalue;
+    //   the upper bound of the MP distribution is influenced by the median eigenvalue,
+    //   but it is not exactly that,
+    //   and so a rank estimation process still needs to take place
+    result.cutoff_p = rz;
+    for (ssize_t p = rz; p != s.size(); ++p) {
+      if (s[p] / qnz > result.lamplus)
+        break;
+      result.cutoff_p = p + 1;
+    }
     // Calculate noise level based on MP distribution
-    result.sigma2 = 2.0 * s.head(s.size() / 2).sum() / (q * s.size());
+#ifdef DWIDENOISE2_USE_BDCSVD
+    result.sigma2 = 2.0 * s.segment(rz, result.cutoff_p - rz).sum() / (qnz * (result.cutoff_p + 1 - rz));
+#else
+    result.sigma2 = 2.0 *
+                    s.segment(rz, result.cutoff_p - rz).unaryExpr([](double i) { return std::max(0.0, i); }).sum() /
+                    (qnz * (result.cutoff_p + 1 - rz));
+#endif
     return result;
   }
 

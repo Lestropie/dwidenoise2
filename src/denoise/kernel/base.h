@@ -20,6 +20,7 @@
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/voxel.h"
 #include "header.h"
+#include "image.h"
 #include "transform.h"
 
 namespace MR::Denoise::Kernel {
@@ -34,6 +35,11 @@ public:
                            subsample_factors[2] & 1 ? 0.0 : 0.5}) {}
   Base(const Base &) = default;
   virtual ~Base() = default;
+
+  // This can't be set during construction as it requires having first loaded the image,
+  //   and that is templated; so this needs to happen afterwards
+  void set_mask(Image<bool> &in) { mask_image = in; }
+
   // This is just for pre-allocating matrices
   virtual ssize_t estimated_size() const = 0;
   // This is the interface that kernels must provide
@@ -43,6 +49,8 @@ protected:
   const Header H;
   const Transform transform;
   std::array<default_type, 3> halfvoxel_offsets;
+
+  Image<bool> mask_image;
 
   // For translating the index of a processed voxel
   //   into a realspace position corresponding to the centre of the patch,

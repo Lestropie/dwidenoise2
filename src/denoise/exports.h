@@ -17,8 +17,10 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
+#include "denoise/denoise.h"
 #include "header.h"
 #include "image.h"
 
@@ -30,6 +32,9 @@ public:
   Exports(const Exports &that) = default;
 
   void set_noise_out(const std::string &path);
+  void set_noise_out();
+  void set_lamplus(const std::string &path);
+  void set_rank_pcanonzero(const std::string &path);
   void set_rank_input(const std::string &path);
   void set_rank_output(const std::string &path);
   void set_sum_optshrink(const std::string &path);
@@ -37,8 +42,13 @@ public:
   void set_voxelcount(const std::string &path);
   void set_patchcount(const std::string &path);
   void set_sum_aggregation(const std::string &path);
+  void set_sum_aggregation();
+  void set_variance_removed(const std::string &path);
+  void set_eigenspectra_path(const std::string &path);
 
   Image<float> noise_out;
+  Image<float> lamplus;
+  Image<uint16_t> rank_pcanonzero;
   Image<uint16_t> rank_input;
   Image<float> rank_output;
   Image<float> sum_optshrink;
@@ -46,10 +56,30 @@ public:
   Image<uint16_t> voxelcount;
   Image<uint16_t> patchcount;
   Image<float> sum_aggregation;
+  Image<float> variance_removed;
+
+  // std::string eigenspectra_path;
+  // std::vector<eigenvalues_type> eigenspectra_data;
+  bool saving_eigenspectra() const { return bool(eigenspectra); }
+  void add_eigenspectrum(const eigenvalues_type &s);
 
 protected:
   std::shared_ptr<Header> H_in;
   std::shared_ptr<Header> H_ss;
+
+  // Needs to be stored as a std::shared_ptr<> so that in a multi-threading environment
+  //   only one attempt is made to write to the output file
+  class Eigenspectra {
+  public:
+    Eigenspectra(const std::string &path);
+    ~Eigenspectra();
+    void add(const eigenvalues_type &s);
+
+  private:
+    const std::string path;
+    std::vector<eigenvalues_type> data;
+  };
+  std::shared_ptr<Eigenspectra> eigenspectra;
 };
 
 } // namespace MR::Denoise

@@ -33,12 +33,9 @@ namespace MR::Filter {
 /** \addtogroup Filters
 @{ */
 
-// From Manzano-Patron et al. 2024
-constexpr default_type default_tukey_FWHM_demodulate = 0.58;
-// TODO Ideally do more experimentation to figure out a reasonable default here
-// Too high and everything ends up in the real axis;
-//   too low and disjointed phase cound drive up signal rank
-constexpr default_type default_tukey_alpha_demodulate = 2.0 * (1.0 - default_tukey_FWHM_demodulate);
+// // From Manzano-Patron et al. 2024
+// constexpr default_type default_tukey_FWHM_demodulate = 0.58;
+// constexpr default_type default_tukey_alpha_demodulate = 2.0 * (1.0 - default_tukey_FWHM_demodulate);
 
 /*! Estimate a linear phase ramp of a complex image and demodulate by such
  */
@@ -47,17 +44,16 @@ public:
   template <class ImageType>
   Demodulate(ImageType &in, const std::vector<size_t> &inner_axes, const bool linear)
       : Base(in),
-        phase(Image<cfloat>::scratch(in,
+        phase(Image<cfloat>::scratch(in,                                     //
                                      std::string("Scratch image storing ")   //
                                          + (linear ? "linear" : "nonlinear") //
                                          + " phase for demodulator")) {      //
 
     using value_type = typename ImageType::value_type;
+    assert(DataType::from<value_type>().is_complex());
     using real_type = typename ImageType::value_type::value_type;
 
     ImageType input(in);
-    // if (!in.datatype().is_complex())
-    //   throw Exception("demodulation filter only applicable for complex image data");
 
     std::vector<size_t> outer_axes;
     std::vector<size_t>::const_iterator it = inner_axes.begin();
@@ -190,7 +186,7 @@ public:
 
     auto gen_nonlinear_phase =
         [&](Image<value_type> &input, Image<cdouble> &kspace, Image<cfloat> &phase, const std::vector<size_t> &axes) {
-          Image<double> window = Filter::KSpace::window_tukey(input, axes, default_tukey_alpha_demodulate);
+          Image<double> window = Filter::KSpace::window_hann(input, axes);
           Adapter::Replicate<Image<double>> replicating_window(window, in);
           for (auto l = Loop(kspace)(kspace, replicating_window); l; ++l)
             kspace.value() *= double(replicating_window.value());

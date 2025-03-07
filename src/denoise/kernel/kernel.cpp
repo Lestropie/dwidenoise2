@@ -84,7 +84,8 @@ const OptionGroup options = OptionGroup("Options for controlling the sliding spa
   + Argument("window").type_sequence_int();
 // clang-format on
 
-std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors) {
+std::shared_ptr<Base>
+make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors, const default_type size_multiplier) {
   auto opt = App::get_options("shape");
   const Kernel::shape_type shape = opt.empty() ? Kernel::shape_type::SPHERE : Kernel::shape_type((int)(opt[0][0]));
   std::shared_ptr<Kernel::Base> kernel;
@@ -97,8 +98,8 @@ std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> 
     opt = get_options("radius_mm");
     if (opt.empty())
       return std::make_shared<SphereRatio>(
-          H, subsample_factors, get_option_value("radius_ratio", sphere_multiplier_default));
-    return std::make_shared<SphereFixedRadius>(H, subsample_factors, opt[0][0]);
+          H, subsample_factors, get_option_value("radius_ratio", sphere_multiplier_default * size_multiplier));
+    return std::make_shared<SphereFixedRadius>(H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
   }
   case Kernel::shape_type::CUBOID: {
     if (!get_options("radius_mm").empty() || !get_options("radius_ratio").empty())
@@ -121,10 +122,19 @@ std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> 
                           "(odd for no subsampling or subsampling by an odd factor; "
                           "even for subsampling by an even factor)");
       }
+      // If the size multiplier is large enough to trigger an increment in cuboid extent,
+      //   make the requisite change here
+      const ssize_t user_patch_size = extent[0] * extent[1] * extent[2];
+      do {
+        const ssize_t new_size = (extent[0] + 2) * (extent[1] + 2) * (extent[2] + 2);
+        if (new_size > size_multiplier * user_patch_size)
+          break;
+        extent = {extent[0] + 2, extent[1] + 2, extent[2] + 2};
+      } while (true);
     } else {
       extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
       ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
-      while (extent[0] * extent[1] * extent[2] < std::max(H.size(3), prev_num_voxels)) {
+      while (extent[0] * extent[1] * extent[2] < size_multiplier * std::max(H.size(3), prev_num_voxels)) {
         prev_num_voxels = extent[0] * extent[1] * extent[2];
         // If multiple axes are tied for spatial extent in mm, increment all of them
         const default_type min_length =

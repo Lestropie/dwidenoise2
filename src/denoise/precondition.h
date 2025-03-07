@@ -25,7 +25,6 @@
 #include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
-#include "interp/cubic.h"
 #include "types.h"
 
 namespace MR::Denoise {
@@ -75,9 +74,21 @@ template <typename T> class Precondition {
 public:
   Precondition(Image<T> &image, const Demodulation &demodulation, const demean_type demean, Image<float> &vst);
   Precondition(Precondition &) = default;
+  void update_vst_image(Image<float> new_vst_image) { vst_image = new_vst_image; }
   void operator()(Image<T> input, Image<T> output, const bool inverse = false) const;
-  ssize_t rank() const { return phase_image.valid() || mean_image.valid() ? 1 : 0; }
   const Header &header() const { return H_out; }
+
+  ssize_t null_rank() const {
+    if (!mean_image.valid())
+      return 0;
+    if (mean_image.ndim() == 3)
+      return 1;
+    return mean_image.size(3);
+  }
+
+  bool noop() const {
+    return (num_volume_groups == 1 && !phase_image.valid() && !mean_image.valid() && !vst_image.valid());
+  }
 
 private:
   const Header H_in;
@@ -98,5 +109,9 @@ template class Precondition<float>;
 template class Precondition<double>;
 template class Precondition<cfloat>;
 template class Precondition<cdouble>;
+
+// TODO New function that will pad a VST image by one voxel in every direction,
+//   making it more likely to succeed in obtaining interpolated values for every input voxel
+// (eventually this should be subsumed by an edge handling adapter)
 
 } // namespace MR::Denoise

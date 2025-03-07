@@ -70,4 +70,10 @@ const Option datatype_option = Option("datatype",
                                       " this will select complex float32 or complex float64 datatypes.") +
                                Argument("float32/float64").type_choice(dtypes);
 
+ssize_t dimlong_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp) { return std::max(m - rp, n); }
+ssize_t rank_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp) { return std::min(m - rp, n); }
+ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp) {
+  return (std::min(m, n) - rank_nonzero(m, n, rp));
+}
+
 } // namespace MR::Denoise

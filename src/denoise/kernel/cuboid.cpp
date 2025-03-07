@@ -58,6 +58,9 @@ inline ssize_t wrapindex(int p, int r, int bbminus, int bbplus, int max) {
 } // namespace
 
 Data Cuboid::operator()(const Voxel::index_type &pos) const {
+  assert(mask_image.valid());
+  // For thread-safety
+  Image<bool> mask(mask_image);
   Data result(voxel2real(pos), centre_index);
   Voxel::index_type voxel;
   Offset::index_type offset;
@@ -68,11 +71,14 @@ Data Cuboid::operator()(const Voxel::index_type &pos) const {
       for (offset[0] = bounding_box(0, 0); offset[0] <= bounding_box(0, 1); ++offset[0]) {
         voxel[0] = wrapindex(pos[0], offset[0], bounding_box(0, 0), bounding_box(0, 1), H.size(0));
         assert(!is_out_of_bounds(H, voxel, 0, 3));
-        const default_type sq_distance = Math::pow2(pos[0] + halfvoxel_offsets[0] - voxel[0]) * H.spacing(0) +
-                                         Math::pow2(pos[1] + halfvoxel_offsets[1] - voxel[1]) * H.spacing(1) +
-                                         Math::pow2(pos[2] + halfvoxel_offsets[2] - voxel[2]) * H.spacing(2);
-        result.voxels.push_back(Voxel(voxel, sq_distance));
-        result.max_distance = std::max(result.max_distance, sq_distance);
+        assign_pos_of(voxel).to(mask);
+        if (mask.value()) {
+          const default_type sq_distance = Math::pow2(pos[0] + halfvoxel_offsets[0] - voxel[0]) * H.spacing(0) + //
+                                           Math::pow2(pos[1] + halfvoxel_offsets[1] - voxel[1]) * H.spacing(1) + //
+                                           Math::pow2(pos[2] + halfvoxel_offsets[2] - voxel[2]) * H.spacing(2);  //
+          result.voxels.push_back(Voxel(voxel, sq_distance));
+          result.max_distance = std::max(result.max_distance, sq_distance);
+        }
       }
     }
   }

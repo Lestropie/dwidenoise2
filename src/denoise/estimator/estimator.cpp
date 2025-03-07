@@ -19,9 +19,10 @@
 
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/exp.h"
+#include "denoise/estimator/fixed.h"
 #include "denoise/estimator/import.h"
 #include "denoise/estimator/med.h"
-#include "denoise/estimator/mrm2022.h"
+#include "denoise/estimator/mrm2023.h"
 #include "denoise/estimator/rank.h"
 
 namespace MR::Denoise::Estimator {
@@ -37,7 +38,7 @@ const Option estimator_option =
            "* Exp1: the original estimator used in Veraart et al. (2016); \n"
            "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
            "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
-           "* MRM2022: the alternative estimator introduced in Olesen et al. (2022). \n"
+           "* MRM2023: the alternative estimator introduced in Olesen et al. (2023). \n"
            "Operation will be bypassed if -noise_in or -fixed_rank are specified")
       + Argument("algorithm").type_choice(estimators);
 
@@ -47,8 +48,9 @@ const OptionGroup estimator_denoise_options =
     + estimator_option
 
     + Option("noise_in",
-             "import a pre-estimated noise level map for denoising rather than estimating this level from data")
-      + Argument("image").type_image_in()
+             "manually specify the noise level rather than estimating from the data, "
+             "whether as a scalar value or as a pre-estimated spatial map")
+      + Argument("value/image").type_various()
 
     + Option("fixed_rank",
              "set a fixed input signal rank rather than estimating the noise level from the data")
@@ -64,7 +66,11 @@ std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool perm
         throw Exception("Cannot both provide an input noise level image and specify a noise level estimator");
       if (!fixed_rank.empty())
         throw Exception("Cannot both provide an input noise level image and request a fixed signal rank");
-      return std::make_shared<Import>(noise_in[0][0], vst_noise_in);
+      try {
+        return std::make_shared<Fixed>(default_type(noise_in[0][0]), vst_noise_in);
+      } catch (Exception &) {
+        return std::make_shared<Import>(std::string(noise_in[0][0]), vst_noise_in);
+      }
     }
     if (!fixed_rank.empty()) {
       if (!opt.empty())
@@ -80,8 +86,8 @@ std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool perm
     return std::make_shared<Exp<2>>();
   case estimator_type::MED:
     return std::make_shared<Med>();
-  case estimator_type::MRM2022:
-    return std::make_shared<MRM2022>();
+  case estimator_type::MRM2023:
+    return std::make_shared<MRM2023>();
   default:
     assert(false);
   }

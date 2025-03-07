@@ -17,8 +17,8 @@
 
 #pragma once
 
-// Switch from SelfAdjointEigenSolver to BDCSVD
-#define DWIDENOISE2_USE_BDCSVD
+// Need to import this first to get relevant precompiler definitions
+#include "denoise/denoise.h"
 
 #include <memory>
 #include <mutex>
@@ -49,11 +49,12 @@ template <typename F> class Estimate {
 public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
 
-  Estimate(const Header &header,
+  Estimate(const Image<F> &image,
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports,
+           const ssize_t preconditioner_rank = 0,
            const bool enable_recon = false);
 
   Estimate(const Estimate &);
@@ -67,9 +68,8 @@ protected:
   std::shared_ptr<Subsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
   std::shared_ptr<Estimator::Base> estimator;
-#ifdef DWIDENOISE2_USE_BDCSVD
-  bool svd_saves_uv;
-#endif
+  ssize_t preconditioner_rank;
+  bool enable_recon;
 
   // Reusable memory
   Kernel::Data patch;

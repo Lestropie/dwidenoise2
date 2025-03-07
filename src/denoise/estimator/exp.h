@@ -26,10 +26,11 @@ template <ssize_t version> class Exp : public Base {
 public:
   Exp() {}
   ~Exp() {}
-  Result operator()(const eigenvalues_type &s,
-                    const ssize_t m,
-                    const ssize_t n,
-                    const Eigen::Vector3d & /*unused*/) const final;
+  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,    //
+                    const ssize_t m,                                 //
+                    const ssize_t n,                                 //
+                    const ssize_t rp,                                //
+                    const Eigen::Vector3d & /*unused*/) const final; //
 };
 
 } // namespace MR::Denoise::Estimator

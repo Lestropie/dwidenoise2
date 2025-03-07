@@ -35,13 +35,14 @@ namespace MR::Denoise {
 template <typename F> class Recon : public Estimate<F> {
 
 public:
-  Recon(const Header &header,
+  Recon(const Image<F> &image,
         std::shared_ptr<Subsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
         std::shared_ptr<Estimator::Base> estimator,
         filter_type filter,
         aggregator_type aggregator,
-        Exports &exports);
+        Exports &exports,
+        const ssize_t null_rank);
 
   void operator()(Image<F> &dwi, Image<F> &out);
 
@@ -52,9 +53,9 @@ protected:
   double gaussian_multiplier;
 
   // Reusable memory
+  std::map<double, double> beta2lambdastar;
   vector_type w;
   typename Estimate<F>::MatrixType Xr;
-  std::map<double, double> beta2lambdastar;
 };
 
 template class Recon<float>;

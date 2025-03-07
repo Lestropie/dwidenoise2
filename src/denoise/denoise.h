@@ -24,6 +24,13 @@
 #include "app.h"
 #include "header.h"
 
+// Switch from SelfAdjointEigenSolver to BDCSVD
+// Note that since it is the singular values that are solved for,
+//   and the eigenvalues are taken as the square of such,
+//   it is not necessary to explicitly check for negativity of eigenvalues for safety
+//   like it is with the SelfAdjointEigenSolver
+#define DWIDENOISE2_USE_BDCSVD
+
 namespace MR::Denoise {
 
 constexpr ssize_t default_subsample_ratio = 2;
@@ -44,5 +51,14 @@ enum class filter_type { OPTSHRINK, OPTTHRESH, TRUNCATE };
 
 const std::vector<std::string> aggregators = {"exclusive", "gaussian", "invl0", "rank", "uniform"};
 enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
+
+// These functions resolve dimensions of the matrix decomposition
+//   in the presence of precoditioning that make the data rank-deficient
+// - m = number of volumes
+// - n = number of voxels in patch
+// - rp = rank of preconditioner
+ssize_t dimlong_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp);
+ssize_t rank_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp);
+ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp);
 
 } // namespace MR::Denoise

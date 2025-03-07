@@ -110,10 +110,27 @@ public:
     (*this)(temp, out);
   }
 
-  // TODO Static functions to create different windows
-  //   (different windows may require different input parameters)
-  // TODO Currently extending 1D window functions to ND via outer product;
-  //   this is however not a unique choice
+  // Generic function to multiply 1D kernel to individual axis
+  static void apply_window1D(Image<double> &windowND,
+                             Eigen::Array<double, Eigen::Dynamic, 1> &window1D,
+                             const size_t axis,
+                             const std::vector<size_t> &inner_axes) {
+    // Need to loop over all inner axes other than the current one
+    std::vector<size_t> inner_excluding_axis;
+    for (auto a : inner_axes) {
+      if (a != axis)
+        inner_excluding_axis.push_back(a);
+    }
+    windowND.reset();
+    const size_t N = windowND.size(axis);
+    for (auto l = Loop(inner_excluding_axis)(windowND); l; ++l) {
+      for (size_t n = 0; n != N; ++n) {
+        windowND.index(axis) = n;
+        windowND.value() *= window1D[n];
+      }
+    }
+  }
+
   static Image<double> window_tukey(const Header &header,                  //
                                     const std::vector<size_t> &inner_axes, //
                                     const default_type cosine_frac) {      //
@@ -134,19 +151,51 @@ public:
           window1d[n] = 0.5 + 0.5 * std::cos(2.0 * Math::pi * (pos - transition_lower) / cosine_frac);
       }
       window1d *= 1.0 / double(N);
-      // Need to loop over all inner axes other than the current one
-      std::vector<size_t> inner_excluding_axis;
-      for (auto a : inner_axes) {
-        if (a != axis)
-          inner_excluding_axis.push_back(a);
+      apply_window1D(window, window1d, axis, inner_axes);
+    }
+    return window;
+  }
+
+  static Image<double> window_flattop(const Header &header,                    //
+                                      const std::vector<size_t> &inner_axes) { //
+    Image<double> window =                                                     //
+        Image<double>::scratch(make_window_header(header, inner_axes),         //
+                               "Scratch Flat-top filter window");              //
+    for (auto l = Loop(window)(window); l; ++l)
+      window.value() = 1.0;
+    for (auto axis : inner_axes) {
+      const size_t N = header.size(axis);
+      Eigen::Array<double, Eigen::Dynamic, 1> window1d(N);
+      for (size_t n_centred = 0; n_centred != N; ++n_centred) {
+        size_t n = n_centred + (N + 2) / 2;
+        if (n >= N)
+          n -= N;
+        // Values from MatLab:
+        // https://www.mathworks.com/help/signal/ref/flattopwin.html
+        window1d[n] = 0.21557895                                                //
+                      - 0.41663158 * std::cos(2.0 * Math::pi * n_centred / N)   //
+                      + 0.277263158 * std::cos(4.0 * Math::pi * n_centred / N)  //
+                      - 0.083578947 * std::cos(6.0 * Math::pi * n_centred / N)  //
+                      + 0.006947368 * std::cos(8.0 * Math::pi * n_centred / N); //
       }
-      window.reset();
-      for (auto l = Loop(inner_excluding_axis)(window); l; ++l) {
-        for (size_t n = 0; n != N; ++n) {
-          window.index(axis) = n;
-          window.value() *= window1d[n];
-        }
-      }
+      window1d *= 1.0 / double(N);
+      apply_window1D(window, window1d, axis, inner_axes);
+    }
+    return window;
+  }
+
+  static Image<double> window_hann(const Header &header,                    //
+                                   const std::vector<size_t> &inner_axes) { //
+    Image<double> window = Image<double>::scratch(make_window_header(header, inner_axes), "Scratch Hann filter window");
+    for (auto l = Loop(window)(window); l; ++l)
+      window.value() = 1.0;
+    for (auto axis : inner_axes) {
+      const size_t N = header.size(axis);
+      Eigen::Array<double, Eigen::Dynamic, 1> window1d(N);
+      for (size_t n = 0; n != N; ++n)
+        window1d[n] = Math::pow2(std::cos(Math::pi * n / N));
+      window1d *= 1.0 / double(N);
+      apply_window1D(window, window1d, axis, inner_axes);
     }
     return window;
   }

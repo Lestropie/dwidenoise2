@@ -26,10 +26,16 @@ class Base {
 public:
   Base() = default;
   Base(const Base &) = delete;
-  virtual Result operator()(const eigenvalues_type &eigenvalues,
-                            const ssize_t m,
-                            const ssize_t n,
-                            const Eigen::Vector3d &pos) const = 0;
+  virtual void update_vst_image(Image<float> &) {}
+  // m = Number of image volumes;
+  // n = Number of voxels in patch;
+  // rp = Preconditioner rank = number of means regressed from the data;
+  // pos = realspace position of the centre of the patch
+  virtual Result operator()(const Eigen::VectorBlock<eigenvalues_type> eigenvalues, //
+                            const ssize_t m,                                        //
+                            const ssize_t n,                                        //
+                            const ssize_t rp,                                       //
+                            const Eigen::Vector3d &pos) const = 0;                  //
 };
 
 } // namespace MR::Denoise::Estimator

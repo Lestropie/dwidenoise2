@@ -17,26 +17,28 @@
 
 #include "denoise/recon.h"
 
+#include "denoise/denoise.h"
 #include "math/math.h"
 
 namespace MR::Denoise {
 
 template <typename F>
-Recon<F>::Recon(const Header &header,
+Recon<F>::Recon(const Image<F> &image,
                 std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
-                Exports &exports)
-    : Estimate<F>(header, subsample, kernel, estimator, exports, true),
+                Exports &exports,
+                const ssize_t preconditioner_rank)
+    : Estimate<F>(image, subsample, kernel, estimator, exports, preconditioner_rank, true),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
-      gaussian_multiplier(-std::log(2.0) /                                                           //
-                          Math::pow2(std::cbrt(subsample->get_factors()[0] * header.spacing(0)       //
-                                               * subsample->get_factors()[1] * header.spacing(1)     //
-                                               * subsample->get_factors()[2] * header.spacing(2)))), //
+      gaussian_multiplier(-std::log(2.0) /                                                          //
+                          Math::pow2(std::cbrt(subsample->get_factors()[0] * image.spacing(0)       //
+                                               * subsample->get_factors()[1] * image.spacing(1)     //
+                                               * subsample->get_factors()[2] * image.spacing(2)))), //
       w(std::min(Estimate<F>::m, kernel->estimated_size())),
       Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
 
@@ -49,11 +51,10 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
   const ssize_t n = Estimate<F>::patch.voxels.size();
   const ssize_t r = std::min(Estimate<F>::m, n);
-  const ssize_t q = std::max(Estimate<F>::m, n);
-  const double beta = double(r) / double(q);
-  const ssize_t in_rank = bool(Estimate<F>::threshold)                //
-                              ? (r - Estimate<F>::threshold.cutoff_p) //
-                              : -1;                                   //
+  const ssize_t rz = rank_zero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
+  const ssize_t rnz = rank_nonzero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
+  const ssize_t qnz = dimlong_nonzero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
+  const double beta = double(rnz) / double(qnz);
 
   if (r > w.size())
     w.resize(r);
@@ -66,14 +67,24 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
   // Generate weights vector
   double sum_weights = 0.0;
+  double sum_variance = 0.0;
   ssize_t out_rank = 0;
   if (bool(Estimate<F>::threshold)) {
     switch (filter) {
     case filter_type::OPTSHRINK: {
+      w.head(rz).setZero();
       const double transition = 1.0 + std::sqrt(beta);
-      for (ssize_t i = 0; i != r; ++i) {
-        const double lam = std::max(Estimate<F>::s[i], 0.0) / q;
-        const double y = lam / Estimate<F>::threshold.sigma2;
+      for (ssize_t i = rz; i != r; ++i) {
+        // TODO For non-binary determination of weights for optimal shrinkage,
+        //   should the expression be identical between BDCSVD and SelfAdjointEigenSolver?
+        //   Or eg. is one equivalent to scaling singular values whereas the other is equivalent to scaling eigenvalues?
+#ifdef DWIDENOISE2_USE_BDCSVD
+        const double lam = Estimate<F>::s[i] / qnz;
+#else
+        const double lam = std::max(Estimate<F>::s[i], 0.0) / qnz;
+#endif
+        const double y = std::sqrt(lam / Estimate<F>::threshold.sigma2);
+        // const double y = lam / Estimate<F>::threshold.sigma2;
         double nu = 0.0;
         if (y > transition) {
           // Occasionally floating-point precision will drive this calculation to fractionally greater than y,
@@ -84,6 +95,11 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         w[i] = lam > 0.0 ? (nu / y) : 0.0;
         assert(w[i] >= 0.0 && w[i] <= 1.0);
         sum_weights += w[i];
+#ifdef DWIDENOISE2_USE_BDCSVD
+        sum_variance += w[i] * Estimate<F>::s[i];
+#else
+        sum_variance += w[i] * std::max(Estimate<F>::s[i], 0.0);
+#endif
       }
     } break;
     case filter_type::OPTTHRESH: {
@@ -96,13 +112,19 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       } else {
         lambda_star = it->second;
       }
-      const double tau_star = lambda_star * std::sqrt(q) * std::sqrt(Estimate<F>::threshold.sigma2);
-      // TODO Unexpected requisite square applied to q here
-      const double threshold = tau_star * Math::pow2(q);
-      for (ssize_t i = 0; i != r; ++i) {
+      const double tau_star = lambda_star * std::sqrt(qnz) * std::sqrt(Estimate<F>::threshold.sigma2);
+      // TODO Unexpected requisite square applied to qnz here
+      const double threshold = tau_star * Math::pow2(qnz);
+      w.head(rz).setZero();
+      for (ssize_t i = rz; i != r; ++i) {
         if (Estimate<F>::s[i] >= threshold) {
           w[i] = 1.0;
           ++out_rank;
+#ifdef DWIDENOISE2_USE_BDCSVD
+          sum_variance += Estimate<F>::s[i];
+#else
+          sum_variance += std::max(Estimate<F>::s[i], 0.0);
+#endif
         } else {
           w[i] = 0.0;
         }
@@ -110,10 +132,11 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       sum_weights = out_rank;
     } break;
     case filter_type::TRUNCATE:
-      out_rank = in_rank;
+      out_rank = r - Estimate<F>::threshold.cutoff_p;
       w.head(Estimate<F>::threshold.cutoff_p).setZero();
-      w.segment(Estimate<F>::threshold.cutoff_p, in_rank).setOnes();
+      w.segment(Estimate<F>::threshold.cutoff_p, out_rank).setOnes();
       sum_weights = double(out_rank);
+      sum_variance += w.head(r).matrix().dot(Estimate<F>::s.head(r).matrix());
       break;
     default:
       assert(false);
@@ -127,10 +150,21 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     w.head(r).setOnes();
     out_rank = r;
     sum_weights = r;
+#ifdef DWIDENOISE2_USE_BDCSVD
+    sum_variance = Estimate<F>::s.sum();
+#else
+    sum_variance = Estimate<F>::s.unaryExpr([](double i) { return std::max(i, 0.0); }).sum();
+#endif
   }
   assert(w.head(r).allFinite());
+#ifdef DWIDENOISE2_USE_BDCSVD
+  const double variance_removed = 1.0 - sum_variance / Estimate<F>::s.sum();
+#else
+  const double variance_removed =                                                                     //
+      1.0 - sum_variance / Estimate<F>::s.unaryExpr([](double f) { return std::max(0.0, f); }).sum(); //
+#endif
 
-  // recombine data using only eigenvectors above threshold
+  // Recombine data using only eigenvectors above threshold
   // If only the data computed when this voxel was the centre of the patch
   //   is to be used for synthesis of the output image,
   //   then only that individual column needs to be reconstructed;
@@ -255,6 +289,10 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   if (Estimate<F>::exports.sum_optshrink.valid()) {
     assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.sum_optshrink);
     Estimate<F>::exports.sum_optshrink.value() = sum_weights;
+  }
+  if (Estimate<F>::exports.variance_removed.valid()) {
+    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.variance_removed);
+    Estimate<F>::exports.variance_removed.value() = variance_removed;
   }
 }
 

@@ -20,6 +20,9 @@
 namespace MR::Denoise::Kernel {
 
 Data SphereRatio::operator()(const Voxel::index_type &pos) const {
+  assert(mask_image.valid());
+  // For thread-safety
+  Image<bool> mask(mask_image);
   Data result(voxel2real(pos), centre_index);
   auto table_it = shared->begin();
   while (table_it != shared->end()) {
@@ -31,17 +34,13 @@ Data SphereRatio::operator()(const Voxel::index_type &pos) const {
                                    pos[1] + table_it->index[1],   //
                                    pos[2] + table_it->index[2]}); //
     if (!is_out_of_bounds(H, voxel, 0, 3)) {
-      result.voxels.push_back(Voxel(voxel, table_it->sq_distance));
-      result.max_distance = table_it->sq_distance;
+      assign_pos_of(voxel).to(mask);
+      if (mask.value()) {
+        result.voxels.push_back(Voxel(voxel, table_it->sq_distance));
+        result.max_distance = table_it->sq_distance;
+      }
     }
     ++table_it;
-  }
-  if (table_it == shared->end()) {
-    throw Exception(                                                                   //
-        std::string("Inadequate spherical kernel initialisation ")                     //
-        + "(lookup table " + str(std::distance(shared->begin(), shared->end())) + "; " //
-        + "min size " + str(min_size) + "; "                                           //
-        + "read size " + str(result.voxels.size()) + ")");                             //
   }
   result.max_distance = std::sqrt(result.max_distance);
   return result;

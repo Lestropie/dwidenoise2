@@ -38,6 +38,8 @@ const std::vector<std::string> shapes = {"cuboid", "sphere"};
 enum class shape_type { CUBOID, SPHERE };
 extern const App::OptionGroup options;
 
-std::shared_ptr<Base> make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors);
+std::shared_ptr<Base> make_kernel(const Header &H,                                 //
+                                  const std::array<ssize_t, 3> &subsample_factors, //
+                                  const default_type size_multiplier);             //
 
 } // namespace MR::Denoise::Kernel

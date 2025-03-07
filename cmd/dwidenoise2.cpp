@@ -28,21 +28,20 @@
 
 #include "denoise/denoise.h"
 #include "denoise/estimate.h"
-#include "denoise/estimator/base.h"
 #include "denoise/estimator/estimator.h"
-#include "denoise/estimator/exp.h"
-#include "denoise/estimator/mrm2022.h"
-#include "denoise/estimator/rank.h"
-#include "denoise/estimator/result.h"
+#include "denoise/estimator/unity.h"
 #include "denoise/exports.h"
+#include "denoise/iterative.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_ratio.h"
+#include "denoise/mask.h"
 #include "denoise/precondition.h"
 #include "denoise/recon.h"
 #include "denoise/subsample.h"
+#include "dwi/gradient.h"
 
 using namespace MR;
 using namespace App;
@@ -144,10 +143,10 @@ void usage() {
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
     "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
 
-  + "* If using -estimator mrm2022: "
+  + "* If using -estimator mrm2023: "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
-    "Magnetic Resonance in Medicine, 2022, 89(3), 1160-1172"
+    "Magnetic Resonance in Medicine, 2023, 89(3), 1160-1172"
 
   + "* If using anything other than -aggregation exclusive: "
     "Manjon, J.V.; Coupe, P.; Concha, L.; Buades, A.; D. Collins, D.L.; Robles, M. "
@@ -170,6 +169,10 @@ void usage() {
   + Kernel::options
   + subsample_option
   + precondition_options(true)
+
+  + Option("iterative",
+           "EXPERIMENTAL; perform iterative refinement of noise level estimation"
+           " prior to final denoising step")
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   + Option("filter",
@@ -194,12 +197,25 @@ void usage() {
            " this will be the total noise level across real and imaginary channels,"
            " so a scale factor sqrt(2) applies.")
     + Argument("image").type_image_out()
+  + Option("lamplus",
+           "The estimated upper bound of the noise portion of the eigenspectrum (\"lambda-plus\")")
+    + Argument("image").type_image_out()
+  + Option("rank_pcanonzero",
+           "The (non-zero) rank of the PCA decomposition for each patch absent any denoising")
+    + Argument("image").type_image_out()
   + Option("rank_input",
-           "The signal rank estimated for each denoising patch")
+           "The estimated rank of the input data for each denoising patch")
     + Argument("image").type_image_out()
   + Option("rank_output",
            "An estimated rank for the output image data, accounting for multi-patch aggregation")
     + Argument("image").type_image_out()
+  + Option("variance_removed",
+           "the fraction of variance removed in producing the output denoised data "
+           "(note that this applies strictly to the PCA and omits effects of preconditioning)")
+    + Argument("image").type_image_out()
+  + Option("eigenspectra",
+           "Output a matrix containing the spectra of eigenvalues across patches")
+    + Argument("file").type_file_out()
 
   + OptionGroup("Options for debugging the operation of sliding window kernels")
   + Option("max_dist",
@@ -217,7 +233,9 @@ void usage() {
   + Option("sum_optshrink",
            "the sum of eigenvector weights computed for the denoising patch centred at each voxel "
            "as a result of performing optimal shrinkage")
-    + Argument("image").type_image_out();
+    + Argument("image").type_image_out()
+
+  + DWI::GradImportOptions();
 
 }
 // clang-format on
@@ -227,71 +245,83 @@ void usage() {
 // (operations combining complex & real types not allowed to be of different precision)
 std::complex<double> operator/(const std::complex<double> &c, const float n) { return c / double(n); }
 
-template <typename T>
-void run(Image<T> &input,
-         std::shared_ptr<Subsample> subsample,
-         std::shared_ptr<Kernel::Base> kernel,
-         std::shared_ptr<Estimator::Base> estimator,
-         filter_type filter,
-         aggregator_type aggregator,
-         Image<T> &output,
-         Exports &exports) {
-  Recon<T> func(input, subsample, kernel, estimator, filter, aggregator, exports);
-  ThreadedLoop("running MP-PCA denoising", input, 0, 3).run(func, input, output);
-  // Rescale output if aggregation was performed
-  if (aggregator == aggregator_type::EXCLUSIVE)
-    return;
-  for (auto l_voxel = Loop(exports.sum_aggregation)(output, exports.sum_aggregation); l_voxel; ++l_voxel) {
-    for (auto l_volume = Loop(3)(output); l_volume; ++l_volume)
-      output.value() /= float(exports.sum_aggregation.value());
-  }
-  if (exports.rank_output.valid()) {
-    for (auto l = Loop(exports.sum_aggregation)(exports.rank_output, exports.sum_aggregation); l; ++l)
-      exports.rank_output.value() /= exports.sum_aggregation.value();
-  }
-}
+const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, false},  //
+                                                            {{4, 4, 4}, 4.0, false},   //
+                                                            {{2, 2, 2}, 1.0, true},    //
+                                                            {{2, 2, 2}, 1.0, false}}); //
 
 template <typename T>
 void run(Header &dwi,
          const Demodulation &demodulation,
          const demean_type demean,
-         Image<float> &vst_noise_image,
-         std::shared_ptr<Subsample> subsample,
-         std::shared_ptr<Kernel::Base> kernel,
+         Image<float> &user_vst_image,
+         const std::vector<Iterative::Iteration> &iterations,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
          const std::string &output_name,
-         Exports &exports) {
-  auto opt_preconditioned_input = get_options("preconditioned_input");
-  auto opt_preconditioned_output = get_options("preconditioned_output");
-  if (!demodulation && demean == demean_type::NONE && !vst_noise_image.valid()) {
-    if (!opt_preconditioned_input.empty()) {
-      WARN("-preconditioned_input option ignored: no preconditioning taking place");
-    }
-    if (!opt_preconditioned_output.empty()) {
-      WARN("-preconditioned_output option ignored: no preconditioning taking place");
-    }
-    auto input = dwi.get_image<T>().with_direct_io(3);
-    Header H(dwi);
-    H.datatype() = DataType::from<T>();
-    auto output = Image<T>::create(output_name, H);
-    run<T>(input, subsample, kernel, estimator, filter, aggregator, output, exports);
-    return;
+         Exports &final_exports) {
+
+  Image<T> input(dwi.get_image<T>());
+  Image<bool> mask = generate_mask(input);
+  Image<float> vst_image(user_vst_image);
+
+  Precondition<T> preconditioner(input, demodulation, demean, user_vst_image);
+  Image<T> input_preconditioned =
+      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+  // All but the last iteration
+  for (ssize_t iteration = 0; iteration != iterations.size() - 1; ++iteration) {
+    std::shared_ptr<Subsample> subsample = std::make_shared<Subsample>(dwi, iterations[iteration].subsample_ratios);
+    // For internal iterations, we only save the output noise level estimate
+    Exports iteration_exports(dwi, subsample->header());
+    iteration_exports.set_noise_out();
+    Iterative::estimate(input,
+                        input_preconditioned,
+                        mask,
+                        vst_image,
+                        iterations[iteration],
+                        iteration,
+                        subsample,
+                        estimator,
+                        preconditioner,
+                        iteration_exports);
+    // Propagate result to next iteration
+    vst_image = iteration_exports.noise_out;
+    preconditioner.update_vst_image(vst_image);
+    estimator->update_vst_image(vst_image);
   }
-  auto input = dwi.get_image<T>();
-  // perform preconditioning
-  const Precondition<T> preconditioner(input, demodulation, demean, vst_noise_image);
-  Image<T> input_preconditioned;
-  input_preconditioned =
-      opt_preconditioned_input.empty()
-          ? Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"")
-          : Image<T>::create(opt_preconditioned_input[0][0], preconditioner.header());
+
+  auto subsample = Subsample::make(dwi, default_subsample_ratio);
+
+  // Implementation from here differs to that of dwi2noise
+  auto kernel = Kernel::make_kernel(input, subsample->get_factors(), iterations.back().kernel_size_multiplier);
+  kernel->set_mask(mask);
+
+  // If we're doing an iterative optimisation,
+  //   then in the final iteration we assume that the variance-stabilising transform
+  //   results in a noise level of 1.0 everywhere
+  if (iterations.size() > 1)
+    estimator.reset(new Estimator::Unity());
+
+  auto opt = get_options("preconditioned_input");
+  if (!opt.empty())
+    input_preconditioned = Image<T>::create(opt[0][0], preconditioner.header());
   preconditioner(input, input_preconditioned, false);
+  Recon<T> func(input_preconditioned,
+                subsample,
+                kernel,
+                estimator,
+                filter,
+                aggregator,
+                final_exports,
+                preconditioner.null_rank());
+
   Image<T> output = Image<T>::create(output_name, dwi);
   Image<T> output_preconditioned;
-  if (!opt_preconditioned_output.empty())
-    output_preconditioned = Image<T>::create(opt_preconditioned_output[0][0], preconditioner.header());
+  opt = get_options("preconditioned_output");
+  if (!opt.empty())
+    output_preconditioned = Image<T>::create(opt[0][0], preconditioner.header());
   // If we can make use of the output image for preconditioned denoised data
   //   rather than explicitly allocating an intermediate scratch buffer for that purpose,
   //   then do so
@@ -301,32 +331,64 @@ void run(Header &dwi,
     output_preconditioned = Image<T>::scratch(                              //
         preconditioner.header(),                                            //
         "Scratch buffer for denoised data before undoing preconditioning"); //
-  // do the denoising itself
-  run(input_preconditioned, subsample, kernel, estimator, filter, aggregator, output_preconditioned, exports);
-  // reverse effects of preconditioning
-  preconditioner(output_preconditioned, output, true);
-  // compensate for effects of preconditioning where relevant
-  if (exports.noise_out.valid() && vst_noise_image.valid()) {
-    Interp::Cubic<Image<float>> vst(vst_noise_image);
-    const Transform transform(exports.noise_out);
-    for (auto l = Loop(exports.noise_out)(exports.noise_out); l; ++l) {
-      vst.scanner(transform.voxel2scanner * Eigen::Vector3d{default_type(exports.noise_out.index(0)),
-                                                            default_type(exports.noise_out.index(1)),
-                                                            default_type(exports.noise_out.index(2))});
-      exports.noise_out.value() *= vst.value();
+
+  const bool final_iteration_includes_MP =
+      iterations.size() == 1 && get_options("noise_in").empty() && get_options("fixed_rank").empty();
+  ThreadedLoop(final_iteration_includes_MP                                 //
+                   ? "running MP-PCA noise level estimation and denoising" //
+                   : "running PCA denoising",                              //
+               input_preconditioned,                                       //
+               0,                                                          //
+               3)                                                          //
+      .run(func, input_preconditioned, output_preconditioned);             //
+
+  // Rescale output if aggregation was performed
+  if (aggregator != aggregator_type::EXCLUSIVE) {
+    for (auto l_voxel = Loop(final_exports.sum_aggregation)      //
+         (output_preconditioned, final_exports.sum_aggregation); //
+         l_voxel;                                                //
+         ++l_voxel) {                                            //
+      for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
+        output_preconditioned.value() /= double(final_exports.sum_aggregation.value());
+    }
+    if (final_exports.rank_output.valid()) {
+      for (auto l = Loop(final_exports.sum_aggregation)                //
+           (final_exports.rank_output, final_exports.sum_aggregation); //
+           l;                                                          //
+           ++l)                                                        //
+        final_exports.rank_output.value() /= final_exports.sum_aggregation.value();
     }
   }
-  if (preconditioner.rank() == 1) {
-    if (exports.rank_input.valid()) {
-      for (auto l = Loop(exports.rank_input)(exports.rank_input); l; ++l) {
-        if (exports.rank_input.value() > 0)
-          exports.rank_input.value() =
-              std::min<uint16_t>(uint16_t(exports.rank_input.value()) + uint16_t(1), uint16_t(dwi.size(3)));
+
+  // reverse effects of preconditioning
+  preconditioner(output_preconditioned, output, true);
+
+  // Modify some optional outputs to better reflect utilisation of preconditioning
+  const ssize_t preconditioner_null_rank = preconditioner.null_rank();
+  if (preconditioner_null_rank > 0) {
+    if (final_exports.rank_input.valid()) {
+      for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l) {
+        if (final_exports.rank_input.value() > 0)
+          final_exports.rank_input.value() =                                                                      //
+              std::min<uint16_t>(uint16_t(final_exports.rank_input.value()) + uint16_t(preconditioner_null_rank), //
+                                 uint16_t(dwi.size(3)));                                                          //
       }
     }
-    if (exports.rank_output.valid()) {
-      for (auto l = Loop(exports.rank_output)(exports.rank_output); l; ++l)
-        exports.rank_output.value() = std::min<float>(float(exports.rank_output.value()) + 1.0f, float(dwi.size(3)));
+    if (final_exports.rank_output.valid()) {
+      for (auto l = Loop(final_exports.rank_output)(final_exports.rank_output); l; ++l)
+        final_exports.rank_output.value() =                                                             //
+            std::min<float>(float(final_exports.rank_output.value()) + float(preconditioner_null_rank), //
+                            float(dwi.size(3)));                                                        //
+    }
+  }
+  if (vst_image.valid() && final_exports.noise_out.valid()) {
+    Interp::Linear<Image<float>> vst_interp(vst_image);
+    const Transform transform(subsample->header());
+    for (auto l = Loop(final_exports.noise_out)(final_exports.noise_out); l; ++l) {
+      vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
+                                                                    double(final_exports.noise_out.index(1)),
+                                                                    double(final_exports.noise_out.index(2))}));
+      final_exports.noise_out.value() *= vst_interp.value();
     }
   }
 }
@@ -343,12 +405,16 @@ void run() {
 
   const Demodulation demodulation = select_demodulation(dwi);
   const demean_type demean = select_demean(dwi);
-  Image<float> vst_noise_image;
+
+  Image<float> user_vst_image;
   auto opt = get_options("vst");
   if (!opt.empty()) {
-    vst_noise_image = Image<float>::open(opt[0][0]);
-    if (vst_noise_image.ndim() != 3)
-      throw Exception("Variance-stabilising noise image must be 3D");
+    if (demean == demean_type::NONE) {
+      WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
+    }
+    user_vst_image = Image<float>::open(opt[0][0]);
+    if (user_vst_image.ndim() != 3)
+      throw Exception("Variance-stabilising transform noise level image must be 3D");
   }
 
   aggregator_type aggregator = aggregator_type::GAUSSIAN;
@@ -356,33 +422,35 @@ void run() {
   if (!opt.empty())
     aggregator = aggregator_type(int(opt[0][0]));
 
-  auto subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
-  assert(subsample);
+  auto final_subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
+  assert(final_subsample);
   if (aggregator == aggregator_type::EXCLUSIVE &&
-      *std::max_element(subsample->get_factors().begin(), subsample->get_factors().end()) > 1) {
+      *std::max_element(final_subsample->get_factors().begin(), final_subsample->get_factors().end()) > 1) {
     WARN("Utilising subsampling in conjunction with -aggregator exclusive "
          "will result in an output image with holes, "
          "as not all input voxels will have their own patch");
   }
 
-  auto kernel = Kernel::make_kernel(dwi, subsample->get_factors());
-  assert(kernel);
-
-  auto estimator = Estimator::make_estimator(vst_noise_image, true);
-  assert(estimator);
+  auto estimator = Estimator::make_estimator(user_vst_image, true);
 
   filter_type filter = get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE;
   opt = get_options("filter");
   if (!opt.empty())
     filter = filter_type(int(opt[0][0]));
 
-  Exports exports(dwi, subsample->header());
+  Exports final_exports(dwi, final_subsample->header());
   opt = get_options("noise_out");
   if (!opt.empty())
-    exports.set_noise_out(opt[0][0]);
+    final_exports.set_noise_out(opt[0][0]);
+  opt = get_options("lamplus");
+  if (!opt.empty())
+    final_exports.set_lamplus(opt[0][0]);
+  opt = get_options("rank_pcanonzero");
+  if (!opt.empty())
+    final_exports.set_rank_pcanonzero(opt[0][0]);
   opt = get_options("rank_input");
   if (!opt.empty())
-    exports.set_rank_input(opt[0][0]);
+    final_exports.set_rank_input(opt[0][0]);
   opt = get_options("rank_output");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE && filter == filter_type::TRUNCATE) {
@@ -391,7 +459,7 @@ void run() {
            "as there is no aggregation of multiple patches per output voxel "
            "and no optimal shrinkage to reduce output rank relative to estimated input rank");
     }
-    exports.set_rank_output(opt[0][0]);
+    final_exports.set_rank_output(opt[0][0]);
   }
   opt = get_options("sum_optshrink");
   if (!opt.empty()) {
@@ -399,27 +467,53 @@ void run() {
       WARN("Note that with a truncation filter, "
            "output image from -sumweights option will be equivalent to rank_input");
     }
-    exports.set_sum_optshrink(opt[0][0]);
+    final_exports.set_sum_optshrink(opt[0][0]);
   }
   opt = get_options("max_dist");
   if (!opt.empty())
-    exports.set_max_dist(opt[0][0]);
+    final_exports.set_max_dist(opt[0][0]);
   opt = get_options("voxelcount");
   if (!opt.empty())
-    exports.set_voxelcount(opt[0][0]);
+    final_exports.set_voxelcount(opt[0][0]);
   opt = get_options("patchcount");
   if (!opt.empty())
-    exports.set_patchcount(opt[0][0]);
-
+    final_exports.set_patchcount(opt[0][0]);
   opt = get_options("sum_aggregation");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE) {
       WARN("Output from -sum_aggregation will just contain 1 for every voxel processed: "
            "no patch aggregation takes place when output series comes exclusively from central patch");
     }
-    exports.set_sum_aggregation(opt[0][0]);
+    final_exports.set_sum_aggregation(opt[0][0]);
   } else if (aggregator != aggregator_type::EXCLUSIVE) {
-    exports.set_sum_aggregation("");
+    final_exports.set_sum_aggregation();
+  }
+  opt = get_options("variance_removed");
+  if (!opt.empty())
+    final_exports.set_variance_removed(opt[0][0]);
+  opt = get_options("eigenspectra");
+  if (!opt.empty())
+    final_exports.set_eigenspectra_path(opt[0][0]);
+
+  std::vector<Iterative::Iteration> iterations;
+  if (get_options("iterative").empty()) {
+    Iterative::Iteration config;
+    config.subsample_ratios = final_subsample->get_factors();
+    config.kernel_size_multiplier = 1.0;
+    config.smooth_noiseout = false;
+    iterations.push_back(config);
+  } else {
+    if (!get_options("subsample").empty())
+      throw Exception("Implementation does not support use of both -iterative and -subsample");
+    if (!get_options("noise_in").empty())
+      throw Exception("Options -iterative and -noise_in are mutually exclusive");
+    if (!get_options("fixed_rank").empty())
+      throw Exception("Options -iterative and -fixed_rank are mutually exclusive");
+    if (demean == demean_type::NONE) {
+      WARN("Use of both -iterative and -demean none should be treated with scepticism,"
+           " as correction of heteroscedasticity will introduce false tissue contrast");
+    }
+    iterations = default_iterations;
   }
 
   int prec = get_option_value("datatype", 0); // default: single precision
@@ -429,64 +523,60 @@ void run() {
   case 0:
     assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
-    run<float>(          //
-        dwi,             //
-        demodulation,    //
-        demean,          //
-        vst_noise_image, //
-        subsample,       //
-        kernel,          //
-        estimator,       //
-        filter,          //
-        aggregator,      //
-        argument[1],     //
-        exports);        //
+    run<float>(         //
+        dwi,            //
+        demodulation,   //
+        demean,         //
+        user_vst_image, //
+        iterations,     //
+        estimator,      //
+        filter,         //
+        aggregator,     //
+        argument[1],    //
+        final_exports); //
     break;
   case 1:
     assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
-    run<double>(         //
-        dwi,             //
-        demodulation,    //
-        demean,          //
-        vst_noise_image, //
-        subsample,       //
-        kernel,          //
-        estimator,       //
-        filter,          //
-        aggregator,      //
-        argument[1],     //
-        exports);        //
+    run<double>(        //
+        dwi,            //
+        demodulation,   //
+        demean,         //
+        user_vst_image, //
+        iterations,     //
+        estimator,      //
+        filter,         //
+        aggregator,     //
+        argument[1],    //
+        final_exports); //
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(         //
-        dwi,             //
-        demodulation,    //
-        demean,          //
-        vst_noise_image, //
-        subsample,       //
-        kernel,          //
-        estimator,       //
-        filter,          //
-        aggregator,      //
-        argument[1],     //
-        exports);        //
+    run<cfloat>(        //
+        dwi,            //
+        demodulation,   //
+        demean,         //
+        user_vst_image, //
+        iterations,     //
+        estimator,      //
+        filter,         //
+        aggregator,     //
+        argument[1],    //
+        final_exports); //
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(        //
-        dwi,             //
-        demodulation,    //
-        demean,          //
-        vst_noise_image, //
-        subsample,       //
-        kernel,          //
-        estimator,       //
-        filter,          //
-        aggregator,      //
-        argument[1],     //
-        exports);        //
+    run<cdouble>(       //
+        dwi,            //
+        demodulation,   //
+        demean,         //
+        user_vst_image, //
+        iterations,     //
+        estimator,      //
+        filter,         //
+        aggregator,     //
+        argument[1],    //
+        final_exports); //
     break;
   }
 }
