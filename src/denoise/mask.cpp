@@ -14,25 +14,8 @@
  * For more details, see http://www.mrtrix.org/.
  */
 
-#pragma once
+#include "denoise/mask.h"
 
-#include <limits>
+#include "types.h"
 
-namespace MR::Denoise::Estimator {
-
-class Result {
-public:
-  Result()
-      : cutoff_p(-1),
-        sigma2(std::numeric_limits<double>::signaling_NaN()),
-        lamplus(std::numeric_limits<double>::signaling_NaN()) {}
-  operator bool() const { return cutoff_p >= 0 && std::isfinite(sigma2) && std::isfinite(lamplus); }
-  bool operator!() const { return !bool(*this); }
-  // From dwidenoise code / estimator::Exp :
-  //   cutoff_p is the *number of noise components considered to be part of the MP distribution*
-  ssize_t cutoff_p;
-  double sigma2;
-  double lamplus;
-};
-
-} // namespace MR::Denoise::Estimator
+namespace MR::Denoise {} // namespace MR::Denoise
