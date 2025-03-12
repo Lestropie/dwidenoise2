@@ -296,4 +296,9 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   }
 }
 
+template class Recon<float>;
+template class Recon<cfloat>;
+template class Recon<double>;
+template class Recon<cdouble>;
+
 } // namespace MR::Denoise

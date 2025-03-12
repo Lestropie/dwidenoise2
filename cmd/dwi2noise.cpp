@@ -252,10 +252,11 @@ void run(Header &dwi,
                       estimator,
                       preconditioner,
                       final_exports);
-  if (preconditioner.rank() == 1 && final_exports.rank_input.valid()) {
+  const uint16_t null_rank = uint16_t(preconditioner.null_rank());
+  if (null_rank > 0 && final_exports.rank_input.valid()) {
     for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l)
       final_exports.rank_input.value() =
-          std::max<uint16_t>(uint16_t(final_exports.rank_input.value()) + uint16_t(1), uint16_t(dwi.size(3)));
+          std::max<uint16_t>(uint16_t(final_exports.rank_input.value()) + null_rank, uint16_t(dwi.size(3)));
   }
 }
 

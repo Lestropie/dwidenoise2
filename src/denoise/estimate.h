@@ -108,9 +108,4 @@ protected:
 
 template <typename F> std::mutex Estimate<F>::mutex;
 
-template class Estimate<float>;
-template class Estimate<cfloat>;
-template class Estimate<double>;
-template class Estimate<cdouble>;
-
 } // namespace MR::Denoise

@@ -34,7 +34,7 @@ public:
 
   SphereRatio(const SphereRatio &) = default;
 
-  ~SphereRatio() final = default;
+  ~SphereRatio() override = default;
 
   Data operator()(const Voxel::index_type &pos) const override;
 

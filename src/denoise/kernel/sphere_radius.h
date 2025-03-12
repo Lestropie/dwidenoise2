@@ -34,8 +34,8 @@ public:
     INFO("Maximum number of voxels in " + str(radius) + "mm fixed-radius kernel is " + str(maximum_size));
   }
   SphereFixedRadius(const SphereFixedRadius &) = default;
-  ~SphereFixedRadius() final = default;
-  Data operator()(const Voxel::index_type &pos) const;
+  ~SphereFixedRadius() override = default;
+  Data operator()(const Voxel::index_type &pos) const override;
   ssize_t estimated_size() const override { return maximum_size; }
 
 private:

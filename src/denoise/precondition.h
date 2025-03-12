@@ -105,10 +105,6 @@ private:
   // Third step: Variance-stabilising transform
   Image<float> vst_image;
 };
-template class Precondition<float>;
-template class Precondition<double>;
-template class Precondition<cfloat>;
-template class Precondition<cdouble>;
 
 // TODO New function that will pad a VST image by one voxel in every direction,
 //   making it more likely to succeed in obtaining interpolated values for every input voxel

@@ -199,4 +199,9 @@ template <typename F> void Estimate<F>::load_data(Image<F> &image) {
   assign_pos_of(pos, 0, 3).to(image);
 }
 
+template class Estimate<float>;
+template class Estimate<cfloat>;
+template class Estimate<double>;
+template class Estimate<cdouble>;
+
 } // namespace MR::Denoise

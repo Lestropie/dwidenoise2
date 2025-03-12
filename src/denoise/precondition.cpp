@@ -526,4 +526,9 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
   }
 }
 
+template class Precondition<float>;
+template class Precondition<double>;
+template class Precondition<cfloat>;
+template class Precondition<cdouble>;
+
 } // namespace MR::Denoise

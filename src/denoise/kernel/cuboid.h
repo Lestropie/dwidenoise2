@@ -30,7 +30,7 @@ class Cuboid : public Base {
 public:
   Cuboid(const Header &header, const std::array<ssize_t, 3> &subsample_factors, const std::array<ssize_t, 3> &extent);
   Cuboid(const Cuboid &) = default;
-  ~Cuboid() final = default;
+  ~Cuboid() override = default;
   Data operator()(const Voxel::index_type &pos) const override;
   ssize_t estimated_size() const override { return size; }
 

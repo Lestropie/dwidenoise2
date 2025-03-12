@@ -58,9 +58,4 @@ protected:
   typename Estimate<F>::MatrixType Xr;
 };
 
-template class Recon<float>;
-template class Recon<cfloat>;
-template class Recon<double>;
-template class Recon<cdouble>;
-
 } // namespace MR::Denoise
