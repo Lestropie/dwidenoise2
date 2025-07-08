@@ -69,6 +69,14 @@ void usage() {
     " the output will be the total noise level across real and imaginary channels,"
     " so a scale factor sqrt(2) applies."
 
+  + "By default, the noise map estimate is derived through an iterative multi-resolution pyramid."
+    " In the earlier iterations, there are fewer PCAs performed"
+    " in order to obtain a low-resolution and smooth noise map estimate."
+    " These estimates are then used as input to subsequent iterations"
+    " to apply a variance-stabilising transform prior to PCA,"
+    " deriving a new noise map at a higher spatial resolution."
+    " The noise map estimated at the final iteration is additionally smoothed prior to export."
+
   + demodulation_description
 
   + Kernel::shape_description
@@ -123,8 +131,9 @@ void usage() {
   + OptionGroup("Options for modifying PCA computations")
   + datatype_option
   + Estimator::estimator_option
-  + Option("iterative",
-           "Derive noise level estimate through iterative multi-resolution process")
+  + Option("onepass",
+           "Derive noise level estimate with a single pass through the image,"
+           " rather than the default iterative multi-resolution process")
   + Kernel::options
   + subsample_option
   + precondition_options(false)
@@ -285,16 +294,17 @@ void run() {
   auto final_subsample = Subsample::make(dwi, default_subsample_ratio);
 
   std::vector<Iterative::Iteration> iterations;
-  if (get_options("iterative").empty()) {
+  if (get_options("onepass").empty()) {
+    if (!get_options("subsample").empty())
+      throw Exception("Implementation does not support use of both -iterative and -subsample");
+    iterations = default_iterations;
+  }
+  if (iterations.empty()) {
     Iterative::Iteration config;
     config.subsample_ratios = final_subsample->get_factors();
     config.kernel_size_multiplier = 1.0;
     config.smooth_noiseout = true;
     iterations.push_back(config);
-  } else {
-    if (!get_options("subsample").empty())
-      throw Exception("Implementation does not support use of both -iterative and -subsample");
-    iterations = default_iterations;
   }
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1]);
