@@ -350,7 +350,7 @@ void run(Header &dwi,
                 final_exports,
                 preconditioner.null_rank());
 
-  Image<T> output = Image<T>::create(output_name, preconditioner.header());
+  Image<T> output = Image<T>::create(output_name, dwi);
   Image<T> output_preconditioned;
   opt = get_options("preconditioned_output");
   if (!opt.empty())
