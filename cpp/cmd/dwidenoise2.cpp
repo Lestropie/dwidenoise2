@@ -350,7 +350,9 @@ void run(Header &dwi,
                 final_exports,
                 preconditioner.null_rank());
 
-  Image<T> output = Image<T>::create(output_name, dwi);
+  Header H_out (dwi);
+  H_out.datatype() = DataType::from<T>();
+  Image<T> output = Image<T>::create(output_name, H_out);
   Image<T> output_preconditioned;
   opt = get_options("preconditioned_output");
   if (!opt.empty())
@@ -375,21 +377,38 @@ void run(Header &dwi,
                3)                                                          //
       .run(func, input_preconditioned, output_preconditioned);             //
 
+  const size_t max_rank = Denoise::num_volumes(dwi);
+
   // Rescale output if aggregation was performed
   if (aggregator != aggregator_type::EXCLUSIVE) {
     for (auto l_voxel = Loop(final_exports.sum_aggregation)      //
          (output_preconditioned, final_exports.sum_aggregation); //
          l_voxel;                                                //
          ++l_voxel) {                                            //
-      for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
-        output_preconditioned.value() /= double(final_exports.sum_aggregation.value());
+      const double sum_aggregation = final_exports.sum_aggregation.value();
+      if (sum_aggregation == double(0)) {
+        // Voxel did not contribute to any patches;
+        //   impute input data
+        assign_pos_of(output_preconditioned, 0, 3).to(input);
+        for (auto l_volume = Loop(3)(input, output_preconditioned); l_volume; ++l_volume)
+          output_preconditioned.value() = input.value();
+      } else {
+        const double multiplier = double(1) / sum_aggregation;
+        for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
+          output_preconditioned.value() *= multiplier;
+      }
     }
     if (final_exports.rank_output.valid()) {
       for (auto l = Loop(final_exports.sum_aggregation)                //
            (final_exports.rank_output, final_exports.sum_aggregation); //
            l;                                                          //
-           ++l)                                                        //
-        final_exports.rank_output.value() /= final_exports.sum_aggregation.value();
+           ++l) {                                                      //
+        const double sum_aggregation = final_exports.sum_aggregation.value();
+        final_exports.rank_output.value() =                           //
+            sum_aggregation == double(0)                              //
+            ? max_rank                                                //
+            : (final_exports.rank_output.value() /= sum_aggregation); //
+      }
     }
   }
 
@@ -404,14 +423,14 @@ void run(Header &dwi,
         if (final_exports.rank_input.value() > 0)
           final_exports.rank_input.value() =                                                                      //
               std::min<uint16_t>(uint16_t(final_exports.rank_input.value()) + uint16_t(preconditioner_null_rank), //
-                                 uint16_t(dwi.size(3)));                                                          //
+                                 uint16_t(max_rank));                                                             //
       }
     }
     if (final_exports.rank_output.valid()) {
       for (auto l = Loop(final_exports.rank_output)(final_exports.rank_output); l; ++l)
         final_exports.rank_output.value() =                                                             //
             std::min<float>(float(final_exports.rank_output.value()) + float(preconditioner_null_rank), //
-                            float(dwi.size(3)));                                                        //
+                            float(max_rank));                                                           //
     }
   }
   if (vst_image.valid() && final_exports.noise_out.valid()) {
@@ -440,9 +459,6 @@ void run(Header &dwi,
     Image<T> residuals_m2 = Image<T>::scratch(H_resstats_complex);
     Image<float> residuals_std = Image<float>::create(opt[0][1], H_resstats_real);
     Image<float> residuals_maxabs = Image<float>::create(opt[0][2], H_resstats_real);
-    size_t num_volumes = dwi.size(3);
-    for (size_t axis = 4; axis != dwi.ndim(); ++axis)
-      num_volumes *= dwi.size(axis);
     size_t count = 0;
     for (auto l = Loop("Computing statistics of denoising residuals", dwi)(input, output); l; ++l) {
       assign_pos_of(input, 0, 3).to(residuals_mean, residuals_m2, residuals_maxabs);
@@ -463,10 +479,7 @@ void run() {
   auto dwi = Header::open(argument[0]);
   if (dwi.ndim() < 4)
     throw Exception("input image must be at least 4-dimensional");
-  ssize_t intensities_per_voxel = dwi.size(3);
-  for (ssize_t axis = 4; axis != dwi.ndim(); ++axis)
-    intensities_per_voxel *= dwi.size(axis);
-  if (intensities_per_voxel == 1)
+  if (Denoise::num_volumes(dwi) == 1)
     throw Exception("input image must be non-singleton across non-spatial dimensions");
 
   const Demodulation demodulation = select_demodulation(dwi);

@@ -212,16 +212,9 @@ void run(Header &dwi,
   Image<bool> mask = generate_mask(input);
   Image<float> vst_image(user_vst_image);
 
-  Header H_preconditioned(input);
-  Stride::set(H_preconditioned, Stride::contiguous_along_axis(3, input));
-  Image<T> input_preconditioned =
-      Image<T>::scratch(H_preconditioned, "Preconditioned version of \"" + dwi.name() + "\"");
-
-  // First two components of this, being demodulation and demeaning,
-  //   are consistent across iterations;
-  //   therefore don't require recalculation of these,
-  //   just overwrite the VST image as required
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image);
+  Image<T> input_preconditioned =
+      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
 
   // All but the last iteration
   for (ssize_t iteration = 0; iteration != iterations.size() - 1; ++iteration) {
@@ -262,17 +255,20 @@ void run(Header &dwi,
                       preconditioner,
                       final_exports);
   const uint16_t null_rank = uint16_t(preconditioner.null_rank());
+  const uint16_t max_rank = Denoise::num_volumes(dwi);
   if (null_rank > 0 && final_exports.rank_input.valid()) {
     for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l)
       final_exports.rank_input.value() =
-          std::max<uint16_t>(uint16_t(final_exports.rank_input.value()) + null_rank, uint16_t(dwi.size(3)));
+          std::max<uint16_t>(uint16_t(final_exports.rank_input.value()) + null_rank, max_rank);
   }
 }
 
 void run() {
   auto dwi = Header::open(argument[0]);
-  if (dwi.ndim() != 4 || dwi.size(3) <= 1)
-    throw Exception("input image must be 4-dimensional");
+  if (dwi.ndim() < 4)
+    throw Exception("input image must be at least 4-dimensional");
+  if (Denoise::num_volumes(dwi) == 1)
+    throw Exception("input image must be non-singleton across non-spatial dimensions");
   bool complex = dwi.datatype().is_complex();
 
   const Demodulation demodulation = select_demodulation(dwi);

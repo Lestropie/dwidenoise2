@@ -49,6 +49,8 @@ Estimate<F>::Estimate(const Image<F> &image,
 #endif
       s(std::min(m, kernel->estimated_size())),
       exports(exports) {
+  // If input image is > 4D, should have been preconditioned into 4D
+  assert(image.ndim() == 4);
 }
 
 template <typename F>

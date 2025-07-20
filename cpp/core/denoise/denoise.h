@@ -61,4 +61,8 @@ ssize_t dimlong_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp);
 ssize_t rank_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp);
 ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp);
 
+// Convenience function for determining the total number of volumes
+//   whether the input is 4D or higher
+size_t num_volumes(const Header&);
+
 } // namespace MR::Denoise

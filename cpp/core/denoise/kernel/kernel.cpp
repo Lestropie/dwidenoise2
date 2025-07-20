@@ -17,6 +17,7 @@
 
 #include "denoise/kernel/kernel.h"
 
+#include "denoise/denoise.h"
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/sphere_radius.h"
@@ -106,6 +107,7 @@ make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors, co
       throw Exception("-radius_* options are inapplicable if cuboid kernel shape is selected");
     opt = get_options("extent");
     std::array<ssize_t, 3> extent;
+    const ssize_t toal_num_volumes = Denoise::num_volumes(H);
     if (!opt.empty()) {
       auto userinput = parse_ints<uint32_t>(opt[0][0]);
       if (userinput.size() == 1)
@@ -134,7 +136,7 @@ make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors, co
     } else {
       extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
       ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
-      while (extent[0] * extent[1] * extent[2] < size_multiplier * std::max(H.size(3), prev_num_voxels)) {
+      while (extent[0] * extent[1] * extent[2] < size_multiplier * std::max(toal_num_volumes, prev_num_voxels)) {
         prev_num_voxels = extent[0] * extent[1] * extent[2];
         // If multiple axes are tied for spatial extent in mm, increment all of them
         const default_type min_length =
@@ -147,7 +149,7 @@ make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors, co
     }
     INFO("selected cuboid patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]));
 
-    if (std::min(H.size(3), extent[0] * extent[1] * extent[2]) < 15) {
+    if (std::min(toal_num_volumes, extent[0] * extent[1] * extent[2]) < 15) {
       WARN("The number of volumes or the patch size is small; "
            "this may lead to discretisation effects in the noise level "
            "and cause inconsistent denoising between adjacent voxels");

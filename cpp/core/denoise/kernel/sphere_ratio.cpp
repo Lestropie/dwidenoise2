@@ -47,9 +47,7 @@ Data SphereRatio::operator()(const Voxel::index_type &pos) const {
 }
 
 default_type SphereRatio::compute_max_radius(const Header &voxel_grid, const default_type min_ratio) const {
-  size_t values_per_voxel = voxel_grid.size(3);
-  for (size_t axis = 4; axis != voxel_grid.ndim(); ++axis)
-    values_per_voxel *= voxel_grid.size(axis);
+  const size_t values_per_voxel = Denoise::num_volumes(voxel_grid);
   const default_type voxel_volume = voxel_grid.spacing(0) * voxel_grid.spacing(1) * voxel_grid.spacing(2);
   // Consider the worst case scenario, where the corner of the FoV is being processed;
   //   we do not want to run out of elements in our lookup table before reaching our desired # voxels

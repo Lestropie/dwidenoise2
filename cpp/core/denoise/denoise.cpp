@@ -76,4 +76,21 @@ ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp) {
   return (std::min(m, n) - rank_nonzero(m, n, rp));
 }
 
+size_t num_volumes(const Header& H) {
+  switch (H.ndim()) {
+    case 0:
+    case 1:
+    case 2:
+      throw Exception("Attempt to compute number of volumes for a <3D image");
+    case 3:
+      return 1;
+    default: {
+      size_t result = H.size(3);
+      for (size_t axis = 4; axis != H.ndim(); ++axis)
+        result *= H.size(axis);
+      return result;
+    }
+  }
+}
+
 } // namespace MR::Denoise
