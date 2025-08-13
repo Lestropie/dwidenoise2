@@ -35,9 +35,11 @@ public:
   void set_lamplus(const std::string &path);
   void set_rank_pcanonzero(const std::string &path);
   void set_rank_input(const std::string &path);
+  void set_rank_input();
   void set_rank_output(const std::string &path);
   void set_sum_optshrink(const std::string &path);
   void set_max_dist(const std::string &path);
+  void set_max_dist();
   void set_voxelcount(const std::string &path);
   void set_patchcount(const std::string &path);
   void set_sum_aggregation(const std::string &path);
@@ -57,8 +59,6 @@ public:
   Image<float> sum_aggregation;
   Image<float> variance_removed;
 
-  // std::string eigenspectra_path;
-  // std::vector<eigenvalues_type> eigenspectra_data;
   bool saving_eigenspectra() const { return bool(eigenspectra); }
   void add_eigenspectrum(const eigenvalues_type &s);
 
