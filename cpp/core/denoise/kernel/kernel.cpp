@@ -21,6 +21,7 @@
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/sphere_radius.h"
+#include "denoise/kernel/sphere_rank.h"
 #include "denoise/kernel/sphere_ratio.h"
 #include "math/math.h"
 
@@ -43,7 +44,14 @@ const char *const shape_description =
     "such that the entire volume of the kernel resides within the image FoV.";
 
 const char *const default_size_description =
-    "The size of the default spherical kernel is set to select a number of voxels that is "
+    "The following describes the ways in which "
+    "the size of the sliding window is chosen by default. "
+    "Under default iterative optimisation operation, "
+    "the size of the default spherical kernel is set in such a way "
+    "that the excess number of voxels relative to the number of volumes "
+    "is at least as large as the estimated rank of the non-noise signal at that location. "
+    "For one-pass operation, "
+    "the size of the default spherical kernel is set to select a number of voxels that is "
     "1.0 / 0.85 ~ 1.18 times the number of volumes in the input series. "
     "If a cuboid kernel is requested, "
     "but the -extent option is not specified, "
@@ -86,7 +94,10 @@ const OptionGroup options = OptionGroup("Options for controlling the sliding spa
 // clang-format on
 
 std::shared_ptr<Base>
-make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors, const default_type size_multiplier) {
+make_kernel(const Header &H,
+            const std::array<ssize_t, 3> &subsample_factors,
+            const default_type size_multiplier,
+            const Image<float> &rank_per_mm) {
   auto opt = App::get_options("shape");
   const Kernel::shape_type shape = opt.empty() ? Kernel::shape_type::SPHERE : Kernel::shape_type((int)(opt[0][0]));
   std::shared_ptr<Kernel::Base> kernel;
@@ -97,10 +108,20 @@ make_kernel(const Header &H, const std::array<ssize_t, 3> &subsample_factors, co
     if (!get_options("extent").empty())
       throw Exception("-extent option does not apply to spherical kernel");
     opt = get_options("radius_mm");
-    if (opt.empty())
+    if (!opt.empty())
+      return std::make_shared<SphereFixedRadius>(
+          H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
+    opt = get_options("radius_ratio");
+    if (!opt.empty())
       return std::make_shared<SphereRatio>(
-          H, subsample_factors, get_option_value("radius_ratio", sphere_multiplier_default * size_multiplier));
-    return std::make_shared<SphereFixedRadius>(H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
+          H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
+    // If operating in iterative mode and past the first iteration,
+    //   use the rank-based kernel;
+    //   otherwise, default to the aspect ratio
+    if (rank_per_mm.valid())
+      return std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm);
+    return std::make_shared<SphereRatio>(
+          H, subsample_factors, sphere_multiplier_default * size_multiplier);
   }
   case Kernel::shape_type::CUBOID: {
     if (!get_options("radius_mm").empty() || !get_options("radius_ratio").empty())

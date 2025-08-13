@@ -57,6 +57,11 @@ protected:
 
   std::shared_ptr<Shared> shared;
   const ssize_t centre_index;
+
+  // Determine an appropriate bounding box from which to generate the search table
+  // Find the radius for which 7/8 of the sphere will contain the minimum number of voxels, then round up
+  // This is only for setting the maximal radius for generation of the lookup table
+  default_type compute_max_radius(const Header &voxel_grid, const default_type min_ratio) const;
 };
 
 } // namespace MR::Denoise::Kernel

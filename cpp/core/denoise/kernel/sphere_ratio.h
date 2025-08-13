@@ -30,7 +30,7 @@ class SphereRatio : public SphereBase {
 
 public:
   SphereRatio(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const default_type min_ratio)
-      : SphereBase(voxel_grid, subsample_factors, compute_max_radius(voxel_grid, min_ratio)),
+      : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, min_ratio)),
         min_size(std::ceil(Denoise::num_volumes(voxel_grid) * min_ratio)) {}
 
   SphereRatio(const SphereRatio &) = default;
@@ -44,10 +44,6 @@ public:
 private:
   ssize_t min_size;
 
-  // Determine an appropriate bounding box from which to generate the search table
-  // Find the radius for which 7/8 of the sphere will contain the minimum number of voxels, then round up
-  // This is only for setting the maximal radius for generation of the lookup table
-  default_type compute_max_radius(const Header &voxel_grid, const default_type min_ratio) const;
 };
 
 } // namespace MR::Denoise::Kernel

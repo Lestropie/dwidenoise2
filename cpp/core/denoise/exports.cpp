@@ -51,12 +51,19 @@ void Exports::set_rank_input(const std::string &path) {
   H.datatype().set_byte_order_native();
   rank_input = Image<uint16_t>::create(path, H);
 }
+void Exports::set_rank_input() {
+  Header H(*H_ss);
+  H.datatype() = DataType::UInt16;
+  H.datatype().set_byte_order_native();
+  rank_input = Image<uint16_t>::scratch(H, "Scratch image for PCA patch rank");
+}
 
 void Exports::set_rank_output(const std::string &path) { rank_output = Image<float>::create(path, *H_in); }
 
 void Exports::set_sum_optshrink(const std::string &path) { sum_optshrink = Image<float>::create(path, *H_ss); }
 
 void Exports::set_max_dist(const std::string &path) { max_dist = Image<float>::create(path, *H_ss); }
+void Exports::set_max_dist() { max_dist = Image<float>::scratch(*H_ss, "Scratch image for maximal patch radius"); }
 
 void Exports::set_voxelcount(const std::string &path) {
   Header H(*H_ss);

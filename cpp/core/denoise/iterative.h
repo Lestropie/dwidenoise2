@@ -46,13 +46,17 @@ void estimate(Image<T> &input,
               Image<T> &input_preconditioned,
               Image<bool> &mask,
               Image<float> &vst_image,
+              Image<float> &rank_per_mm_image,
               const Iteration &config,
               const ssize_t iter,
               std::shared_ptr<Subsample> subsample,
               std::shared_ptr<Estimator::Base> estimator,
               const Precondition<T> &preconditioner,
               Exports &exports) {
-  auto kernel = Kernel::make_kernel(input, subsample->get_factors(), config.kernel_size_multiplier);
+  auto kernel = Kernel::make_kernel(input,
+                                    subsample->get_factors(),
+                                    config.kernel_size_multiplier,
+                                    rank_per_mm_image);
   kernel->set_mask(mask);
   if (preconditioner.noop())
     input_preconditioned = input;

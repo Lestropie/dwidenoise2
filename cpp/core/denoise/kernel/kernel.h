@@ -24,6 +24,7 @@
 
 #include "app.h"
 #include "header.h"
+#include "image.h"
 #include "types.h"
 
 namespace MR::Denoise::Kernel {
@@ -40,6 +41,7 @@ extern const App::OptionGroup options;
 
 std::shared_ptr<Base> make_kernel(const Header &H,                                 //
                                   const std::array<ssize_t, 3> &subsample_factors, //
-                                  const default_type size_multiplier);             //
+                                  const default_type size_multiplier,              //
+                                  const Image<float> &rank_per_mm_image);          //
 
 } // namespace MR::Denoise::Kernel

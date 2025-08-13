@@ -15,20 +15,39 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/kernel/sphere_ratio.h"
+#include "denoise/kernel/sphere_rank.h"
+
+#include "interp/linear.h"
 
 namespace MR::Denoise::Kernel {
 
-Data SphereRatio::operator()(const Voxel::index_type &pos) const {
+Data SphereRank::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
+  const Eigen::Vector3d realpos(voxel2real(pos));
+  // For thread-safety
+  default_type local_rank_per_mm (default_type(0));
+  {
+    Interp::Linear<Image<float>> interp(rank_per_mm);
+    interp.scanner(realpos);
+    if (!interp)
+      throw Exception("Linear interpolation of rank from prior iteration failed");
+    local_rank_per_mm = interp.value();
+  }
   // For thread-safety
   Image<bool> mask(mask_image);
-  Data result(voxel2real(pos), centre_index);
+  Data result(realpos, centre_index);
   auto table_it = shared->begin();
+  // Here it's best to keep track of both the squared radius and the radius;
+  //   they are used for different purposes
+  default_type max_sq_distance (default_type(0));
   while (table_it != shared->end()) {
-    // If there's a tie in distances, want to include all such offsets in the kernel,
-    //   even if the size of the utilised kernel extends beyond the minimum size
-    if (result.voxels.size() >= min_size && table_it->sq_distance != result.max_distance)
+    // Defining feature for this kernel:
+    // Set the kernel size in such a way that it should be large enough
+    //   that if one were to remove the signal components,
+    //   the remaining noise section would be square
+    if (std::isfinite(result.max_distance)
+        && result.voxels.size() >= (num_volumes + (local_rank_per_mm * result.max_distance))
+        && table_it->sq_distance != max_sq_distance)
       break;
     const Voxel::index_type voxel({pos[0] + table_it->index[0],   //
                                    pos[1] + table_it->index[1],   //
@@ -37,12 +56,12 @@ Data SphereRatio::operator()(const Voxel::index_type &pos) const {
       assign_pos_of(voxel).to(mask);
       if (mask.value()) {
         result.voxels.push_back(Voxel(voxel, table_it->sq_distance));
-        result.max_distance = table_it->sq_distance;
+        max_sq_distance = table_it->sq_distance;
+        result.max_distance = std::sqrt(max_sq_distance);
       }
     }
     ++table_it;
   }
-  result.max_distance = std::sqrt(result.max_distance);
   return result;
 }
 

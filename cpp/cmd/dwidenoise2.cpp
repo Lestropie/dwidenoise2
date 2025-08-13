@@ -303,16 +303,21 @@ void run(Header &dwi,
   Image<T> input_preconditioned =
       Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
 
+  Image<float> rank_per_mm;
+
   // All but the last iteration
   for (ssize_t iteration = 0; iteration != iterations.size() - 1; ++iteration) {
     std::shared_ptr<Subsample> subsample = std::make_shared<Subsample>(dwi, iterations[iteration].subsample_ratios);
     // For internal iterations, we only save the output noise level estimate
     Exports iteration_exports(dwi, subsample->header());
     iteration_exports.set_noise_out();
+    iteration_exports.set_rank_input();
+    iteration_exports.set_max_dist();
     Iterative::estimate(input,
                         input_preconditioned,
                         mask,
                         vst_image,
+                        rank_per_mm,
                         iterations[iteration],
                         iteration,
                         subsample,
@@ -321,14 +326,22 @@ void run(Header &dwi,
                         iteration_exports);
     // Propagate result to next iteration
     vst_image = iteration_exports.noise_out;
+    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
+    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
     preconditioner.update_vst_image(vst_image);
     estimator->update_vst_image(vst_image);
+    rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
+    for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
+      rank_per_mm.value() = iteration_exports.rank_input.value() / iteration_exports.max_dist.value();
   }
 
   auto subsample = Subsample::make(dwi, default_subsample_ratio);
 
   // Implementation from here differs to that of dwi2noise
-  auto kernel = Kernel::make_kernel(input, subsample->get_factors(), iterations.back().kernel_size_multiplier);
+  auto kernel = Kernel::make_kernel(input,
+                                    subsample->get_factors(),
+                                    iterations.back().kernel_size_multiplier,
+                                    rank_per_mm);
   kernel->set_mask(mask);
 
   // If we're doing an iterative optimisation,
