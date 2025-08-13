@@ -188,3 +188,13 @@ the noise map estimate from the last iteration is utilised without re-estimation
 The `dwi2noise` command performs this same multi-resolution estimation strategy,
 but omits the final data denoising step;
 its primary output is instead the final estimated noise map.
+
+## Acknowledgments
+
+RS is supported by fellowship funding from the National Imaging Facility (NIF),
+an Australian Government National Collaborative Research Infrastructure Strategy (NCRIS) capability.
+
+The Florey Institute of Neuroscience and Mental Health
+acknowledges the strong support from the Victorian Government and,
+in particular,
+the funding from the Operational Infrastructure Support Grant.
