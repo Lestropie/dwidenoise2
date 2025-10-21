@@ -25,6 +25,7 @@
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
 #include "interp/linear.h"
+#include "metadata/bids.h"
 #include "transform.h"
 
 using namespace MR::App;
@@ -119,15 +120,13 @@ Demodulation select_demodulation(const Header &H) {
            "assuming first two axes are within-slice");
       result.axes = {0, 1};
     } else {
-      auto dir = Axes::id2dir(slice_encoding_it->second);
+      auto dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
       for (size_t axis = 0; axis != 3; ++axis) {
         if (!dir[axis])
           result.axes.push_back(axis);
       }
-      INFO("For header SliceEncodingDirection=\"" + slice_encoding_it->second +
-           "\", "
-           "chose demodulation axes: " +
-           join(result.axes, ","));
+      INFO("For header SliceEncodingDirection=\"" + slice_encoding_it->second + "\", " + //
+           "chose demodulation axes: " + join(result.axes, ","));                        //
     }
   } else {
     result.axes = parse_ints<size_t>(opt_axes[0][0]);
