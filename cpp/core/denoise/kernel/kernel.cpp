@@ -22,7 +22,7 @@
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_rank.h"
-#include "denoise/kernel/sphere_ratio.h"
+#include "denoise/kernel/sphere_minvoxels.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Kernel {
@@ -80,12 +80,16 @@ const OptionGroup options = OptionGroup("Options for controlling the sliding spa
          "Set the shape of the sliding spatial window. "
          "Options are: " + join(shapes, ",") + "; default: sphere")
   + Argument("choice").type_choice(shapes)
-+ Option("radius_mm", "Set an absolute spherical kernel radius in mm")
++ Option("radius", "Set an absolute spherical kernel radius in mm")
   + Argument("value").type_float(0.0)
-+ Option("radius_ratio",
++ Option("aspect_ratio",
          "Set the spherical kernel size as a ratio of number of voxels to number of input volumes "
          "(default: 1.0/0.85 ~= 1.18)")
   + Argument("value").type_float(0.0)
++ Option("minvoxels",
+         "Set the minimum number of voxels to be present in any spherical kernel"
+         " (each kernel will be enlarged until this number is met or exceeded)")
+  + Argument("count").type_integer(1)
 // TODO Command-line option that allows user to specify minimum absolute number of voxels in kernel
 + Option("extent",
          "Set the patch size of the cuboid kernel; "
@@ -107,25 +111,34 @@ make_kernel(const Header &H,
     // TODO Could infer that user wants a cuboid kernel if -extent is used, even if -shape is not
     if (!get_options("extent").empty())
       throw Exception("-extent option does not apply to spherical kernel");
-    opt = get_options("radius_mm");
+    opt = get_options("radius");
     if (!opt.empty())
       return std::make_shared<SphereFixedRadius>(
           H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
-    opt = get_options("radius_ratio");
+    opt = get_options("aspect_ratio");
     if (!opt.empty())
-      return std::make_shared<SphereRatio>(
-          H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
-    // If operating in iterative mode and past the first iteration,
+      return std::make_shared<SphereMinVoxels>(
+          H, subsample_factors, default_type(opt[0][0]) * Denoise::num_volumes(H) * size_multiplier);
+    opt = get_options("minvoxels");
+    if (!opt.empty())
+      return std::make_shared<SphereMinVoxels>(
+          H, subsample_factors, ssize_t(opt[0][0]) * size_multiplier);
+    // If operating in iterative mode and past the first iteration and not obeying explicit user overload,
     //   use the rank-based kernel;
     //   otherwise, default to the aspect ratio
     if (rank_per_mm.valid())
       return std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm);
-    return std::make_shared<SphereRatio>(
-          H, subsample_factors, sphere_multiplier_default * size_multiplier);
+    return std::make_shared<SphereMinVoxels>(
+          H, subsample_factors, default_aspect_ratio * size_multiplier);
   }
   case Kernel::shape_type::CUBOID: {
-    if (!get_options("radius_mm").empty() || !get_options("radius_ratio").empty())
-      throw Exception("-radius_* options are inapplicable if cuboid kernel shape is selected");
+    auto check_invalid_option = [](const std::string &item) {
+      if (!get_options(item).empty())
+        throw Exception("-" + item + " option is inapplicable if cuboid kernel shape is selected");
+    };
+    check_invalid_option("radius");
+    check_invalid_option("aspect_ratio");
+    check_invalid_option("minvoxels");
     opt = get_options("extent");
     std::array<ssize_t, 3> extent;
     const ssize_t toal_num_volumes = Denoise::num_volumes(H);

@@ -36,7 +36,7 @@
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/kernel/sphere_radius.h"
-#include "denoise/kernel/sphere_ratio.h"
+#include "denoise/kernel/sphere_minvoxels.h"
 #include "denoise/mask.h"
 #include "denoise/precondition.h"
 #include "denoise/recon.h"

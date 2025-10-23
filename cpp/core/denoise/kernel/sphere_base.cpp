@@ -90,15 +90,16 @@ SphereBase::Shared::Shared(const Header &voxel_grid,
   */
 }
 
-default_type SphereBase::compute_max_radius(const Header &voxel_grid, const default_type min_ratio) const {
+default_type SphereBase::compute_max_radius(const Header &voxel_grid, const ssize_t min_size) const {
   const size_t values_per_voxel = Denoise::num_volumes(voxel_grid);
   const default_type voxel_volume = voxel_grid.spacing(0) * voxel_grid.spacing(1) * voxel_grid.spacing(2);
   // Consider the worst case scenario, where the corner of the FoV is being processed;
   //   we do not want to run out of elements in our lookup table before reaching our desired # voxels
   // Define a sphere for which the volume is eight times that of what would be required
-  //   for processing a voxel in the middle of the FoV;
+  //   for processing a voxel in the middle of the FoV:
+  //   when processing a voxel in the corner of the FoV,
   //   only one of the eight octants will have valid image data
-  const default_type sphere_volume = 8.0 * values_per_voxel * min_ratio * voxel_volume;
+  const default_type sphere_volume = 8.0 * min_size * voxel_volume;
   const default_type approx_radius = std::sqrt(sphere_volume * 0.75 / Math::pi);
   const Voxel::index_type half_extents({ssize_t(std::ceil(approx_radius / voxel_grid.spacing(0))),   //
                                         ssize_t(std::ceil(approx_radius / voxel_grid.spacing(1))),   //

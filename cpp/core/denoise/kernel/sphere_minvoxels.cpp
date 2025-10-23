@@ -15,11 +15,19 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/kernel/sphere_ratio.h"
+#include "denoise/kernel/sphere_minvoxels.h"
 
 namespace MR::Denoise::Kernel {
 
-Data SphereRatio::operator()(const Voxel::index_type &pos) const {
+SphereMinVoxels::~SphereMinVoxels() {
+  auto guard = min_truncated_size.lock();
+  if (*guard != 0) {
+    WARN("Some PCA kernels may have been smaller than minimum size due to incomplete kernel initialisation"
+         " (minimum specified size = " + str(min_size) + "; minimum actual size = " + str(*guard) + ")");
+  }
+}
+
+Data SphereMinVoxels::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
   // For thread-safety
   Image<bool> mask(mask_image);
@@ -28,8 +36,10 @@ Data SphereRatio::operator()(const Voxel::index_type &pos) const {
   while (table_it != shared->end()) {
     // If there's a tie in distances, want to include all such offsets in the kernel,
     //   even if the size of the utilised kernel extends beyond the minimum size
-    if (result.voxels.size() >= min_size && table_it->sq_distance != result.max_distance)
-      break;
+    if (result.voxels.size() >= min_size && table_it->sq_distance != result.max_distance) {
+      result.max_distance = std::sqrt(result.max_distance);
+      return result;
+    }
     const Voxel::index_type voxel({pos[0] + table_it->index[0],   //
                                    pos[1] + table_it->index[1],   //
                                    pos[2] + table_it->index[2]}); //
@@ -42,6 +52,11 @@ Data SphereRatio::operator()(const Voxel::index_type &pos) const {
     }
     ++table_it;
   }
+  auto guard = min_truncated_size.lock();
+  if (*guard == 0)
+    *guard = result.voxels.size();
+  else if (result.voxels.size() < *guard)
+    *guard = result.voxels.size();
   result.max_distance = std::sqrt(result.max_distance);
   return result;
 }

@@ -21,21 +21,23 @@
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/sphere_base.h"
 #include "header.h"
+#include "mutexprotected.h"
 
 namespace MR::Denoise::Kernel {
 
-constexpr default_type sphere_multiplier_default = 1.0 / 0.85;
+constexpr default_type default_aspect_ratio = 1.0 / 0.85;
 
-class SphereRatio : public SphereBase {
+class SphereMinVoxels : public SphereBase {
 
 public:
-  SphereRatio(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const default_type min_ratio)
-      : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, min_ratio)),
-        min_size(std::ceil(Denoise::num_volumes(voxel_grid) * min_ratio)) {}
+  SphereMinVoxels(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const ssize_t min_voxels)
+      : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, min_voxels)),
+        min_size(min_voxels),
+        min_truncated_size(0) {}
 
-  SphereRatio(const SphereRatio &) = default;
+  SphereMinVoxels(const SphereMinVoxels &) = default;
 
-  ~SphereRatio() override = default;
+  ~SphereMinVoxels() override;
 
   Data operator()(const Voxel::index_type &pos) const override;
 
@@ -43,6 +45,8 @@ public:
 
 private:
   ssize_t min_size;
+
+  mutable MutexProtected<ssize_t> min_truncated_size;
 
 };
 

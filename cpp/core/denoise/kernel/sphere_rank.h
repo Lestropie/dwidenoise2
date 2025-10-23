@@ -37,7 +37,9 @@ public:
   SphereRank(const Header &voxel_grid,
              const std::array<ssize_t, 3> &subsample_factors,
              const Image<float> &rank_per_mm)
-      : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, 2.0)),
+      : SphereBase(voxel_grid,
+                   subsample_factors,
+                   SphereBase::compute_max_radius(voxel_grid, 2 * Denoise::num_volumes(voxel_grid))),
         rank_per_mm (rank_per_mm),
         num_volumes (Denoise::num_volumes(voxel_grid)) {}
 
