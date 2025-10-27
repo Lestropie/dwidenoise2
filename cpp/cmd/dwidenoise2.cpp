@@ -335,7 +335,7 @@ void run(Header &dwi,
       rank_per_mm.value() = iteration_exports.rank_input.value() / iteration_exports.max_dist.value();
   }
 
-  auto subsample = Subsample::make(dwi, default_subsample_ratio);
+  auto subsample = Subsample::make(dwi, iterations.back().subsample_ratios);
 
   // Implementation from here differs to that of dwi2noise
   auto kernel = Kernel::make_kernel(input,
