@@ -326,8 +326,8 @@ void run(Header &dwi,
                         iteration_exports);
     // Propagate result to next iteration
     vst_image = iteration_exports.noise_out;
-    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
-    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
+//    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
+//    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
     preconditioner.update_vst_image(vst_image);
     estimator->update_vst_image(vst_image);
     rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
