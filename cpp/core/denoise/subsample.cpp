@@ -62,9 +62,24 @@ std::array<ssize_t, 3> Subsample::ss2in(const Kernel::Voxel::index_type &pos) co
                                  pos[2] * factors[2] + origin[2]}); //
 }
 
-std::shared_ptr<Subsample> Subsample::make(const Header &in, const ssize_t default_ratio) {
+std::shared_ptr<Subsample> Subsample::make(const Header &in, const ssize_t default_factor) {
   auto opt = App::get_options("subsample");
-  std::array<ssize_t, 3> factors({default_ratio, default_ratio, default_ratio});
+  std::array<ssize_t, 3> factors({default_factor, default_factor, default_factor});
+  if (!opt.empty()) {
+    const std::vector<ssize_t> userinput = parse_ints<ssize_t>(opt[0][0]);
+    if (userinput.size() == 1)
+      factors = {userinput[0], userinput[0], userinput[0]};
+    else if (userinput.size() == 3)
+      factors = {userinput[0], userinput[1], userinput[2]};
+    else
+      throw Exception("Subsampling factor must be either a single positive integer, "
+                      "or a comma-separated list of three positive integers");
+  }
+  return std::make_shared<Subsample>(in, factors);
+}
+
+std::shared_ptr<Subsample> Subsample::make(const Header &in, std::array<ssize_t, 3> factors) {
+  auto opt = App::get_options("subsample");
   if (!opt.empty()) {
     const std::vector<ssize_t> userinput = parse_ints<ssize_t>(opt[0][0]);
     if (userinput.size() == 1)

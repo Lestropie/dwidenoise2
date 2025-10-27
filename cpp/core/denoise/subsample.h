@@ -41,7 +41,8 @@ public:
   std::array<ssize_t, 3> ss2in(const Kernel::Voxel::index_type &pos) const;
   const std::array<ssize_t, 3> &get_factors() const { return factors; }
 
-  static std::shared_ptr<Subsample> make(const Header &in, const ssize_t default_ratio);
+  static std::shared_ptr<Subsample> make(const Header &in, const ssize_t default_factor);
+  static std::shared_ptr<Subsample> make(const Header &in, std::array<ssize_t, 3> default_factors);
 
 protected:
   const Header H_in;
