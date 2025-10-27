@@ -129,7 +129,7 @@ make_kernel(const Header &H,
     if (rank_per_mm.valid())
       return std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm);
     return std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, default_aspect_ratio * size_multiplier);
+          H, subsample_factors, default_aspect_ratio * Denoise::num_volumes(H) * size_multiplier);
   }
   case Kernel::shape_type::CUBOID: {
     auto check_invalid_option = [](const std::string &item) {
