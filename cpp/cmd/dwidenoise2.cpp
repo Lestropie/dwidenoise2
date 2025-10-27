@@ -416,10 +416,10 @@ void run(Header &dwi,
            (final_exports.rank_output, final_exports.sum_aggregation); //
            l;                                                          //
            ++l) {                                                      //
-        const double sum_aggregation = final_exports.sum_aggregation.value();
+        const float sum_aggregation = final_exports.sum_aggregation.value();
         final_exports.rank_output.value() =                           //
-            sum_aggregation == double(0)                              //
-            ? max_rank                                                //
+            sum_aggregation == 0.0F                                   //
+            ? 0.0F                                                    //
             : (final_exports.rank_output.value() /= sum_aggregation); //
       }
     }
