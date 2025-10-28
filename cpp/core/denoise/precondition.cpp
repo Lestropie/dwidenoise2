@@ -312,7 +312,7 @@ Precondition<T>::Precondition(Image<T> &image,
          l_voxel;                                                                                          //
          ++l_voxel) {                                                                                      //
       T mean(T(0));
-      for (auto l_volume = Loop(3)(dephased); l_volume; ++l_volume)
+      for (auto l_volume = Loop(3, dephased.ndim())(dephased); l_volume; ++l_volume)
         mean += T(dephased.value());
       mean_image.value() = multiplier * mean;
     }
