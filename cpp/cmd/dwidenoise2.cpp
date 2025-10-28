@@ -398,14 +398,8 @@ void run(Header &dwi,
          (output_preconditioned, final_exports.sum_aggregation); //
          l_voxel;                                                //
          ++l_voxel) {                                            //
-      const double sum_aggregation = final_exports.sum_aggregation.value();
-      if (sum_aggregation == double(0)) {
-        // Voxel did not contribute to any patches;
-        //   impute input data
-        assign_pos_of(output_preconditioned, 0, 3).to(input);
-        for (auto l_volume = Loop(3)(input, output_preconditioned); l_volume; ++l_volume)
-          output_preconditioned.value() = input.value();
-      } else {
+      const float sum_aggregation = final_exports.sum_aggregation.value();
+      if (sum_aggregation != 1.0F) {
         const double multiplier = double(1) / sum_aggregation;
         for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
           output_preconditioned.value() *= multiplier;
