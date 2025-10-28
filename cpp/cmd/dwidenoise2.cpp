@@ -440,14 +440,26 @@ void run(Header &dwi,
                             float(max_rank));                                                           //
     }
   }
-  if (vst_image.valid() && final_exports.noise_out.valid()) {
-    Interp::Linear<Image<float>> vst_interp(vst_image);
-    const Transform transform(subsample->header());
-    for (auto l = Loop(final_exports.noise_out)(final_exports.noise_out); l; ++l) {
-      vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
-                                                                    double(final_exports.noise_out.index(1)),
-                                                                    double(final_exports.noise_out.index(2))}));
-      final_exports.noise_out.value() *= vst_interp.value();
+  if (vst_image.valid()) {
+    if (final_exports.noise_out.valid()) {
+      Interp::Linear<Image<float>> vst_interp(vst_image);
+      const Transform transform(subsample->header());
+      for (auto l = Loop(final_exports.noise_out)(final_exports.noise_out); l; ++l) {
+        vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
+                                                                      double(final_exports.noise_out.index(1)),
+                                                                      double(final_exports.noise_out.index(2))}));
+        final_exports.noise_out.value() *= vst_interp.value();
+      }
+    }
+    if (final_exports.lamplus.valid()) {
+      Interp::Linear<Image<float>> vst_interp(vst_image);
+      const Transform transform(subsample->header());
+      for (auto l = Loop(final_exports.lamplus)(final_exports.lamplus); l; ++l) {
+        vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
+                                                                      double(final_exports.noise_out.index(1)),
+                                                                      double(final_exports.noise_out.index(2))}));
+        final_exports.lamplus.value() *= vst_interp.value();
+      }
     }
   }
 
