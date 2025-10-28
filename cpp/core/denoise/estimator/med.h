@@ -60,13 +60,7 @@ public:
       result.cutoff_p = p + 1;
     }
     // Calculate noise level based on MP distribution
-#ifdef DWIDENOISE2_USE_BDCSVD
     result.sigma2 = 2.0 * s.segment(rz, result.cutoff_p - rz).sum() / (qnz * (result.cutoff_p + 1 - rz));
-#else
-    result.sigma2 = 2.0 *
-                    s.segment(rz, result.cutoff_p - rz).unaryExpr([](double i) { return std::max(0.0, i); }).sum() /
-                    (qnz * (result.cutoff_p + 1 - rz));
-#endif
     return result;
   }
 

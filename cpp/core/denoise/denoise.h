@@ -24,13 +24,6 @@
 #include "app.h"
 #include "header.h"
 
-// Switch from SelfAdjointEigenSolver to BDCSVD
-// Note that since it is the singular values that are solved for,
-//   and the eigenvalues are taken as the square of such,
-//   it is not necessary to explicitly check for negativity of eigenvalues for safety
-//   like it is with the SelfAdjointEigenSolver
-#define DWIDENOISE2_USE_BDCSVD
-
 namespace MR::Denoise {
 
 constexpr ssize_t default_subsample_ratio = 2;
@@ -40,11 +33,17 @@ using vector_type = Eigen::Array<double, Eigen::Dynamic, 1>;
 
 extern const char *first_step_description;
 extern const char *non_gaussian_noise_description;
+extern const char *decomposition_description;
 extern const char *filter_description;
 extern const char *aggregation_description;
 
 const std::vector<std::string> dtypes = {"float32", "float64"};
 extern const App::Option datatype_option;
+
+const std::vector<std::string> decompositions = {"bdcsvd", "selfadjoint"};
+enum class decomp_type { BDCSVD, SELFADJOINT };
+extern const App::Option decomposition_option;
+constexpr decomp_type default_decomposition = decomp_type::BDCSVD;
 
 const std::vector<std::string> filters = {"optshrink", "optthresh", "truncate"};
 enum class filter_type { OPTSHRINK, OPTTHRESH, TRUNCATE };

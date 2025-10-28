@@ -35,6 +35,18 @@ const char *non_gaussian_noise_description =
     " If available, including the MRI phase data as part of a complex input image"
     " can reduce such non-Gaussian biases.";
 
+const char *decomposition_description =
+    "By default, the command uses Eigen's Bidirectional Divide-and-Conquer"
+    " Singular Value Decomposition (BDCSVD) algorithm"
+    " for deriving the eigenspectrum for each PCA patch."
+    " This is more numerically precise than the Self-Adjoint solver used"
+    " in the original MRtrix3 dwidenoise command;"
+    " it does however come at increased computational expense,"
+    " particularly for very large patches."
+    " If runtime is prohibitive for data with a very large number of volumes,"
+    " it may be preferred to revert to the original decomposition method"
+    " using command-line option -decomposition selfajoint.";
+
 const char *filter_description =
     "By default, optimal value shrinkage based on minimisation of the Frobenius norm "
     "will be used to attenuate eigenvectors based on the estimated noise level. "
@@ -67,8 +79,14 @@ const Option datatype_option = Option("datatype",
                                       "Datatype for the eigenvalue decomposition"
                                       " (single or double precision). "
                                       "For complex input data,"
-                                      " this will select complex float32 or complex float64 datatypes.") +
-                               Argument("float32/float64").type_choice(dtypes);
+                                      " this will select complex float32 or complex float64 datatypes.")
+                               + Argument("float32/float64").type_choice(dtypes);
+
+const Option decomposition_option = Option("decomposition",
+                                           "Method used for the decomposition of the data in each patch;"
+                                           " options are: " + join(decompositions, ", ") +
+                                           " (default: BDCSVD)")
+                                    + Argument("choice").type_choice(decompositions);
 
 ssize_t dimlong_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp) { return std::max(m - rp, n); }
 ssize_t rank_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp) { return std::min(m - rp, n); }

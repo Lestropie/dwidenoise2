@@ -50,11 +50,7 @@ public:
     Result result;
     for (ssize_t p = 0; p < mprime; ++p) {
       const ssize_t i = s.size() - 1 - p;
-#ifdef DWIDENOISE2_USE_BDCSVD
       const double lam = s[i] / nprime;
-#else
-      const double lam = std::max(s[i], 0.0) / nprime;
-#endif
       if (lam < lamplusprev)
         return result;
       clam -= lam;

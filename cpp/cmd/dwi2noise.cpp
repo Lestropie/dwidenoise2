@@ -130,6 +130,7 @@ void usage() {
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
   + datatype_option
+  + decomposition_option
   + Estimator::estimator_option
   + Option("onepass",
            "Derive noise level estimate with a single pass through the image,"
@@ -204,6 +205,7 @@ void run(Header &dwi,
          const Demodulation &demodulation,
          const demean_type demean,
          Image<float> &user_vst_image,
+         const decomp_type decomposition,
          std::shared_ptr<Estimator::Base> estimator,
          const std::vector<Iterative::Iteration> &iterations,
          Exports &final_exports) {
@@ -234,6 +236,7 @@ void run(Header &dwi,
                         iterations[iteration],
                         iteration,
                         subsample,
+                        decomposition,
                         estimator,
                         preconditioner,
                         iteration_exports);
@@ -261,6 +264,7 @@ void run(Header &dwi,
                       iterations.back(),
                       iterations.size() - 1,
                       subsample,
+                      decomposition,
                       estimator,
                       preconditioner,
                       final_exports);
@@ -283,9 +287,13 @@ void run() {
 
   const Demodulation demodulation = select_demodulation(dwi);
   const demean_type demean = select_demean(dwi);
+  decomp_type decomposition = default_decomposition;
+  auto opt = get_options("decomposition");
+  if (!opt.empty())
+    decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
 
   Image<float> user_vst_image;
-  auto opt = get_options("vst");
+  opt = get_options("vst");
   if (!opt.empty()) {
     if (demean == demean_type::NONE)
       throw Exception("Cannot currently apply variance-stabilising transform in the absence of demeaning");
@@ -343,20 +351,20 @@ void run() {
   case 0:
     assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, demodulation, demean, user_vst_image, estimator, iterations, final_exports);
+    run<float>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 1:
     assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, demodulation, demean, user_vst_image, estimator, iterations, final_exports);
+    run<double>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation, demean, user_vst_image, estimator, iterations, final_exports);
+    run<cfloat>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation, demean, user_vst_image, estimator, iterations, final_exports);
+    run<cdouble>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   }
 }

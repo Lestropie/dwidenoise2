@@ -38,6 +38,7 @@ public:
   Recon(const Image<F> &image,
         std::shared_ptr<Subsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
+        const decomp_type decomposition,
         std::shared_ptr<Estimator::Base> estimator,
         filter_type filter,
         aggregator_type aggregator,

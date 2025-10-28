@@ -28,25 +28,25 @@ template <typename F>
 Estimate<F>::Estimate(const Image<F> &image,
                       std::shared_ptr<Subsample> subsample,
                       std::shared_ptr<Kernel::Base> kernel,
+                      decomp_type decomp,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports,
                       const ssize_t preconditioner_rank,
                       const bool enable_recon)
-    : m(image.size(3)),
+    : m(Denoise::num_volumes(image)),
       subsample(subsample),
       kernel(kernel),
+      decomp(decomp),
       estimator(estimator),
       preconditioner_rank(preconditioner_rank),
       enable_recon(enable_recon),
       X(m, kernel->estimated_size()),
-#ifdef DWIDENOISE2_USE_BDCSVD
-      SVD(m,
-          kernel->estimated_size(),
+      SVD(decomp == decomp_type::BDCSVD ? m : 0,
+          decomp == decomp_type::BDCSVD ? kernel->estimated_size() : 0,
           enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly),
-#else
-      XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
-      eig(std::min(m, kernel->estimated_size())),
-#endif
+      XtX(decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0,
+          decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
+      eig(decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
       s(std::min(m, kernel->estimated_size())),
       exports(exports) {
   // If input image is > 4D, should have been preconditioned into 4D
@@ -58,14 +58,17 @@ Estimate<F>::Estimate(const Estimate<F> &that)
     : m(that.m),
       subsample(that.subsample),
       kernel(that.kernel),
+      decomp(that.decomp),
       estimator(that.estimator),
       preconditioner_rank(that.preconditioner_rank),
       enable_recon(that.enable_recon),
       X(m, kernel->estimated_size()),
-#ifndef DWIDENOISE2_USE_BDCSVD
-      XtX(std::min(m, kernel->estimated_size()), std::min(m, kernel->estimated_size())),
-      eig(std::min(m, kernel->estimated_size())),
-#endif
+      SVD(decomp == decomp_type::BDCSVD ? m : 0,
+          decomp == decomp_type::BDCSVD ? kernel->estimated_size() : 0,
+          enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly),
+      XtX(decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0,
+          decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
+      eig(decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
       s(std::min(m, kernel->estimated_size())),
       exports(that.exports) {
 }
@@ -94,12 +97,10 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     DEBUG("Expanding data matrix storage from " + str(m) + "x" + str(X.cols()) + " to " + str(m) + "x" + str(n));
     X.resize(m, n);
   }
-#ifndef DWIDENOISE2_USE_BDCSVD
-  if (r > XtX.cols()) {
+  if (decomp == decomp_type::SELFADJOINT && r > XtX.cols()) {
     DEBUG("Expanding decomposition matrix storage from " + str(X.rows()) + " to " + str(r));
     XtX.resize(r, r);
   }
-#endif
   if (r > s.size()) {
     DEBUG("Expanding eigenvalue storage from " + str(s.size()) + " to " + str(r));
     s.resize(r);
@@ -111,9 +112,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   //   in the presence of variation in kernel sizes
 #ifndef NDEBUG
   X.fill(std::numeric_limits<F>::signaling_NaN());
-#ifndef DWIDENOISE2_USE_BDCSVD
   XtX.fill(std::numeric_limits<F>::signaling_NaN());
-#endif
   s.fill(std::numeric_limits<default_type>::signaling_NaN());
 #endif
 
@@ -121,24 +120,32 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   assert(X.leftCols(n).allFinite());
 
   // Compute Eigendecomposition
-#ifdef DWIDENOISE2_USE_BDCSVD
-  SVD.compute(X.leftCols(n), enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
-  bool successful_decomposition = SVD.info() == Eigen::Success;
-  if (successful_decomposition) {
-    // eigenvalues sorted in increasing order:
-    s.head(r) = SVD.singularValues().array().reverse().square().template cast<double>();
-#else
-  if (m <= n)
-    XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n) * X.leftCols(n).adjoint();
-  else
-    XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n).adjoint() * X.leftCols(n);
-  eig.compute(XtX.topLeftCorner(r, r), enable_recon ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
-  bool successful_decomposition = eig.info() == Eigen::Success;
-  if (successful_decomposition) {
-    // eigenvalues sorted in increasing order:
-    s.head(r) = eig.eigenvalues().template cast<double>();
-#endif
+  bool successful_decomposition = false;
+  switch (decomp) {
+  case decomp_type::BDCSVD: {
+    SVD.compute(X.leftCols(n), enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
+    successful_decomposition = SVD.info() == Eigen::Success;
+    if (successful_decomposition) {
+      // eigenvalues sorted in increasing order:
+      s.head(r) = SVD.singularValues().array().reverse().square().template cast<double>();
+    }
+  } break;
+  case decomp_type::SELFADJOINT: {
+    if (m <= n)
+      XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n) * X.leftCols(n).adjoint();
+    else
+      XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n).adjoint() * X.leftCols(n);
+    eig.compute(XtX.topLeftCorner(r, r), enable_recon ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
+    successful_decomposition = eig.info() == Eigen::Success;
+    if (successful_decomposition) {
+      // eigenvalues sorted in increasing order,
+      //   additionally clamping any negtive values to zero:
+      s.head(r) = eig.eigenvalues().template cast<double>().cwiseMax(0.0);
+    }
+  } break;
+  }
 
+  if (successful_decomposition) {
     // Threshold determination, possibly via Marchenko-Pastur
     threshold = (*estimator)(s.head(r), m, n, preconditioner_rank, patch.centre_realspace);
   } else {

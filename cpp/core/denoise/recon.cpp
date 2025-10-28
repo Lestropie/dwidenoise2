@@ -26,12 +26,13 @@ template <typename F>
 Recon<F>::Recon(const Image<F> &image,
                 std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
+                const decomp_type decomposition,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports,
                 const ssize_t preconditioner_rank)
-    : Estimate<F>(image, subsample, kernel, estimator, exports, preconditioner_rank, true),
+    : Estimate<F>(image, subsample, kernel, decomposition, estimator, exports, preconditioner_rank, true),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -78,11 +79,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         // TODO For non-binary determination of weights for optimal shrinkage,
         //   should the expression be identical between BDCSVD and SelfAdjointEigenSolver?
         //   Or eg. is one equivalent to scaling singular values whereas the other is equivalent to scaling eigenvalues?
-#ifdef DWIDENOISE2_USE_BDCSVD
         const double lam = Estimate<F>::s[i] / qnz;
-#else
-        const double lam = std::max(Estimate<F>::s[i], 0.0) / qnz;
-#endif
         const double y = std::sqrt(lam / Estimate<F>::threshold.sigma2);
         // const double y = lam / Estimate<F>::threshold.sigma2;
         double nu = 0.0;
@@ -95,11 +92,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         w[i] = lam > 0.0 ? (nu / y) : 0.0;
         assert(w[i] >= 0.0 && w[i] <= 1.0);
         sum_weights += w[i];
-#ifdef DWIDENOISE2_USE_BDCSVD
         sum_variance += w[i] * Estimate<F>::s[i];
-#else
-        sum_variance += w[i] * std::max(Estimate<F>::s[i], 0.0);
-#endif
       }
     } break;
     case filter_type::OPTTHRESH: {
@@ -120,11 +113,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         if (Estimate<F>::s[i] >= threshold) {
           w[i] = 1.0;
           ++out_rank;
-#ifdef DWIDENOISE2_USE_BDCSVD
           sum_variance += Estimate<F>::s[i];
-#else
-          sum_variance += std::max(Estimate<F>::s[i], 0.0);
-#endif
         } else {
           w[i] = 0.0;
         }
@@ -150,19 +139,10 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     w.head(r).setOnes();
     out_rank = r;
     sum_weights = r;
-#ifdef DWIDENOISE2_USE_BDCSVD
     sum_variance = Estimate<F>::s.sum();
-#else
-    sum_variance = Estimate<F>::s.unaryExpr([](double i) { return std::max(i, 0.0); }).sum();
-#endif
   }
   assert(w.head(r).allFinite());
-#ifdef DWIDENOISE2_USE_BDCSVD
   const double variance_removed = 1.0 - sum_variance / Estimate<F>::s.sum();
-#else
-  const double variance_removed =                                                                     //
-      1.0 - sum_variance / Estimate<F>::s.unaryExpr([](double f) { return std::max(0.0, f); }).sum(); //
-#endif
 
   // Recombine data using only eigenvectors above threshold
   // If only the data computed when this voxel was the centre of the patch
@@ -171,40 +151,42 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   //   if however the result from this patch is to contribute to the synthesized image
   //   for all voxels that were utilised within this patch,
   //   then we need to instead compute the full projection
-#ifdef DWIDENOISE2_USE_BDCSVD
-  const Eigen::Matrix<F, Eigen::Dynamic, 1> wrev = w.head(r).reverse().cast<F>();
-#endif
   switch (aggregator) {
   case aggregator_type::EXCLUSIVE: {
     assert(Estimate<F>::patch.centre_index >= 0);
     if (bool(Estimate<F>::threshold)) {
-#ifdef DWIDENOISE2_USE_BDCSVD
-      assert(Estimate<F>::SVD.matrixU().allFinite());
-      assert(Estimate<F>::SVD.matrixV().allFinite());
-      assert(wrev.allFinite());
-      assert(Estimate<F>::SVD.singularValues().allFinite());
-      // TODO Re-try reconstruction without use of V:
-      //   https://github.com/MRtrix3/mrtrix3/pull/2906/commits/eb34f3c57dd460d2b3bd86b9653066be15e916c6
-      // It might be that in the case of anything other than EXCLUSIVE,
-      //   computing V is no more expensive than doing the full patch reconstruction in its absence,
-      //   whereas for EXCLUSIVE since only a small portion of V is used it's worthwhile
-      Xr.noalias() = Estimate<F>::SVD.matrixU() *                                                       //
-                     (wrev.array() * Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
-                     Estimate<F>::SVD.matrixV().row(Estimate<F>::patch.centre_index).adjoint();         //
-#else
-      if (Estimate<F>::m <= n)
-        Xr.noalias() =                                               //
-            Estimate<F>::eig.eigenvectors() *                        //
-            (w.head(r).cast<F>().matrix().asDiagonal() *             //
-             (Estimate<F>::eig.eigenvectors().adjoint() *            //
-              Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
-      else
-        Xr.noalias() =                                                                          //
-            Estimate<F>::X.leftCols(n) *                                                        //
-            (Estimate<F>::eig.eigenvectors() *                                                  //
-             (w.head(r).cast<F>().matrix().asDiagonal() *                                       //
-              Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
-#endif
+      switch (Estimate<F>::decomp) {
+      case decomp_type::BDCSVD: {
+        assert(Estimate<F>::SVD.matrixU().allFinite());
+        assert(Estimate<F>::SVD.matrixV().allFinite());
+        assert(w.head(r).allFinite());
+        assert(Estimate<F>::SVD.singularValues().allFinite());
+        // TODO Re-try reconstruction without use of V:
+        //   https://github.com/MRtrix3/mrtrix3/pull/2906/commits/eb34f3c57dd460d2b3bd86b9653066be15e916c6
+        // It might be that in the case of anything other than EXCLUSIVE,
+        //   computing V is no more expensive than doing the full patch reconstruction in its absence,
+        //   whereas for EXCLUSIVE since only a small portion of V is used it's worthwhile
+        Xr.noalias() =                                                                 //
+            Estimate<F>::SVD.matrixU() *                                               //
+            (w.head(r).reverse().cast<F>().array() *                                   //
+             Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() *        //
+            Estimate<F>::SVD.matrixV().row(Estimate<F>::patch.centre_index).adjoint(); //
+      } break;
+      case decomp_type::SELFADJOINT: {
+        if (Estimate<F>::m <= n)
+          Xr.noalias() =                                               //
+              Estimate<F>::eig.eigenvectors() *                        //
+              (w.head(r).cast<F>().matrix().asDiagonal() *             //
+               (Estimate<F>::eig.eigenvectors().adjoint() *            //
+                Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
+        else
+          Xr.noalias() =                                                                          //
+              Estimate<F>::X.leftCols(n) *                                                        //
+              (Estimate<F>::eig.eigenvectors() *                                                  //
+               (w.head(r).cast<F>().matrix().asDiagonal() *                                       //
+                Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
+      } break;
+      }
       assert(Xr.allFinite());
     } else {
       // In the case of -aggregator exclusive,
@@ -226,25 +208,31 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   default: { // All aggregators other than EXCLUSIVE
     if (!Estimate<F>::threshold) {
       Xr.leftCols(n).noalias() = Estimate<F>::X.leftCols(n);
-#ifdef DWIDENOISE2_USE_BDCSVD
     } else {
-      Xr.leftCols(n).noalias() = Estimate<F>::SVD.matrixU() *                                                       //
-                                 (wrev.array() * Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
-                                 Estimate<F>::SVD.matrixV().adjoint();                                              //
-#else
-    } else if (Estimate<F>::m <= n) {
-      Xr.leftCols(n).noalias() =                        //
-          Estimate<F>::eig.eigenvectors() *             //
-          (w.head(r).cast<F>().matrix().asDiagonal() *  //
-           (Estimate<F>::eig.eigenvectors().adjoint() * //
-            Estimate<F>::X.leftCols(n)));               //
-    } else {
-      Xr.leftCols(n).noalias() =                         //
-          Estimate<F>::X.leftCols(n) *                   //
-          (Estimate<F>::eig.eigenvectors() *             //
-           (w.head(r).cast<F>().matrix().asDiagonal() *  //
-            Estimate<F>::eig.eigenvectors().adjoint())); //
-#endif
+      switch (Estimate<F>::decomp) {
+      case decomp_type::BDCSVD:
+        Xr.leftCols(n).noalias() =                                              //
+            Estimate<F>::SVD.matrixU() *                                        //
+            (w.head(r).reverse().cast<F>().array() *                            //
+             Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
+            Estimate<F>::SVD.matrixV().adjoint();                               //
+        break;
+      case decomp_type::SELFADJOINT:
+        if (Estimate<F>::m <= n) {
+          Xr.leftCols(n).noalias() =                        //
+              Estimate<F>::eig.eigenvectors() *             //
+              (w.head(r).cast<F>().matrix().asDiagonal() *  //
+               (Estimate<F>::eig.eigenvectors().adjoint() * //
+                Estimate<F>::X.leftCols(n)));               //
+        } else {
+          Xr.leftCols(n).noalias() =                         //
+              Estimate<F>::X.leftCols(n) *                   //
+              (Estimate<F>::eig.eigenvectors() *             //
+               (w.head(r).cast<F>().matrix().asDiagonal() *  //
+                Estimate<F>::eig.eigenvectors().adjoint())); //
+        }
+        break;
+      }
     }
     assert(Xr.leftCols(n).allFinite());
     // Undo prior within-patch variance-stabilising transform

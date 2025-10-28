@@ -31,22 +31,14 @@ Result Exp<version>::operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
   assert(s.size() == std::min(m, n));
   const ssize_t qnz = dimlong_nonzero(m, n, rp);
   const ssize_t rz = rank_zero(m, n, rp);
-#ifdef DWIDENOISE2_USE_BDCSVD
   const double lam_r = s[rz] / qnz;
-#else
-  const double lam_r = std::max(s[rz], 0.0) / qnz;
-#endif
   double clam = 0.0;
   Result result;
   // Note that the paper utilised symbol "p" to refer to the number of signal components;
   //   here "p" is instead the index of the last noise component;
   //   therefore the number of noise compoments is (p + 1 - z)
   for (ssize_t p = rz; p < s.size(); ++p) {
-#ifdef DWIDENOISE2_USE_BDCSVD
     const double lam = s[p] / qnz;
-#else
-    const double lam = std::max(s[p], 0.0) / qnz;
-#endif
     clam += lam;
     double denominator = std::numeric_limits<double>::signaling_NaN();
     switch (version) {

@@ -50,6 +50,7 @@ void estimate(Image<T> &input,
               const Iteration &config,
               const ssize_t iter,
               std::shared_ptr<Subsample> subsample,
+              const decomp_type decomposition,
               std::shared_ptr<Estimator::Base> estimator,
               const Precondition<T> &preconditioner,
               Exports &exports) {
@@ -62,7 +63,7 @@ void estimate(Image<T> &input,
     input_preconditioned = input;
   else
     preconditioner(input, input_preconditioned, false);
-  Estimate<T> func(input_preconditioned, subsample, kernel, estimator, exports, preconditioner.null_rank(), false);
+  Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports, preconditioner.null_rank(), false);
   ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
   // If a VST was applied to the input data for this iteration,
   //   need to remove its effect from the estimated noise map

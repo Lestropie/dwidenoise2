@@ -24,11 +24,8 @@
 #include <mutex>
 
 #include <Eigen/Dense>
-#ifdef DWIDENOISE2_USE_BDCSVD
 #include <Eigen/SVD>
-#else
 #include <Eigen/Eigenvalues>
-#endif
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
@@ -52,6 +49,7 @@ public:
   Estimate(const Image<F> &image,
            std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
+           decomp_type decomp,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports,
            const ssize_t preconditioner_rank = 0,
@@ -67,6 +65,7 @@ protected:
   // Denoising configuration
   std::shared_ptr<Subsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
+  decomp_type decomp;
   std::shared_ptr<Estimator::Base> estimator;
   ssize_t preconditioner_rank;
   bool enable_recon;
@@ -74,6 +73,7 @@ protected:
   // Reusable memory
   Kernel::Data patch;
   MatrixType X;
+
   // TODO For both BDCSVD and SelfAdjointEigenSolver,
   //   the template type is MatrixType,
   //   and it doesn't seem to be possible to define an Eigen::Block as this template type;
@@ -86,12 +86,10 @@ protected:
   //   each processing thread would allocate new memory for new patch sizes not yet encountered by it,
   //   but the total memory consumption should still be relatively small;
   //   note that "X" would be subsumed within such a mechanism also
-#ifdef DWIDENOISE2_USE_BDCSVD
   Eigen::BDCSVD<MatrixType> SVD;
-#else
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
-#endif
+
   eigenvalues_type s;
   Estimator::Result threshold;
 
