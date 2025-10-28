@@ -167,6 +167,7 @@ void usage() {
            " instead of the default iterative noise level map optimisation")
 
   + datatype_option
+  + decomposition_option
   + Estimator::estimator_denoise_options
   + Kernel::options
   + subsample_option
@@ -274,6 +275,7 @@ void run(Header &dwi,
          const demean_type demean,
          Image<float> &user_vst_image,
          const std::vector<Iterative::Iteration> &iterations,
+         const decomp_type decomposition,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
@@ -306,6 +308,7 @@ void run(Header &dwi,
                         iterations[iteration],
                         iteration,
                         subsample,
+                        decomposition,
                         estimator,
                         preconditioner,
                         iteration_exports);
@@ -342,6 +345,7 @@ void run(Header &dwi,
   Recon<T> func(input_preconditioned,
                 subsample,
                 kernel,
+                decomposition,
                 estimator,
                 filter,
                 aggregator,
@@ -488,9 +492,13 @@ void run() {
 
   const Demodulation demodulation = select_demodulation(dwi);
   const demean_type demean = select_demean(dwi);
+  decomp_type decomposition = default_decomposition;
+  auto opt = get_options("decomposition");
+  if (!opt.empty())
+    decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
 
   Image<float> user_vst_image;
-  auto opt = get_options("vst");
+  opt = get_options("vst");
   if (!opt.empty()) {
     if (demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
@@ -606,6 +614,7 @@ void run() {
         demean,         //
         user_vst_image, //
         iterations,     //
+        decomposition,  //
         estimator,      //
         filter,         //
         aggregator,     //
@@ -621,6 +630,7 @@ void run() {
         demean,         //
         user_vst_image, //
         iterations,     //
+        decomposition,  //
         estimator,      //
         filter,         //
         aggregator,     //
@@ -635,6 +645,7 @@ void run() {
         demean,         //
         user_vst_image, //
         iterations,     //
+        decomposition,  //
         estimator,      //
         filter,         //
         aggregator,     //
@@ -649,6 +660,7 @@ void run() {
         demean,         //
         user_vst_image, //
         iterations,     //
+        decomposition,  //
         estimator,      //
         filter,         //
         aggregator,     //
