@@ -67,7 +67,7 @@ template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>
       ++excluded_count;
   }
   if (excluded_count > 0) {
-    WARN(str(excluded_count) + " voxels were found with invalid data;"
+    INFO(str(excluded_count) + " voxels were found with invalid data;"
                                " these will be excluded from processing");
   }
   return mask;
