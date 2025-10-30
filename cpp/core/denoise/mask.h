@@ -45,7 +45,7 @@ template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>
   H.datatype() = DataType::Bit;
   Image<bool> mask = Image<bool>::scratch(H, "Scratch mask of voxels with valid data for denoising");
   size_t excluded_count(0);
-  for (auto l_voxel = Loop(mask)(image, mask); l_voxel; ++l_voxel) {
+  for (auto l_voxel = Loop("Scanning image for invalid voxels", mask)(image, mask); l_voxel; ++l_voxel) {
     T min_value(std::numeric_limits<typename T::value_type>::infinity(),
                 std::numeric_limits<typename T::value_type>::infinity());
     T max_value(-std::numeric_limits<typename T::value_type>::infinity(),
