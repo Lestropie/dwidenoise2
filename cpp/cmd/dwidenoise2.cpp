@@ -446,7 +446,7 @@ void run(Header &dwi,
   }
   if (vst_image.valid()) {
     if (final_exports.noise_out.valid()) {
-      Interp::Linear<Image<float>> vst_interp(vst_image);
+      Interp::Cubic<Image<float>> vst_interp(vst_image);
       const Transform transform(subsample->header());
       for (auto l = Loop(final_exports.noise_out)(final_exports.noise_out); l; ++l) {
         vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
@@ -456,7 +456,7 @@ void run(Header &dwi,
       }
     }
     if (final_exports.lamplus.valid()) {
-      Interp::Linear<Image<float>> vst_interp(vst_image);
+      Interp::Cubic<Image<float>> vst_interp(vst_image);
       const Transform transform(subsample->header());
       for (auto l = Loop(final_exports.lamplus)(final_exports.lamplus); l; ++l) {
         vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),

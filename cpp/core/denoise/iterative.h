@@ -29,7 +29,7 @@
 #include "denoise/subsample.h"
 #include "filter/smooth.h"
 #include "image.h"
-#include "interp/linear.h"
+#include "interp/cubic.h"
 #include "types.h"
 
 namespace MR::Denoise::Iterative {
@@ -63,12 +63,14 @@ void estimate(Image<T> &input,
     input_preconditioned = input;
   else
     preconditioner(input, input_preconditioned, false);
-  Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports, preconditioner.null_rank(), false);
-  ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
+  {
+    Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports, preconditioner.null_rank(), false);
+    ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
+  }
   // If a VST was applied to the input data for this iteration,
   //   need to remove its effect from the estimated noise map
   if (vst_image.valid()) {
-    Interp::Linear<Image<float>> vst_interp(vst_image);
+    Interp::Cubic<Image<float>> vst_interp(vst_image);
     const Transform transform(subsample->header());
     for (auto l = Loop(exports.noise_out)(exports.noise_out); l; ++l) {
       vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(exports.noise_out.index(0)),
