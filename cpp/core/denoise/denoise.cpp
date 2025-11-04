@@ -18,6 +18,7 @@
 #include "denoise/denoise.h"
 
 #include "axes.h"
+#include "transform.h"
 
 namespace MR::Denoise {
 
@@ -109,6 +110,22 @@ size_t num_volumes(const Header& H) {
       return result;
     }
   }
+}
+
+Image<float> pad_noise_map(Image<float> &in) {
+  Header H(in);
+  // Just pad by 2 voxels at all edges;
+  //   that should make cubic interpolation safe
+  for (ssize_t axis = 0; axis != 3; ++axis)
+    H.size(axis) += 4;
+  H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{-2.0, -2.0, -2.0};
+  Image<float> out = Image<float>::scratch(H, "Padded version of \"" + in.name() + "\"");
+  for (auto l = Loop(out)(out); l; ++l) {
+    for (ssize_t axis = 0; axis != 3; ++axis)
+      in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
+    out.value() = in.value();
+  }
+  return out;
 }
 
 } // namespace MR::Denoise

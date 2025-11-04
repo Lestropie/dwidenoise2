@@ -24,7 +24,7 @@
 #include "axes.h"
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
-#include "interp/linear.h"
+#include "interp/cubic.h"
 #include "metadata/bids.h"
 #include "transform.h"
 
@@ -360,9 +360,9 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
   Image<ssize_t> serialise(serialise_image);
   Image<cfloat> phase(phase_image);
   Image<T> mean(mean_image);
-  std::unique_ptr<Interp::Linear<Image<float>>> vst;
+  std::unique_ptr<Interp::Cubic<Image<float>>> vst;
   if (vst_image.valid())
-    vst.reset(new Interp::Linear<Image<float>>(vst_image));
+    vst.reset(new Interp::Cubic<Image<float>>(vst_image));
 
   Eigen::Array<T, Eigen::Dynamic, 1> data(H_out.size(3));
   if (inverse) {

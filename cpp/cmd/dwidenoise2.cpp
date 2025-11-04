@@ -328,7 +328,7 @@ void run(Header &dwi,
                         preconditioner,
                         iteration_exports);
     // Propagate result to next iteration
-    vst_image = iteration_exports.noise_out;
+    vst_image = Denoise::pad_noise_map(iteration_exports.noise_out);
 //    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
 //    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
     preconditioner.update_vst_image(vst_image);

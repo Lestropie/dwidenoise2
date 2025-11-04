@@ -244,7 +244,7 @@ void run(Header &dwi,
     // TODO Suspect I need to pad this by one voxel in each direction
     //   in order for the linear interpolation to work in the next iteration
 
-    vst_image = iteration_exports.noise_out;
+    vst_image = Denoise::pad_noise_map(iteration_exports.noise_out);
     preconditioner.update_vst_image(vst_image);
     estimator->update_vst_image(vst_image);
 
@@ -300,6 +300,7 @@ void run() {
     user_vst_image = Image<float>::open(opt[0][0]);
     if (user_vst_image.ndim() != 3)
       throw Exception("Variance-stabilising transform noise level image must be 3D");
+    user_vst_image = Denoise::pad_noise_map(user_vst_image);
   }
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
