@@ -203,14 +203,14 @@ Precondition<T>::Precondition(Image<T> &image,
       H_serialise.spacing(axis) = 1.0;
     }
     H_serialise.ndim() = std::max(size_t(3), H_in.ndim() - 3);
-    H_serialise.datatype() = DataType::from<ssize_t>();
+    H_serialise.datatype() = DataType::from<uint32_t>();
     H_serialise.datatype().set_byte_order_native();
     H_serialise.transform().setIdentity();
-    serialise_image = Image<ssize_t>::scratch(                                     //
+    serialise_image = Image<uint32_t>::scratch(                                     //
         H_serialise,                                                               //
         "Scratch image for serialising non-spatial indices into Casorati matrix"); //
 
-    ssize_t output_index = 0;
+    uint32_t output_index = 0;
     for (auto l = Loop(serialise_image)(serialise_image); l; ++l)
       serialise_image.value() = output_index++;
     serialise_image.reset();
@@ -357,7 +357,7 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
 
   // For thread-safety / const-ness
   const Transform transform(input);
-  Image<ssize_t> serialise(serialise_image);
+  Image<uint32_t> serialise(serialise_image);
   Image<cfloat> phase(phase_image);
   Image<T> mean(mean_image);
   std::unique_ptr<Interp::Cubic<Image<float>>> vst;

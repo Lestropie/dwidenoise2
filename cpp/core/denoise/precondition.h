@@ -95,7 +95,7 @@ private:
   Header H_out;
   // For serialisation of >4D images
   ssize_t num_volume_groups;
-  Image<ssize_t> serialise_image;
+  Image<uint32_t> serialise_image;
   // First step: Phase demodulation
   Image<cfloat> phase_image;
   // Second step: Demeaning
