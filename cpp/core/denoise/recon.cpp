@@ -168,7 +168,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         //   whereas for EXCLUSIVE since only a small portion of V is used it's worthwhile
         Xr.noalias() =                                                                 //
             Estimate<F>::SVD.matrixU() *                                               //
-            (w.head(r).reverse().cast<F>().array() *                                   //
+            (w.head(r).reverse().template cast<F>().array() *                          //
              Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() *        //
             Estimate<F>::SVD.matrixV().row(Estimate<F>::patch.centre_index).adjoint(); //
       } break;
@@ -176,14 +176,14 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         if (Estimate<F>::m <= n)
           Xr.noalias() =                                               //
               Estimate<F>::eig.eigenvectors() *                        //
-              (w.head(r).cast<F>().matrix().asDiagonal() *             //
+              (w.head(r).template cast<F>().matrix().asDiagonal() *    //
                (Estimate<F>::eig.eigenvectors().adjoint() *            //
                 Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
         else
           Xr.noalias() =                                                                          //
               Estimate<F>::X.leftCols(n) *                                                        //
               (Estimate<F>::eig.eigenvectors() *                                                  //
-               (w.head(r).cast<F>().matrix().asDiagonal() *                                       //
+               (w.head(r).template cast<F>().matrix().asDiagonal() *                              //
                 Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
       } break;
       }
@@ -213,23 +213,23 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       case decomp_type::BDCSVD:
         Xr.leftCols(n).noalias() =                                              //
             Estimate<F>::SVD.matrixU() *                                        //
-            (w.head(r).reverse().cast<F>().array() *                            //
+            (w.head(r).reverse().template cast<F>().array() *                   //
              Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
             Estimate<F>::SVD.matrixV().adjoint();                               //
         break;
       case decomp_type::SELFADJOINT:
         if (Estimate<F>::m <= n) {
-          Xr.leftCols(n).noalias() =                        //
-              Estimate<F>::eig.eigenvectors() *             //
-              (w.head(r).cast<F>().matrix().asDiagonal() *  //
-               (Estimate<F>::eig.eigenvectors().adjoint() * //
-                Estimate<F>::X.leftCols(n)));               //
+          Xr.leftCols(n).noalias() =                                //
+              Estimate<F>::eig.eigenvectors() *                     //
+              (w.head(r).template cast<F>().matrix().asDiagonal() * //
+               (Estimate<F>::eig.eigenvectors().adjoint() *         //
+                Estimate<F>::X.leftCols(n)));                       //
         } else {
-          Xr.leftCols(n).noalias() =                         //
-              Estimate<F>::X.leftCols(n) *                   //
-              (Estimate<F>::eig.eigenvectors() *             //
-               (w.head(r).cast<F>().matrix().asDiagonal() *  //
-                Estimate<F>::eig.eigenvectors().adjoint())); //
+          Xr.leftCols(n).noalias() =                                 //
+              Estimate<F>::X.leftCols(n) *                           //
+              (Estimate<F>::eig.eigenvectors() *                     //
+               (w.head(r).template cast<F>().matrix().asDiagonal() * //
+                Estimate<F>::eig.eigenvectors().adjoint()));         //
         }
         break;
       }

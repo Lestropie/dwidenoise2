@@ -106,8 +106,4 @@ private:
   Image<float> vst_image;
 };
 
-// TODO New function that will pad a VST image by one voxel in every direction,
-//   making it more likely to succeed in obtaining interpolated values for every input voxel
-// (eventually this should be subsumed by an edge handling adapter)
-
 } // namespace MR::Denoise
