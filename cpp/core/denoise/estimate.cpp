@@ -51,6 +51,7 @@ Estimate<F>::Estimate(const Image<F> &image,
       exports(exports) {
   // If input image is > 4D, should have been preconditioned into 4D
   assert(image.ndim() == 4);
+  pca_failure_counter.store(0, std::memory_order_release);
 }
 
 template <typename F>
@@ -151,6 +152,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   } else {
     s.head(r).fill(std::numeric_limits<double>::signaling_NaN());
     threshold = Estimator::Result();
+    pca_failure_counter.fetch_add(1, std::memory_order_relaxed);
   }
 
   // Store additional output maps if requested
@@ -196,6 +198,13 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     }
     if (exports.saving_eigenspectra())
       exports.add_eigenspectrum(s);
+  }
+}
+
+template <typename F> void Estimate<F>::report_warnings() const {
+  const ssize_t count = pca_failure_counter.load(std::memory_order_acquire);
+  if (count > 0) {
+    WARN("A total of " + str(count) + " PCA kernels failed to converge");
   }
 }
 

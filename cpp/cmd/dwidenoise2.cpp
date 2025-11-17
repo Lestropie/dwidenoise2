@@ -328,7 +328,10 @@ void run(Header &dwi,
                         preconditioner,
                         iteration_exports);
     // Propagate result to next iteration
-    vst_image = Denoise::pad_noise_map(iteration_exports.noise_out);
+    vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
+                                             true, // NaN to zero, to deal with PCAs that did not converge
+                                             true, // Pad image for compatibility with interpolation at next iteration
+                                             iterations[iteration].smooth_noiseout);
 //    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
 //    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
     preconditioner.update_vst_image(vst_image);
@@ -393,6 +396,9 @@ void run(Header &dwi,
                0,                                                          //
                3)                                                          //
       .run(func, input_preconditioned, output_preconditioned);             //
+  func.report_warnings();
+  // Note: Denoise::condition_noise_map() is intentionally _not_ called here:
+  //   noise estimates are fed through as-is
 
   const size_t max_rank = Denoise::num_volumes(dwi);
 
@@ -521,6 +527,10 @@ void run() {
     user_vst_image = Image<float>::open(opt[0][0]);
     if (user_vst_image.ndim() != 3)
       throw Exception("Variance-stabilising transform noise level image must be 3D");
+    user_vst_image = Denoise::condition_noise_map(user_vst_image,
+                                                  false, // Punish user for providing input image containing non-finite values
+                                                  true, // Pad for compatibility with interpolation
+                                                  false); // Don't perform any smoothing
   }
 
   aggregator_type aggregator = aggregator_type::GAUSSIAN;

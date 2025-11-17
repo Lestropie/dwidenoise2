@@ -241,10 +241,10 @@ void run(Header &dwi,
                         preconditioner,
                         iteration_exports);
     // Propagate result to next iteration
-    // TODO Suspect I need to pad this by one voxel in each direction
-    //   in order for the linear interpolation to work in the next iteration
-
-    vst_image = Denoise::pad_noise_map(iteration_exports.noise_out);
+    vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
+                                             true, // Need to substitute NaNs with 0.0 for the next iteration
+                                             true, // Perform padding to facilitate interpolation at the next iteration
+                                             iterations[iteration].smooth_noiseout); // Only smooth if instructed to do so
     preconditioner.update_vst_image(vst_image);
     estimator->update_vst_image(vst_image);
 
@@ -300,7 +300,10 @@ void run() {
     user_vst_image = Image<float>::open(opt[0][0]);
     if (user_vst_image.ndim() != 3)
       throw Exception("Variance-stabilising transform noise level image must be 3D");
-    user_vst_image = Denoise::pad_noise_map(user_vst_image);
+    user_vst_image = Denoise::condition_noise_map(user_vst_image,
+                                                  false, // Don't automatically substitute 0.0 for NaNs
+                                                  true, // Pad for compatibility with interpolation
+                                                  false); // Don't perform any smoothing
   }
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);

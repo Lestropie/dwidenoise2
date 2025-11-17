@@ -18,6 +18,7 @@
 #include "denoise/denoise.h"
 
 #include "axes.h"
+#include "filter/smooth.h"
 #include "transform.h"
 
 namespace MR::Denoise {
@@ -112,18 +113,34 @@ size_t num_volumes(const Header& H) {
   }
 }
 
-Image<float> pad_noise_map(Image<float> &in) {
+Image<float> condition_noise_map(Image<float> &in,
+                                 const bool nan_to_zero,
+                                 const bool pad,
+                                 const bool smooth) {
   Header H(in);
-  // Just pad by 2 voxels at all edges;
-  //   that should make cubic interpolation safe
-  for (ssize_t axis = 0; axis != 3; ++axis)
-    H.size(axis) += 4;
-  H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{-2.0, -2.0, -2.0};
-  Image<float> out = Image<float>::scratch(H, "Padded version of \"" + in.name() + "\"");
-  for (auto l = Loop(out)(out); l; ++l) {
+  if (pad) {
+    // Just pad by 2 voxels at all edges;
+    //   that should make cubic interpolation safe
     for (ssize_t axis = 0; axis != 3; ++axis)
-      in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
-    out.value() = in.value();
+      H.size(axis) += 4;
+    H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{-2.0, -2.0, -2.0};
+  }
+  Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + in.name() + "\"");
+  for (auto l = Loop(out)(out); l; ++l) {
+    if (pad) {
+      for (ssize_t axis = 0; axis != 3; ++axis)
+        in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
+    } else {
+      assign_pos_of(out).to(in);
+    }
+    if (nan_to_zero)
+      out.value() = std::isfinite(in.value()) ? in.value() : 0.0F;
+    else
+      out.value() = in.value();
+  }
+  if (smooth) {
+    Filter::Smooth smooth_filter(out);
+    smooth_filter(out);
   }
   return out;
 }

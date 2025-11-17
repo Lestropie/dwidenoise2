@@ -65,14 +65,17 @@ ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp);
 //   whether the input is 4D or higher
 size_t num_volumes(const Header&);
 
-// Function to internally pad the noise map estimate
-//   so that it can be passed to the next iteration
-//   without input image voxels residing outside of the noise map image FOV
-// While it would be preferable for this to be managed using EdgeHandlers in MRtrix3/mrtrix3#2278,
-//   for the sake of progress we will here just do manual explicit padding
-// While this is primarily applicable to the iterative approach,
-//   it's not exclusively the case;
-//   eg. one might want to apply padding to a user-provided noise map
-Image<float> pad_noise_map(Image<float> &in);
+// Function for performing filtering operations on a noise map:
+// - May need to replace NaNs with zeros
+//   (want to persist with putting NaNs in the noise map as indication of PCA failure rather than rank estimation failure,
+//   but this is deleterious in an iterative environment)
+// - May need to perform padding in order to facilitate interpolation at the next resolution
+//   (while it would be preferable for this to be managed using EdgeHandlers in MRtrix3/mrtrix3#2278,
+//    for the sake of progress we will here just do manual explicit padding)
+// - May be instructed to perform explicit smoothing of the noise map prior to the next iteration
+Image<float> condition_noise_map(Image<float> &in,
+                                 const bool nan_to_zero = true,
+                                 const bool pad = true,
+                                 const bool smooth = false);
 
 } // namespace MR::Denoise

@@ -59,6 +59,8 @@ public:
 
   void operator()(Image<F> &dwi);
 
+  void report_warnings() const;
+
 protected:
   const ssize_t m;
 
@@ -101,9 +103,12 @@ protected:
   // Some data can only be written in a thread-safe manner
   static std::mutex mutex;
 
+  static std::atomic<ssize_t> pca_failure_counter;
+
   void load_data(Image<F> &image);
 };
 
 template <typename F> std::mutex Estimate<F>::mutex;
+template <typename F> std::atomic<ssize_t> Estimate<F>::pca_failure_counter;
 
 } // namespace MR::Denoise

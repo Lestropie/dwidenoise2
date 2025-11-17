@@ -66,6 +66,7 @@ void estimate(Image<T> &input,
   {
     Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports, preconditioner.null_rank(), false);
     ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
+    func.report_warnings();
   }
   // If a VST was applied to the input data for this iteration,
   //   need to remove its effect from the estimated noise map
@@ -78,13 +79,6 @@ void estimate(Image<T> &input,
                                                                     double(exports.noise_out.index(2))}));
       exports.noise_out.value() *= vst_interp.value();
     }
-  }
-  // TODO Ideally include more complex processing on this image;
-  //   eg. outlier detection & infilling
-  if (config.smooth_noiseout) {
-    assert(exports.noise_out.valid());
-    Filter::Smooth smooth_filter(exports.noise_out);
-    smooth_filter(exports.noise_out);
   }
 }
 
