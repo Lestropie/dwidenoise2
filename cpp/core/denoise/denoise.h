@@ -73,6 +73,7 @@ size_t num_volumes(const Header&);
 //   (while it would be preferable for this to be managed using EdgeHandlers in MRtrix3/mrtrix3#2278,
 //    for the sake of progress we will here just do manual explicit padding)
 // - May be instructed to perform explicit smoothing of the noise map prior to the next iteration
+// TODO Change these from bools to enums
 Image<float> condition_noise_map(Image<float> &in,
                                  const bool nan_to_zero = true,
                                  const bool pad = true,

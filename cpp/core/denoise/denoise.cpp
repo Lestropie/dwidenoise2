@@ -125,7 +125,7 @@ Image<float> condition_noise_map(Image<float> &in,
       H.size(axis) += 4;
     H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{-2.0, -2.0, -2.0};
   }
-  Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + in.name() + "\"");
+  Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
   for (auto l = Loop(out)(out); l; ++l) {
     if (pad) {
       for (ssize_t axis = 0; axis != 3; ++axis)
