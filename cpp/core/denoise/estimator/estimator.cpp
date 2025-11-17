@@ -50,7 +50,7 @@ const OptionGroup estimator_denoise_options =
     + Option("noise_in",
              "manually specify the noise level rather than estimating from the data, "
              "whether as a scalar value or as a pre-estimated spatial map")
-      + Argument("value/image").type_various()
+      + Argument("value/image").type_float(0.0).type_image_in()
 
     + Option("fixed_rank",
              "set a fixed input signal rank rather than estimating the noise level from the data")

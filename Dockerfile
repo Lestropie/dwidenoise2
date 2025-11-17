@@ -7,8 +7,8 @@ FROM buildpack-deps:bookworm AS base-builder
 FROM base-builder AS mrtrix3-builder
 
 # Git commitish from which to build MRtrix3.
-# This is branch "dev" as at 2025-10-21
-ARG MRTRIX3_GIT_COMMITISH="26965d57b374a733ac0c583d3b92bad17923128a"
+# This is branch "dev" as at 2025-11-17
+ARG MRTRIX3_GIT_COMMITISH="fa6ee952913fbc1df79aeca745600852155f533f"
 
 RUN apt-get -qq update \
     && apt-get install -yq --no-install-recommends \
@@ -32,7 +32,7 @@ COPY cpp/cmd/dwidenoise2.cpp /src/mrtrix3/cpp/cmd/dwidenoise2.cpp
 COPY cpp/cmd/dwi2noise.cpp /src/mrtrix3/cpp/cmd/dwi2noise.cpp
 COPY cpp/core/denoise /src/mrtrix3/cpp/core/denoise
 
-RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF --preset=release \
+RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON --preset=release \
     && cmake --build build --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert
 
 # Build final image.

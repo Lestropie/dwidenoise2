@@ -7,8 +7,8 @@ FROM buildpack-deps:bookworm AS base-builder
 FROM base-builder AS mrtrix3-builder
 
 # Git commitish from which to build MRtrix3.
-# This is branch "dev" as at 2025-10-21
-ARG MRTRIX3_GIT_COMMITISH="26965d57b374a733ac0c583d3b92bad17923128a"
+# This is branch "dev" as at 2025-11-17
+ARG MRTRIX3_GIT_COMMITISH="fa6ee952913fbc1df79aeca745600852155f533f"
 
 RUN apt-get -qq update \
     && apt-get install -yq --no-install-recommends \
