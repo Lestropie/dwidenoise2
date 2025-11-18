@@ -266,10 +266,10 @@ void usage() {
 // (operations combining complex & real types not allowed to be of different precision)
 std::complex<double> operator/(const std::complex<double> &c, const float n) { return c / double(n); }
 
-const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, false},  //
-                                                            {{4, 4, 4}, 4.0, false},   //
-                                                            {{2, 2, 2}, 1.0, true},    //
-                                                            {{2, 2, 2}, 1.0, false}}); //
+const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, noise_smooth_type::NONE},  //
+                                                            {{4, 4, 4}, 4.0, noise_smooth_type::NONE},   //
+                                                            {{2, 2, 2}, 1.0, noise_smooth_type::SMOOTH}, //
+                                                            {{2, 2, 2}, 1.0, noise_smooth_type::NONE}}); //
 
 // TODO Improve this
 template <typename T>
@@ -329,8 +329,8 @@ void run(Header &dwi,
                         iteration_exports);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             true, // NaN to zero, to deal with PCAs that did not converge
-                                             true, // Pad image for compatibility with interpolation at next iteration
+                                             noise_impute_type::NAN_TO_ZERO,
+                                             noise_pad_type::PAD,
                                              iterations[iteration].smooth_noiseout);
 //    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
 //    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
@@ -528,9 +528,9 @@ void run() {
     if (user_vst_image.ndim() != 3)
       throw Exception("Variance-stabilising transform noise level image must be 3D");
     user_vst_image = Denoise::condition_noise_map(user_vst_image,
-                                                  false, // Punish user for providing input image containing non-finite values
-                                                  true, // Pad for compatibility with interpolation
-                                                  false); // Don't perform any smoothing
+                                                  noise_impute_type::NONE,
+                                                  noise_pad_type::PAD,
+                                                  noise_smooth_type::NONE);
   }
 
   aggregator_type aggregator = aggregator_type::GAUSSIAN;
@@ -622,7 +622,7 @@ void run() {
     Iterative::Iteration config;
     config.subsample_ratios = final_subsample->get_factors();
     config.kernel_size_multiplier = 1.0;
-    config.smooth_noiseout = false;
+    config.smooth_noiseout = noise_smooth_type::NONE;
     iterations.push_back(config);
   }
 

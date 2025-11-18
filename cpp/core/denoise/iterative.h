@@ -37,7 +37,7 @@ namespace MR::Denoise::Iterative {
 struct Iteration {
   std::array<ssize_t, 3> subsample_ratios;
   default_type kernel_size_multiplier;
-  bool smooth_noiseout;
+  noise_smooth_type smooth_noiseout;
 };
 
 // Internal function covering as much as possible for iterative implementation

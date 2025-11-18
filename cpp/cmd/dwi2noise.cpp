@@ -196,9 +196,9 @@ void usage() {
 }
 // clang-format on
 
-const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, false}, //
-                                                            {{4, 4, 4}, 4.0, false},  //
-                                                            {{2, 2, 2}, 1.0, true}}); //
+const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, noise_smooth_type::NONE},    //
+                                                            {{4, 4, 4}, 4.0, noise_smooth_type::NONE},     //
+                                                            {{2, 2, 2}, 1.0, noise_smooth_type::SMOOTH}}); //
 
 template <typename T>
 void run(Header &dwi,
@@ -242,9 +242,9 @@ void run(Header &dwi,
                         iteration_exports);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             true, // Need to substitute NaNs with 0.0 for the next iteration
-                                             true, // Perform padding to facilitate interpolation at the next iteration
-                                             iterations[iteration].smooth_noiseout); // Only smooth if instructed to do so
+                                             noise_impute_type::NAN_TO_ZERO,
+                                             noise_pad_type::PAD,
+                                             iterations[iteration].smooth_noiseout);
     preconditioner.update_vst_image(vst_image);
     estimator->update_vst_image(vst_image);
 
@@ -301,9 +301,9 @@ void run() {
     if (user_vst_image.ndim() != 3)
       throw Exception("Variance-stabilising transform noise level image must be 3D");
     user_vst_image = Denoise::condition_noise_map(user_vst_image,
-                                                  false, // Don't automatically substitute 0.0 for NaNs
-                                                  true, // Pad for compatibility with interpolation
-                                                  false); // Don't perform any smoothing
+                                                  noise_impute_type::NONE,
+                                                  noise_pad_type::PAD,
+                                                  noise_smooth_type::NONE);
   }
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
@@ -321,7 +321,7 @@ void run() {
     Iterative::Iteration config;
     config.subsample_ratios = final_subsample->get_factors();
     config.kernel_size_multiplier = 1.0;
-    config.smooth_noiseout = true;
+    config.smooth_noiseout = noise_smooth_type::SMOOTH;
     iterations.push_back(config);
   }
   Exports final_exports(dwi, final_subsample->header());

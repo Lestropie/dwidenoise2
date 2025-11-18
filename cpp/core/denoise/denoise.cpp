@@ -114,11 +114,11 @@ size_t num_volumes(const Header& H) {
 }
 
 Image<float> condition_noise_map(Image<float> &in,
-                                 const bool nan_to_zero,
-                                 const bool pad,
-                                 const bool smooth) {
+                                 const noise_impute_type nan_to_zero,
+                                 const noise_pad_type pad,
+                                 const noise_smooth_type smooth) {
   Header H(in);
-  if (pad) {
+  if (pad == noise_pad_type::PAD) {
     // Just pad by 2 voxels at all edges;
     //   that should make cubic interpolation safe
     for (ssize_t axis = 0; axis != 3; ++axis)
@@ -127,18 +127,18 @@ Image<float> condition_noise_map(Image<float> &in,
   }
   Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
   for (auto l = Loop(out)(out); l; ++l) {
-    if (pad) {
+    if (pad == noise_pad_type::PAD) {
       for (ssize_t axis = 0; axis != 3; ++axis)
         in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
     } else {
       assign_pos_of(out).to(in);
     }
-    if (nan_to_zero)
+    if (nan_to_zero == noise_impute_type::NAN_TO_ZERO)
       out.value() = std::isfinite(in.value()) ? in.value() : 0.0F;
     else
       out.value() = in.value();
   }
-  if (smooth) {
+  if (smooth == noise_smooth_type::SMOOTH) {
     Filter::Smooth smooth_filter(out);
     smooth_filter(out);
   }
