@@ -409,8 +409,8 @@ void run(Header &dwi,
          l_voxel;                                                //
          ++l_voxel) {                                            //
       const float sum_aggregation = final_exports.sum_aggregation.value();
-      if (sum_aggregation != 1.0F) {
-        const double multiplier = double(1) / sum_aggregation;
+      if (sum_aggregation != 0.0F) {
+        const double multiplier = 1.0 / static_cast<double>(sum_aggregation);
         for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
           output_preconditioned.value() *= multiplier;
       }
