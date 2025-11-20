@@ -25,11 +25,13 @@
 #include "denoise/estimator/estimator.h"
 #include "denoise/exports.h"
 #include "denoise/kernel/kernel.h"
+#include "denoise/loop.h"
 #include "denoise/precondition.h"
 #include "denoise/subsample.h"
 #include "filter/smooth.h"
 #include "image.h"
 #include "interp/cubic.h"
+#include "thread_queue.h"
 #include "types.h"
 
 namespace MR::Denoise::Iterative {
@@ -64,9 +66,14 @@ void estimate(Image<T> &input,
   else
     preconditioner(input, input_preconditioned, false);
   {
-    Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports, preconditioner.null_rank(), false);
-    ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
-    func.report_warnings();
+    Denoise::Sender sender(input_preconditioned, subsample);
+    Estimate<T> func(input_preconditioned, kernel, decomposition, estimator, preconditioner.null_rank(), false);
+    Denoise::ReceiverEstimate receiver(subsample, exports);
+    Thread::run_queue(sender,
+                      Kernel::Voxel::index_type(),
+                      Thread::multi(func),
+                      EstimatedPatch(),
+                      receiver);
   }
   // If a VST was applied to the input data for this iteration,
   //   need to remove its effect from the estimated noise map

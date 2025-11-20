@@ -28,21 +28,28 @@ namespace MR::Denoise::Kernel {
 
 class Data {
 public:
-  Data(const Eigen::Vector3d &pos, const ssize_t i)
-      : centre_realspace(pos),
+  Data(const Voxel::index_type seed_voxel,
+       const Eigen::Vector3d &pos,
+       const ssize_t i)
+      : seed_voxel(seed_voxel),
+        centre_realspace(pos),
         centre_index(i),
         max_distance(-std::numeric_limits<default_type>::infinity()),
         centre_noise(std::numeric_limits<double>::signaling_NaN()) {}
   Data(const ssize_t i)
-      : centre_realspace(Eigen::Vector3d::Constant(std::numeric_limits<double>::signaling_NaN())),
+      : seed_voxel({-1, -1, -1}),
+        centre_realspace(Eigen::Vector3d::Constant(std::numeric_limits<double>::signaling_NaN())),
         centre_index(i),
         max_distance(-std::numeric_limits<default_type>::infinity()),
         centre_noise(std::numeric_limits<double>::signaling_NaN()) {}
   Data()
-      : centre_realspace(Eigen::Vector3d::Constant(std::numeric_limits<double>::signaling_NaN())),
+      : seed_voxel({-1, -1, -1}),
+        centre_realspace(Eigen::Vector3d::Constant(std::numeric_limits<double>::signaling_NaN())),
         centre_index(-1),
         max_distance(-std::numeric_limits<default_type>::infinity()),
         centre_noise(std::numeric_limits<double>::signaling_NaN()) {}
+  ssize_t num_voxels() const { return voxels.size(); }
+  Voxel::index_type seed_voxel;
   Eigen::Vector3d centre_realspace;
   std::vector<Voxel> voxels;
   ssize_t centre_index;

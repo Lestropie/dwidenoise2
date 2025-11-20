@@ -23,7 +23,7 @@ Data SphereFixedRadius::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
   // For thread-safety
   Image<bool> mask(mask_image);
-  Data result(voxel2real(pos), centre_index);
+  Data result(pos, voxel2real(pos), centre_index);
   result.voxels.reserve(maximum_size);
   for (auto map_it = shared->begin(); map_it != shared->end(); ++map_it) {
     const Voxel::index_type voxel({pos[0] + map_it->index[0],   //

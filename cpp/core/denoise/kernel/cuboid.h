@@ -37,6 +37,7 @@ public:
 private:
   Eigen::Array<int, 3, 2> bounding_box;
   const ssize_t size;
+  // TODO Should this be in base?
   const ssize_t centre_index;
 };
 

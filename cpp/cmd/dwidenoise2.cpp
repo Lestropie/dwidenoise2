@@ -18,10 +18,12 @@
 #include <string>
 
 #include "command.h"
+#include "dwi/gradient.h"
 #include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
 #include "stride.h"
+#include "thread_queue.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -37,11 +39,11 @@
 #include "denoise/kernel/kernel.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/loop.h"
 #include "denoise/mask.h"
 #include "denoise/precondition.h"
 #include "denoise/recon.h"
 #include "denoise/subsample.h"
-#include "dwi/gradient.h"
 
 using namespace MR;
 using namespace App;
@@ -360,15 +362,6 @@ void run(Header &dwi,
   if (!opt.empty())
     input_preconditioned = Image<T>::create(opt[0][0], preconditioner.header());
   preconditioner(input, input_preconditioned, false);
-  Recon<T> func(input_preconditioned,
-                subsample,
-                kernel,
-                decomposition,
-                estimator,
-                filter,
-                aggregator,
-                final_exports,
-                preconditioner.null_rank());
 
   Header H_out (dwi);
   H_out.datatype() = DataType::from<T>();
@@ -387,18 +380,34 @@ void run(Header &dwi,
         preconditioner.header(),                                            //
         "Scratch buffer for denoised data before undoing preconditioning"); //
 
-  const bool final_iteration_includes_MP =
+  const bool final_iteration_includes_estimation =
       iterations.size() == 1 && get_options("noise_in").empty() && get_options("fixed_rank").empty();
-  ThreadedLoop(final_iteration_includes_MP                                 //
-                   ? "running MP-PCA noise level estimation and denoising" //
-                   : "running PCA denoising",                              //
-               input_preconditioned,                                       //
-               0,                                                          //
-               3)                                                          //
-      .run(func, input_preconditioned, output_preconditioned);             //
-  func.report_warnings();
+
+  {
+    Denoise::Sender sender(input_preconditioned, subsample);
+    Recon<T> func(input_preconditioned,
+                kernel,
+                subsample,
+                decomposition,
+                estimator,
+                filter,
+                aggregator,
+                preconditioner.null_rank());
+    Denoise::ReceiverRecon<T> receiver(output_preconditioned,
+                                       subsample,
+                                       final_exports,
+                                       final_iteration_includes_estimation
+                                       ? operation_type::ESTIMATE_AND_RECON
+                                       : operation_type::RECON_ONLY);
+    Thread::run_queue(sender,
+                      Kernel::Voxel::index_type(),
+                      Thread::multi(func),
+                      ReconstructedPatch<T>(),
+                      receiver);
+  }
+
   // Note: Denoise::condition_noise_map() is intentionally _not_ called here:
-  //   noise estimates are fed through as-is
+  //   noise estimates are fed through to user-specified output as-is
 
   const size_t max_rank = Denoise::num_volumes(dwi);
 

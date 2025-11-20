@@ -31,7 +31,7 @@ Data SphereMinVoxels::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
   // For thread-safety
   Image<bool> mask(mask_image);
-  Data result(voxel2real(pos), centre_index);
+  Data result(pos, voxel2real(pos), centre_index);
   auto table_it = shared->begin();
   while (table_it != shared->end()) {
     // If there's a tie in distances, want to include all such offsets in the kernel,

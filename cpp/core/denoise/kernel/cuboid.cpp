@@ -61,7 +61,7 @@ Data Cuboid::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
   // For thread-safety
   Image<bool> mask(mask_image);
-  Data result(voxel2real(pos), centre_index);
+  Data result(pos, voxel2real(pos), centre_index);
   Voxel::index_type voxel;
   Offset::index_type offset;
   for (offset[2] = bounding_box(2, 0); offset[2] <= bounding_box(2, 1); ++offset[2]) {

@@ -32,20 +32,35 @@
 
 namespace MR::Denoise {
 
+// TODO Class that can be passed from this functor to a Receiver class
+//   in order to avoid locking across threads
+// TODO Because this has to store the denoised data,
+//   it needs to be templated
+template <typename F>
+class ReconstructedPatch : public EstimatedPatch {
+public:
+  ReconstructedPatch() = default;
+
+  typename Estimate<F>::MatrixType Xr;
+  ssize_t rank_recon;
+  double sum_shrinkage_weights;
+  double variance_removed;
+  vector_type aggregation_weights;
+};
+
 template <typename F> class Recon : public Estimate<F> {
 
 public:
   Recon(const Image<F> &image,
-        std::shared_ptr<Subsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
+        std::shared_ptr<Subsample> subsample,
         const decomp_type decomposition,
         std::shared_ptr<Estimator::Base> estimator,
         filter_type filter,
         aggregator_type aggregator,
-        Exports &exports,
         const ssize_t null_rank);
 
-  void operator()(Image<F> &dwi, Image<F> &out);
+  bool operator()(const Kernel::Voxel::index_type &pos, ReconstructedPatch<F> &out);
 
 protected:
   // Denoising configuration
@@ -55,8 +70,7 @@ protected:
 
   // Reusable memory
   std::map<double, double> beta2lambdastar;
-  vector_type w;
-  typename Estimate<F>::MatrixType Xr;
+  vector_type shrinkage_weights;
 };
 
 } // namespace MR::Denoise

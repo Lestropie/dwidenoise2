@@ -24,15 +24,14 @@ namespace MR::Denoise {
 
 template <typename F>
 Recon<F>::Recon(const Image<F> &image,
-                std::shared_ptr<Subsample> subsample,
                 std::shared_ptr<Kernel::Base> kernel,
+                std::shared_ptr<Subsample> subsample,
                 const decomp_type decomposition,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
-                Exports &exports,
                 const ssize_t preconditioner_rank)
-    : Estimate<F>(image, subsample, kernel, decomposition, estimator, exports, preconditioner_rank, true),
+    : Estimate<F>(image, kernel, decomposition, estimator, preconditioner_rank, true),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -40,59 +39,74 @@ Recon<F>::Recon(const Image<F> &image,
                           Math::pow2(std::cbrt(subsample->get_factors()[0] * image.spacing(0)       //
                                                * subsample->get_factors()[1] * image.spacing(1)     //
                                                * subsample->get_factors()[2] * image.spacing(2)))), //
-      w(std::min(Estimate<F>::m, kernel->estimated_size())),
-      Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
+      shrinkage_weights(std::min(Estimate<F>::values_per_voxel, kernel->estimated_size())) { }
 
-template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
-  if (!Estimate<F>::subsample->process({dwi.index(0), dwi.index(1), dwi.index(2)}))
-    return;
+template <typename F> bool Recon<F>::operator()(const Kernel::Voxel::index_type &pos, ReconstructedPatch<F> &out) {
 
-  Estimate<F>::operator()(dwi);
+  Estimate<F>::operator()(pos, out);
 
-  const ssize_t n = Estimate<F>::patch.voxels.size();
-  const ssize_t r = std::min(Estimate<F>::m, n);
-  const ssize_t rz = rank_zero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
-  const ssize_t rnz = rank_nonzero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
-  const ssize_t qnz = dimlong_nonzero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
+  const ssize_t rz = rank_zero(Estimate<F>::values_per_voxel,
+                               out.num_voxels(),
+                               Estimate<F>::preconditioner_rank);
+  const ssize_t rnz = rank_nonzero(Estimate<F>::values_per_voxel,
+                                   out.num_voxels(),
+                                   Estimate<F>::preconditioner_rank);
+  const ssize_t qnz = dimlong_nonzero(Estimate<F>::values_per_voxel,
+                                      out.num_voxels(),
+                                      Estimate<F>::preconditioner_rank);
   const double beta = double(rnz) / double(qnz);
 
-  if (r > w.size())
-    w.resize(r);
-  if (aggregator != aggregator_type::EXCLUSIVE && n > Xr.cols())
-    Xr.resize(Estimate<F>::m, n);
+  if (out.rank_pca > shrinkage_weights.size()) {
+    DEBUG(std::string("Expanding local storage of eigenvalue weights") + //
+          " from " + str(shrinkage_weights.size()) +                     //
+          " to " + str(out.rank_pca));                                   //
+    shrinkage_weights.resize(out.rank_pca);
+  }
+  if (aggregator != aggregator_type::EXCLUSIVE && out.Xr.cols() < out.num_voxels()) {
+    DEBUG(std::string("Expanding local storage of denoised patch") +                  //
+          " from " + str(out.Xr.rows()) + "x" + str(out.Xr.cols()) +                  //
+          " to " + str(Estimate<F>::values_per_voxel) + "x" + str(out.num_voxels())); //
+    out.Xr.resize(Estimate<F>::values_per_voxel, out.num_voxels());
+  }
+  const ssize_t num_aggregation_weights = aggregator == aggregator_type::EXCLUSIVE ? 1 : out.num_voxels();
+  if (out.aggregation_weights.size() < num_aggregation_weights) {
+
+    out.aggregation_weights.resize(num_aggregation_weights);
+  }
+
 #ifndef NDEBUG
-  w.fill(std::numeric_limits<default_type>::signaling_NaN());
-  Xr.fill(std::numeric_limits<default_type>::signaling_NaN());
+  shrinkage_weights.fill(std::numeric_limits<default_type>::signaling_NaN());
+  out.Xr.fill(std::numeric_limits<default_type>::signaling_NaN());
+  out.aggregation_weights.fill(std::numeric_limits<default_type>::signaling_NaN());
 #endif
 
   // Generate weights vector
-  double sum_weights = 0.0;
+  out.sum_shrinkage_weights = 0.0;
+  out.rank_recon = 0;
   double sum_variance = 0.0;
-  ssize_t out_rank = 0;
-  if (bool(Estimate<F>::threshold)) {
+  if (static_cast<bool>(out.threshold)) {
     switch (filter) {
     case filter_type::OPTSHRINK: {
-      w.head(rz).setZero();
+      shrinkage_weights.head(rz).setZero();
       const double transition = 1.0 + std::sqrt(beta);
-      for (ssize_t i = rz; i != r; ++i) {
+      for (ssize_t i = rz; i != out.rank_pca; ++i) {
         // TODO For non-binary determination of weights for optimal shrinkage,
         //   should the expression be identical between BDCSVD and SelfAdjointEigenSolver?
         //   Or eg. is one equivalent to scaling singular values whereas the other is equivalent to scaling eigenvalues?
-        const double lam = Estimate<F>::s[i] / qnz;
-        const double y = std::sqrt(lam / Estimate<F>::threshold.sigma2);
-        // const double y = lam / Estimate<F>::threshold.sigma2;
+        const double lam = out.eigenspectrum[i] / qnz;
+        const double y = std::sqrt(lam / out.threshold.sigma2);
         double nu = 0.0;
         if (y > transition) {
           // Occasionally floating-point precision will drive this calculation to fractionally greater than y,
           //   which will erroneously yield a weight fractionally greater than 1.0
           nu = std::min(y, std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y);
-          ++out_rank;
+          ++out.rank_recon;
         }
-        w[i] = lam > 0.0 ? (nu / y) : 0.0;
-        assert(w[i] >= 0.0 && w[i] <= 1.0);
-        sum_weights += w[i];
-        sum_variance += w[i] * Estimate<F>::s[i];
+        shrinkage_weights[i] = lam > 0.0 ? (nu / y) : 0.0;
+        assert(shrinkage_weights[i] >= 0.0 && shrinkage_weights[i] <= 1.0);
+        out.sum_shrinkage_weights += shrinkage_weights[i];
+        sum_variance += shrinkage_weights[i] * out.eigenspectrum[i];
       }
     } break;
     case filter_type::OPTTHRESH: {
@@ -105,46 +119,46 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       } else {
         lambda_star = it->second;
       }
-      const double tau_star = lambda_star * std::sqrt(qnz) * std::sqrt(Estimate<F>::threshold.sigma2);
+      const double tau_star = lambda_star * std::sqrt(qnz) * std::sqrt(out.threshold.sigma2);
       // TODO Unexpected requisite square applied to qnz here
       const double threshold = tau_star * Math::pow2(qnz);
-      w.head(rz).setZero();
-      for (ssize_t i = rz; i != r; ++i) {
-        if (Estimate<F>::s[i] >= threshold) {
-          w[i] = 1.0;
-          ++out_rank;
-          sum_variance += Estimate<F>::s[i];
+      shrinkage_weights.head(rz).setZero();
+      for (ssize_t i = rz; i != out.rank_pca; ++i) {
+        if (out.eigenspectrum[i] >= threshold) {
+          shrinkage_weights[i] = 1.0;
+          ++out.rank_recon;
+          sum_variance += out.eigenspectrum[i];
         } else {
-          w[i] = 0.0;
+          shrinkage_weights[i] = 0.0;
         }
       }
-      sum_weights = out_rank;
+      out.sum_shrinkage_weights = static_cast<double>(out.rank_recon);
     } break;
     case filter_type::TRUNCATE:
-      out_rank = r - Estimate<F>::threshold.cutoff_p;
-      w.head(Estimate<F>::threshold.cutoff_p).setZero();
-      w.segment(Estimate<F>::threshold.cutoff_p, out_rank).setOnes();
-      sum_weights = double(out_rank);
-      sum_variance += w.head(r).matrix().dot(Estimate<F>::s.head(r).matrix());
+      out.rank_recon = out.rank_pca - out.threshold.cutoff_p;
+      shrinkage_weights.head(out.threshold.cutoff_p).setZero();
+      shrinkage_weights.segment(out.threshold.cutoff_p, out.rank_recon).setOnes();
+      out.sum_shrinkage_weights = static_cast<double>(out.rank_recon);
+      sum_variance += shrinkage_weights.head(out.rank_pca).matrix().dot(out.eigenspectrum.head(out.rank_pca).matrix());
       break;
     default:
       assert(false);
     }
-    assert(std::isfinite(sum_weights));
+    assert(std::isfinite(out.sum_shrinkage_weights));
   } else { // Threshold for this patch is invalid
     // Erring on the conservative side:
     //   If the decomposition fails, or a threshold can't be found,
     //   copy the input data to the output data as-is,
     //   regardless of whether performing overcomplete local PCA
-    w.head(r).setOnes();
-    out_rank = r;
-    sum_weights = r;
-    sum_variance = Estimate<F>::s.sum();
+    shrinkage_weights.head(out.rank_pca).setOnes();
+    out.rank_recon = out.rank_pca;
+    out.sum_shrinkage_weights = out.rank_pca;
+    sum_variance = out.eigenspectrum.head(out.rank_pca).sum();
   }
-  assert(w.head(r).allFinite());
-  const double variance_removed = 1.0 - sum_variance / Estimate<F>::s.sum();
+  assert(shrinkage_weights.head(out.rank_pca).allFinite());
+  out.variance_removed = 1.0 - sum_variance / out.eigenspectrum.head(out.rank_pca).sum();
 
-  // Recombine data using only eigenvectors above threshold
+  // Recombine data using eigenvalue weights
   // If only the data computed when this voxel was the centre of the patch
   //   is to be used for synthesis of the output image,
   //   then only that individual column needs to be reconstructed;
@@ -153,135 +167,109 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
   //   then we need to instead compute the full projection
   switch (aggregator) {
   case aggregator_type::EXCLUSIVE: {
-    assert(Estimate<F>::patch.centre_index >= 0);
-    if (bool(Estimate<F>::threshold)) {
+    // If doing exclusive aggregation,
+    //   cannot be using a kernel that isn't exactly centred at the voxel being denoised
+    assert(out.patch.centre_index != -1);
+    if (static_cast<bool>(out.threshold)) {
       switch (Estimate<F>::decomp) {
       case decomp_type::BDCSVD: {
         assert(Estimate<F>::SVD.matrixU().allFinite());
         assert(Estimate<F>::SVD.matrixV().allFinite());
-        assert(w.head(r).allFinite());
+        assert(shrinkage_weights.head(out.rank_pca).allFinite());
         assert(Estimate<F>::SVD.singularValues().allFinite());
         // TODO Re-try reconstruction without use of V:
         //   https://github.com/MRtrix3/mrtrix3/pull/2906/commits/eb34f3c57dd460d2b3bd86b9653066be15e916c6
         // It might be that in the case of anything other than EXCLUSIVE,
         //   computing V is no more expensive than doing the full patch reconstruction in its absence,
         //   whereas for EXCLUSIVE since only a small portion of V is used it's worthwhile
-        Xr.noalias() =                                                                 //
-            Estimate<F>::SVD.matrixU() *                                               //
-            (w.head(r).reverse().template cast<F>().array() *                          //
-             Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() *        //
-            Estimate<F>::SVD.matrixV().row(Estimate<F>::patch.centre_index).adjoint(); //
+        out.Xr.noalias() =                                                               //
+            Estimate<F>::SVD.matrixU() *                                                 //
+            (shrinkage_weights.head(out.rank_pca).reverse().template cast<F>().array() * //
+             Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() *          //
+            Estimate<F>::SVD.matrixV().row(out.patch.centre_index).adjoint();            //
       } break;
       case decomp_type::SELFADJOINT: {
-        if (Estimate<F>::m <= n)
-          Xr.noalias() =                                               //
-              Estimate<F>::eig.eigenvectors() *                        //
-              (w.head(r).template cast<F>().matrix().asDiagonal() *    //
-               (Estimate<F>::eig.eigenvectors().adjoint() *            //
-                Estimate<F>::X.col(Estimate<F>::patch.centre_index))); //
+        if (Estimate<F>::values_per_voxel <= out.num_voxels())
+          out.Xr.noalias() =                                                                   //
+              Estimate<F>::eig.eigenvectors() *                                                //
+              (shrinkage_weights.head(out.rank_pca).template cast<F>().matrix().asDiagonal() * //
+               (Estimate<F>::eig.eigenvectors().adjoint() *                                    //
+                Estimate<F>::X.col(out.patch.centre_index)));                                  //
         else
-          Xr.noalias() =                                                                          //
-              Estimate<F>::X.leftCols(n) *                                                        //
-              (Estimate<F>::eig.eigenvectors() *                                                  //
-               (w.head(r).template cast<F>().matrix().asDiagonal() *                              //
-                Estimate<F>::eig.eigenvectors().adjoint().col(Estimate<F>::patch.centre_index))); //
+          out.Xr.noalias() =                                                                    //
+              Estimate<F>::X.leftCols(out.num_voxels()) *                                       //
+              (Estimate<F>::eig.eigenvectors() *                                                //
+               (shrinkage_weights.head(out.rank_pca).template cast<F>().matrix().asDiagonal() * //
+                Estimate<F>::eig.eigenvectors().adjoint().col(out.patch.centre_index)));        //
       } break;
       }
-      assert(Xr.allFinite());
+      assert(out.Xr.allFinite());
     } else {
       // In the case of -aggregator exclusive,
       //   where a decomposition fails or we can't find a threshold,
       //   we simply copy the input data into the output image
-      Xr.noalias() = Estimate<F>::X.col(Estimate<F>::patch.centre_index);
-    }
-    assign_pos_of(dwi).to(out);
-    out.row(3) = Xr.col(0);
-    if (Estimate<F>::exports.sum_aggregation.valid()) {
-      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.sum_aggregation);
-      Estimate<F>::exports.sum_aggregation.value() = 1.0;
-    }
-    if (Estimate<F>::exports.rank_output.valid()) {
-      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.rank_output);
-      Estimate<F>::exports.rank_output.value() = out_rank;
+      out.Xr.noalias() = Estimate<F>::X.col(out.patch.centre_index);
     }
   } break;
   default: { // All aggregators other than EXCLUSIVE
-    if (!Estimate<F>::threshold) {
-      Xr.leftCols(n).noalias() = Estimate<F>::X.leftCols(n);
-    } else {
+    if (static_cast<bool>(out.threshold)) {
       switch (Estimate<F>::decomp) {
       case decomp_type::BDCSVD:
-        Xr.leftCols(n).noalias() =                                              //
-            Estimate<F>::SVD.matrixU() *                                        //
-            (w.head(r).reverse().template cast<F>().array() *                   //
-             Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() * //
-            Estimate<F>::SVD.matrixV().adjoint();                               //
+        out.Xr.leftCols(out.num_voxels()).noalias() =                                    //
+            Estimate<F>::SVD.matrixU() *                                                 //
+            (shrinkage_weights.head(out.rank_pca).reverse().template cast<F>().array() * //
+             Estimate<F>::SVD.singularValues().array()).matrix().asDiagonal() *          //
+            Estimate<F>::SVD.matrixV().adjoint();                                        //
         break;
       case decomp_type::SELFADJOINT:
-        if (Estimate<F>::m <= n) {
-          Xr.leftCols(n).noalias() =                                //
-              Estimate<F>::eig.eigenvectors() *                     //
-              (w.head(r).template cast<F>().matrix().asDiagonal() * //
-               (Estimate<F>::eig.eigenvectors().adjoint() *         //
-                Estimate<F>::X.leftCols(n)));                       //
+        if (Estimate<F>::values_per_voxel <= out.num_voxels()) {
+          out.Xr.leftCols(out.num_voxels()).noalias() =                                        //
+              Estimate<F>::eig.eigenvectors() *                                                //
+              (shrinkage_weights.head(out.rank_pca).template cast<F>().matrix().asDiagonal() * //
+               (Estimate<F>::eig.eigenvectors().adjoint() *                                    //
+                Estimate<F>::X.leftCols(out.num_voxels())));                                   //
         } else {
-          Xr.leftCols(n).noalias() =                                 //
-              Estimate<F>::X.leftCols(n) *                           //
-              (Estimate<F>::eig.eigenvectors() *                     //
-               (w.head(r).template cast<F>().matrix().asDiagonal() * //
-                Estimate<F>::eig.eigenvectors().adjoint()));         //
+          out.Xr.leftCols(out.num_voxels()).noalias() =                                         //
+              Estimate<F>::X.leftCols(out.num_voxels()) *                                       //
+              (Estimate<F>::eig.eigenvectors() *                                                //
+               (shrinkage_weights.head(out.rank_pca).template cast<F>().matrix().asDiagonal() * //
+                Estimate<F>::eig.eigenvectors().adjoint()));                                    //
         }
         break;
       }
+    } else {
+      out.Xr.leftCols(out.num_voxels()).noalias() = Estimate<F>::X.leftCols(out.num_voxels());
     }
-    assert(Xr.leftCols(n).allFinite());
+    assert(out.Xr.leftCols(out.num_voxels()).allFinite());
     // Undo prior within-patch variance-stabilising transform
-    if (std::isfinite(Estimate<F>::patch.centre_noise)) {
-      for (ssize_t i = 0; i != n; ++i)
-        if (Estimate<F>::patch.voxels[i].noise_level > 0.0)
-          Xr.col(i) *= Estimate<F>::patch.voxels[i].noise_level / Estimate<F>::patch.centre_noise;
-    }
-    std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
-    for (size_t voxel_index = 0; voxel_index != Estimate<F>::patch.voxels.size(); ++voxel_index) {
-      assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(out);
-      assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index).to(Estimate<F>::exports.sum_aggregation);
-      double weight = std::numeric_limits<double>::signaling_NaN();
-      switch (aggregator) {
-      case aggregator_type::EXCLUSIVE:
-        assert(false);
-        break;
-      case aggregator_type::GAUSSIAN:
-        weight = std::exp(gaussian_multiplier * Estimate<F>::patch.voxels[voxel_index].sq_distance);
-        break;
-      case aggregator_type::INVL0:
-        weight = 1.0 / (1 + out_rank);
-        break;
-      case aggregator_type::RANK:
-        weight = out_rank;
-        break;
-      case aggregator_type::UNIFORM:
-        weight = 1.0;
-        break;
-      }
-      out.row(3) += weight * Xr.col(voxel_index);
-      Estimate<F>::exports.sum_aggregation.value() += weight;
-      if (Estimate<F>::exports.rank_output.valid()) {
-        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
-        Estimate<F>::exports.rank_output.value() += weight * out_rank;
-      }
+    if (std::isfinite(out.patch.centre_noise)) {
+      for (ssize_t i = 0; i != out.num_voxels(); ++i)
+        if (out.patch.voxels[i].noise_level > 0.0)
+          out.Xr.col(i) *= out.patch.voxels[i].noise_level / out.patch.centre_noise;
     }
   } break;
   }
 
-  auto ss_index = Estimate<F>::subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
-  if (Estimate<F>::exports.sum_optshrink.valid()) {
-    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.sum_optshrink);
-    Estimate<F>::exports.sum_optshrink.value() = sum_weights;
+  switch (aggregator) {
+  case aggregator_type::EXCLUSIVE:
+    out.aggregation_weights = vector_type::Ones(1);
+    break;
+  case aggregator_type::GAUSSIAN:
+    for (ssize_t voxel_index = 0; voxel_index != out.num_voxels(); ++voxel_index)
+      out.aggregation_weights[voxel_index] = std::exp(gaussian_multiplier * out.patch.voxels[voxel_index].sq_distance);
+    break;
+  case aggregator_type::INVL0:
+    out.aggregation_weights.head(out.num_voxels()).setConstant(1.0 / (1 + out.rank_recon));
+    break;
+  case aggregator_type::RANK:
+    out.aggregation_weights.head(out.num_voxels()).setConstant(out.rank_recon);
+    break;
+  case aggregator_type::UNIFORM:
+    out.aggregation_weights.head(out.num_voxels()).setOnes();
+    break;
   }
-  if (Estimate<F>::exports.variance_removed.valid()) {
-    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.variance_removed);
-    Estimate<F>::exports.variance_removed.value() = variance_removed;
-  }
+
+  return true;
 }
 
 template class Recon<float>;

@@ -21,7 +21,6 @@
 #include "denoise/denoise.h"
 
 #include <memory>
-#include <mutex>
 
 #include <Eigen/Dense>
 #include <Eigen/SVD>
@@ -41,31 +40,42 @@
 
 namespace MR::Denoise {
 
+// TODO Define a class that encapsulates all results of the decomposition,
+//   excluding the denoised version of the input data
+class EstimatedPatch {
+public:
+  EstimatedPatch() : rank_pca(-1), rank_pcanonzero(-1), valid(false) {}
+  Kernel::Data patch;
+  eigenvalues_type eigenspectrum;
+  ssize_t rank_pca;
+  ssize_t rank_pcanonzero;
+  bool valid;
+  Estimator::Result threshold;
+
+  const ssize_t num_voxels() const { return patch.num_voxels(); }
+};
+
 template <typename F> class Estimate {
 
 public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
 
   Estimate(const Image<F> &image,
-           std::shared_ptr<Subsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
            decomp_type decomp,
            std::shared_ptr<Estimator::Base> estimator,
-           Exports &exports,
            const ssize_t preconditioner_rank = 0,
            const bool enable_recon = false);
 
   Estimate(const Estimate &);
 
-  void operator()(Image<F> &dwi);
-
-  void report_warnings() const;
+  bool operator()(const Kernel::Voxel::index_type &pos, EstimatedPatch &out);
 
 protected:
-  const ssize_t m;
+  Image<F> image;
+  const ssize_t values_per_voxel;
 
   // Denoising configuration
-  std::shared_ptr<Subsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
   decomp_type decomp;
   std::shared_ptr<Estimator::Base> estimator;
@@ -73,9 +83,7 @@ protected:
   bool enable_recon;
 
   // Reusable memory
-  Kernel::Data patch;
   MatrixType X;
-
   // TODO For both BDCSVD and SelfAdjointEigenSolver,
   //   the template type is MatrixType,
   //   and it doesn't seem to be possible to define an Eigen::Block as this template type;
@@ -92,23 +100,7 @@ protected:
   MatrixType XtX;
   Eigen::SelfAdjointEigenSolver<MatrixType> eig;
 
-  eigenvalues_type s;
-  Estimator::Result threshold;
-
-  // Export images
-  // Note: One instance created per thread,
-  //   so that when possible output image data can be written without mutex-locking
-  Exports exports;
-
-  // Some data can only be written in a thread-safe manner
-  static std::mutex mutex;
-
-  static std::atomic<ssize_t> pca_failure_counter;
-
-  void load_data(Image<F> &image);
+  void load_data(const Kernel::Data &patch);
 };
-
-template <typename F> std::mutex Estimate<F>::mutex;
-template <typename F> std::atomic<ssize_t> Estimate<F>::pca_failure_counter;
 
 } // namespace MR::Denoise

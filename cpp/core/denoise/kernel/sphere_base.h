@@ -56,6 +56,7 @@ protected:
   };
 
   std::shared_ptr<Shared> shared;
+  // TODO Should this be in Base?
   const ssize_t centre_index;
 
   // Determine an appropriate bounding box from which to generate the search table

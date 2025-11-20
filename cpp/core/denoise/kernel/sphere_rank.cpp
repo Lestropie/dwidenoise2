@@ -35,7 +35,7 @@ Data SphereRank::operator()(const Voxel::index_type &pos) const {
   }
   // For thread-safety
   Image<bool> mask(mask_image);
-  Data result(realpos, centre_index);
+  Data result(pos, realpos, centre_index);
   auto table_it = shared->begin();
   // Here it's best to keep track of both the squared radius and the radius;
   //   they are used for different purposes
