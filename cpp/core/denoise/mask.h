@@ -39,6 +39,13 @@ namespace MR::Denoise {
 //   which conflicts with how this is currently managed,
 //   where the mask is computed only once before the first iteration
 
+// TODO This operation may run faster if,
+//   rather than looping over voxels as an outer loop then volumes as an inner loop,
+//   the image were instead looped over along contiguous strides,
+//   with local scratch buffers tracking presence of non-finite values and minima/maxima
+//   (inded maxima / minima might not be required;
+//    just anything that is neither zero nor an existing value might suffice?)
+
 template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>::type generate_mask(Image<T> &image) {
   Header H(image);
   H.ndim() = 3;
@@ -51,8 +58,8 @@ template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>
     T max_value(-std::numeric_limits<typename T::value_type>::infinity(),
                 -std::numeric_limits<typename T::value_type>::infinity());
     bool all_finite = true;
-    for (auto l_inner = Loop(image, 3)(image); l_inner; ++l_inner) {
-      if (!std::isfinite(T(image.value()).real()) || !std::isfinite(T(image.value()).imag())) {
+    for (auto l_inner = Loop(image, 3, image.ndim())(image); l_inner; ++l_inner) {
+      if (!std::isfinite(static_cast<T>(image.value()).real()) || !std::isfinite(static_cast<T>(image.value()).imag())) {
         all_finite = false;
       } else {
         min_value = {std::min(min_value.real(), T(image.value()).real()),
@@ -79,11 +86,11 @@ template <typename T> typename std::enable_if<!is_complex<T>::value, Image<bool>
   H.datatype() = DataType::Bit;
   Image<bool> mask = Image<bool>::scratch(H, "Scratch mask of voxels with valid data for denoising");
   size_t excluded_count(0);
-  for (auto l_voxel = Loop(mask)(image, mask); l_voxel; ++l_voxel) {
+  for (auto l_voxel = Loop("Scanning image for invalid voxels", mask)(image, mask); l_voxel; ++l_voxel) {
     T min_value(std::numeric_limits<T>::infinity());
     T max_value(-std::numeric_limits<T>::infinity());
     bool all_finite = true;
-    for (auto l_inner = Loop(image, 3)(image); l_inner; ++l_inner) {
+    for (auto l_inner = Loop(image, 3, image.ndim())(image); l_inner; ++l_inner) {
       if (!std::isfinite(image.value())) {
         all_finite = false;
       } else {
