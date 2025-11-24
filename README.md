@@ -22,6 +22,18 @@ Within this container, the two most relevant commands are `dwidenoise2` and `dwi
 a limited subset of *MRtrix3* core commands are also compiled in the container
 due to their utility in converting the image data that are input / output for these commands.
 
+### Default usage
+
+```ShellSession
+docker run -it --rm -v $(pwd):/data dwidenoise2:latest \
+    dwidenoise2 ...
+```
+
+Note that despite the Docker image bbeing named "`dwidenoise2`",
+it is still necessary to specify that it is the command named "`dwidenoise2`"
+within the constructed container that is to be executed;
+this is because of the container providing several other commands also.
+
 ### `dwidenoise2` vs. `dwi2noise`
 
 These two commands are very similar in function and operation.
@@ -90,6 +102,29 @@ docker run -it --rm -v $(pwd):/data dwidenoise2:latest \
 
 This "multi-file numbered image" format will split the 5D image along the final axis
 across multiple 4D image files, numbering them consecutively from 0.
+
+### Debugging
+
+If a particular dataset proves to be problematic for the implementation,
+a request may be made to re-run the dataset utilising the debugging version of the Docker image.
+This is achieved as follows:
+
+```ShellSession
+docker build . -f Dockerfile_debug -t dwidenoise2:debug
+docker run -it --rm -v $(pwd):/data dwidenoise2:debug \
+    ...
+```
+
+Unlike the default usage above,
+the "`dwidenoise2`" command does not need to be explicitly specified here;
+for specifically the debugging container,
+that command is the hard-coded entrypoint.
+What will appear in the terminal is the interface to the GNU Debugging Tool (`gdb`).
+First, hit "`r`" then Enter to commence running the program
+(note that command execution will progress more slowly than the standard container).
+If the command encounters some problem during execution,
+type "`bt`" then Enter to generate the backtrace.
+The resulting data can then be provided to the developer.
 
 ## Technical enhancements
 
