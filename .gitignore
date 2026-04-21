@@ -36,6 +36,7 @@
 *.exe
 *.out
 *.app
+*.sif
 
 # debug information files
 *.dwo

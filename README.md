@@ -8,6 +8,20 @@ It integrates many technical developments in the domain
 since the original derivation of this method and its implementation in *MRtrix3*
 (see "enhancements" section below).
 
+#### Demonstration
+
+From top to bottom: Empirical data; MRtrix3 `dwidenoise`; `dwidenoise2`
+
+![Animation demonstrating denoising efficacy](images/anim.gif)
+
+Demonstration data:
+-   Siemens Prisma Fit 3T
+-   1.8mm isotropic, multi-band factor 4, SENSE1+ multi-coil combination (CMRR sequence)
+-   *b* = 0 (8), 300 (11), 1600 (26), 5000 (64) (only *b*=5000 volumes shown)
+-   Gradient table split between A>>P and P>>A phase encoding directions (only A>>P volumes shown)
+-   Denoising applied to complex data
+-   Runtimes on Dell Latitude 5531: `dwidenoise` 287s; `dwidenoise2` 181s
+
 ## Usage
 
 Currently the simplest way to utilise the software is through a container.
@@ -29,7 +43,7 @@ docker run -it --rm -v $(pwd):/data dwidenoise2:latest \
     dwidenoise2 ...
 ```
 
-Note that despite the Docker image bbeing named "`dwidenoise2`",
+Note that despite the Docker image being named "`dwidenoise2`",
 it is still necessary to specify that it is the command named "`dwidenoise2`"
 within the constructed container that is to be executed;
 this is because of the container providing several other commands also.
