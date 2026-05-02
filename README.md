@@ -12,7 +12,7 @@ since the original derivation of this method and its implementation in *MRtrix3*
 
 From top to bottom: Empirical data; MRtrix3 `dwidenoise`; `dwidenoise2`
 
-![Animation demonstrating denoising efficacy](images/anim.gif)
+<img src=images/anim.gif width="592">
 
 Demonstration data:
 -   Siemens Prisma Fit 3T
