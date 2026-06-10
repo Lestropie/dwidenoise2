@@ -111,4 +111,67 @@ template <typename T> typename std::enable_if<!is_complex<T>::value, Image<bool>
   return mask;
 }
 
+//template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>::type generate_mask(Image<T> &image) {
+//  Header H(image);
+//  H.ndim() = 3;
+//  Image<T> data = Image<T>::scratch(H, "Scratch data for detecting inequal values");
+//  for (auto l = Loop(data)(data); l; ++l)
+//    data.value() = T(std::numeric_limits<typename T::value_type>::quiet_NaN(),
+//                     std::numeric_limits<typename T::value_type>::quiet_NaN());
+//  H.datatype() = DataType::Bit;
+//  Image<bool> nonzerovar_mask = Image<bool>::scratch(H, "Scratch mask of voxels with data with non-zero variance");
+//  Image<bool> nonfinite_mask = Image<bool>::scratch(H, "Scratch mask of voxels with non-finite data");
+//  size_t excluded_count(0);
+//  for (auto l = Loop("Scanning image for invalid voxels")(image); l; ++l) {
+//    const T value(static_cast<T>(image.value()));
+//    if (std::isfinite(value.real()) && std::isfinite(value.imag())) {
+//      assign_pos_of(image, 0, 3).to(data);
+//      if (!std::isfinite(static_cast<T>(data.value()).real() && !std::isfinite(static_cast<T>(data.value()).imag()))) {
+//        data.value() = image.value();
+//      } else if (image.value() != data.value()) {
+//        assign_pos_of(image, 0, 3).to(nonzerovar_mask);
+//        nonzerovar_mask.value() = true;
+//      }
+//    } else {
+//      assign_pos_of(image, 0, 3).to(nonfinite_mask);
+//      nonfinite_mask.value() = true;
+//    }
+//  }
+//  Image<bool> mask = Image<bool>::scratch(H, "Scratch mask of voxels with valid data");
+//  for (auto l = Loop(mask)(nonzerovar_mask, nonfinite_mask, mask); l; ++l)
+//    mask.value() = static_cast<bool>(nonzerovar_mask.value()) && !static_cast<bool>(nonfinite_mask.value());
+//  return mask;
+//}
+
+//template <typename T> typename std::enable_if<!is_complex<T>::value, Image<bool>>::type generate_mask(Image<T> &image) {
+//  Header H(image);
+//  H.ndim() = 3;
+//  Image<T> data = Image<T>::scratch(H, "Scratch data for detecting inequal values");
+//  for (auto l = Loop(data)(data); l; ++l)
+//    data.value() = std::numeric_limits<typename T::value_type>::quiet_NaN();
+//  H.datatype() = DataType::Bit;
+//  Image<bool> nonzerovar_mask = Image<bool>::scratch(H, "Scratch mask of voxels with data with non-zero variance");
+//  Image<bool> nonfinite_mask = Image<bool>::scratch(H, "Scratch mask of voxels with non-finite data");
+//  size_t excluded_count(0);
+//  for (auto l = Loop("Scanning image for invalid voxels")(image); l; ++l) {
+//    const T value(static_cast<T>(image.value()));
+//    if (std::isfinite(value)) {
+//      assign_pos_of(image, 0, 3).to(data);
+//      if (!std::isfinite(static_cast<T>(data.value()))) {
+//        data.value() = image.value();
+//      } else if (image.value() != data.value()) {
+//        assign_pos_of(image, 0, 3).to(nonzerovar_mask);
+//        nonzerovar_mask.value() = true;
+//      }
+//    } else {
+//      assign_pos_of(image, 0, 3).to(nonfinite_mask);
+//      nonfinite_mask.value() = true;
+//    }
+//  }
+//  Image<bool> mask = Image<bool>::scratch(H, "Scratch mask of voxels with valid data");
+//  for (auto l = Loop(mask)(nonzerovar_mask, nonfinite_mask, mask); l; ++l)
+//    mask.value() = static_cast<bool>(nonzerovar_mask.value()) && !static_cast<bool>(nonfinite_mask.value());
+//  return mask;
+//}
+
 } // namespace MR::Denoise

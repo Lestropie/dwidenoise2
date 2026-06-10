@@ -25,6 +25,14 @@ namespace MR::Denoise {
 
 using namespace App;
 
+const char *patent_description =
+    "Estimation of the noise level of an image series"
+    " based on the Marchenk--Pastur distribution (-estimator exp1/exp2)"
+    " is protected by the following patent: \n"
+    "WO2016187148A1. "
+    " System, method and computer accessible medium for noise estimation, noise removal and gibbs ringing removal."
+    " Dmitry Novikov, Jelle Veraart, Els Fieremans.";
+
 const char *first_step_description =
     "Important note:"
     " image denoising must be performed as the first step of the image processing pipeline."

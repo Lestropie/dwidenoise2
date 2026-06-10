@@ -8,7 +8,34 @@ It integrates many technical developments in the domain
 since the original derivation of this method and its implementation in *MRtrix3*
 (see "enhancements" section below).
 
-#### Demonstration
+### References
+
+The primary scientific citation for utilising MP-PCA for MRI data denoising is:
+
+J. Veraart, D. Novikov, D. Chrisiaens, B. Ades-aron, J. Sijbers, E. Fieremans.
+Denoising of diffusion MRI using random matrix theory.
+Neuroimage 2016:142;394--406.
+
+For performing noise level estimation one should also cite:
+
+J. Veraart, E. Fieremans, D.S. Novikov.
+Diffusion MRI noise mapping using random matrix theory.
+Magnetic Resonance in Medicine 2016:76(5);1582--1593.
+
+Further references relating to specific feature augumentations
+are provided in the "technical enhancements" section below,
+and are additionally provided in the command help pages.
+
+### Permissions
+
+`dwidenoise2` is distributed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+Commercial utilisation of the MP-PCA method is restricted by the following patent:
+
+WO2016187148A1
+System, method and computer accessible medium for noise estimation, noise removal and gibbs ringing removal.
+Dmitry Novikov, Jelle Veraart, Els Fieremans.
+
+### Demonstration
 
 From top to bottom: Empirical data; MRtrix3 `dwidenoise`; `dwidenoise2`
 
@@ -164,12 +191,30 @@ In `dwidenoise2` complex input data can be explicitly demodulated prior to PCA.
 By default a smooth *nonlinear* phase map for demodulation is derived
 through *k*-space filtering with a Hann window.
 
+The *linear* phase demodulation approach is similar to that shown in the manuscript:
+
+L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.
+Complex diffusion-weighted image estimation via matrix recovery under general noise models.
+NeuroImage 2019:200;391-404.
+
+Inclusion of the default *non-linear* phase demodulation was motivated by description in the manuscript:
+
+J.P.M. Patron, S. Moeller, J.L.R. Andersson, K. Ugurbil, E. Yacoub, S.N. Sotiropoulos.
+Denoising diffusion MRI: Considerations and implications for analysis .
+Imaging Neuroscience 2024:2;00060.
+
 ### Optimal shrinkage
 
 *MRtrix3* `dwidenoise` achieves denoising through a hard truncation of singular values.
 `dwidenoise2` instead uses optimal shrinkage of singular values based on minimisation of the Frobenius norm.
+This was first demonstrated for denoising of diffusion MRI in the following manuscript:
+
+L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.
+Complex diffusion-weighted image estimation via matrix recovery under general noise models.
+NeuroImage 2019:200;391-404.
 
 ### Overcomplete local PCA
+
 For each output image voxel, 
 *MRtrix3* `dwidenoise` computes the denoised version of the data for that voxel
 through truncation of the PCA where that voxel was at the centre of the kernel.
@@ -179,6 +224,11 @@ of which that voxel was a member.
 By default the contribution of each PCA patch to that output image voxel
 is weighted based on a Gaussian distribution on the distance between the voxel
 and the centre of the patch.
+This was first shown in the denoising of diffusion MRI in the following manuscript:
+
+J.V. Manjon, P. Coupe, L. Concha, A. Buades, D.L. Collins, M. Robles.
+Diffusion Weighted Image Denoising Using Overcomplete Local PCA.
+PLoS ONE 2013:8(9);e73021.
 
 ### Sliding window kernel shape
 
@@ -188,9 +238,16 @@ compared to a cuboid kernel with the same number of voxels,
 the maximal distance of any voxel to the centre of the patch is reduced.
 The kernel is isotropic in realspace, and therefore suitably accounts for anisotropic voxels.
 
+This was first shown for diffusion MRI denoising in the following manuscript:
+
+L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.
+Complex diffusion-weighted image estimation via matrix recovery under general noise models.
+NeuroImage 2019:200;391-404.
+
 For patches near the edge of the image FoV,
-the patch is dynamically increased in radius in order to have approximately
-the same number of voxels within that patch as a patch in the middle of the image.
+the patch under default behaviour is dynamically increased in radius
+in order to have approximately the same number of voxels within that patch
+as a patch in the middle of the image.
 
 ### Demeaning
 
@@ -199,7 +256,7 @@ the same number of voxels within that patch as a patch in the middle of the imag
 
 -   For multi-echo fMRI data, where echoes are concatenated across the fifth image axis,
     the mean intensity per echo is regressed from the data prior to PCA.
-        This reduces the rank of the signal and better exposes the distribution of noise components.
+    This reduces the rank of the signal and better exposes the distribution of noise components.
 
 ### Subsampling
 
@@ -210,6 +267,12 @@ Where subsampling is performed by an even factor,
 the PCA kernel is centred in between input image voxels
 in order to reduce biases in denoising arising from different voxels having different
 distances to the kernels to which it contributes.
+
+This was first demonstrated in the following manuscript:
+
+L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.
+Complex diffusion-weighted image estimation via matrix recovery under general noise models.
+NeuroImage 2019:200;391-404.
 
 ### Variance-stabilising transform
 
@@ -227,7 +290,7 @@ or by that estimated from a previous iteration (see below).
 ### Multi-resolution iterative noise map refinement
 
 Where an input a priori noise map estimate is not provided,
-`dwidenoise2` uses an iterative approach to derive the estimated noise level prior to denoising.
+`dwidenoise2` uses a novel iterative approach to derive the estimated noise level prior to denoising.
 Initially, a low-resolution noise map is estimated assuming homoscedasticity (equal noise level everywhere).
 The noise map is subsequently re-estimated at a higher spatial resolution,
 with the noise map estimate from the previous iteration utilised by the variance-stabilising transform.

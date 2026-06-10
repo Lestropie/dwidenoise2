@@ -53,13 +53,16 @@ void usage() {
     " hence provides an estimator of the noise level 'sigma'."
 
   + "Unlike the MRtrix3 command dwidenoise,"
-    " this command does not generate a denoised version of the input image series;"
+    " or command dwidenoise2 with which this command dwi2noise is provided,"
+    " dwi2noise does not generate a denoised version of the input image series;"
     " its primary output is instead a map of the estimated noise level."
-    " While this can also be obtained from the dwidenoise command using option -noise_out,"
+    " While this can also be obtained from the dwidenoise2 command using option -noise_out,"
     " using instead the dwi2noise command gives the ability to obtain a noise map"
     " to which filtering can be applied,"
     " which can then be utilised for the actual image series denoising,"
-    " without generating an unwanted intermiedate denoised image series."
+    " without computing an unwanted intermediate denoised image series."
+
+  + Denoise::patent_description
 
   + "Important note:"
     " noise level estimation should only be performed as the first step of an image processing pipeline."

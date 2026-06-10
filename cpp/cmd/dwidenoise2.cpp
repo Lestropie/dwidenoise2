@@ -70,7 +70,9 @@ void usage() {
     " is based on the prior knowledge that the eigenspectrum of random covariance matrices"
     " is described by the universal Marchenko-Pastur (MP) distribution."
 
-  + "This command includes many capabilities absent from the original dwidenoise command. "
+  + Denoise::patent_description
+
+  + "This command includes many capabilities absent from the original MRtrix3 dwidenoise command. "
     "These include:"
     " - Multiple sliding window kernel shapes,"
       " including a spherical kernel that dilates at image edges to preserve aspect ratio;"
