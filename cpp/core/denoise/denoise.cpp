@@ -29,9 +29,10 @@ const char *patent_description =
     "Estimation of the noise level of an image series"
     " based on the Marchenk--Pastur distribution (-estimator exp1/exp2)"
     " is protected by the following patent: \n"
-    "WO2016187148A1. "
+    "US10698065B2."
     " System, method and computer accessible medium for noise estimation, noise removal and gibbs ringing removal."
-    " Dmitry Novikov, Jelle Veraart, Els Fieremans.";
+    " Dmitry Novikov, Jelle Veraart, Els Fieremans."
+    " Contact: https://tov.med.nyu.edu/about/contact-us/";
 
 const char *first_step_description =
     "Important note:"

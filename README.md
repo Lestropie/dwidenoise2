@@ -31,9 +31,10 @@ and are additionally provided in the command help pages.
 `dwidenoise2` is distributed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
 Commercial utilisation of the MP-PCA method is restricted by the following patent:
 
-WO2016187148A1
+US10698065B2
 System, method and computer accessible medium for noise estimation, noise removal and gibbs ringing removal.
 Dmitry Novikov, Jelle Veraart, Els Fieremans.
+Contact: https://tov.med.nyu.edu/about/contact-us/
 
 ### Demonstration
 
@@ -215,7 +216,7 @@ NeuroImage 2019:200;391-404.
 
 ### Overcomplete local PCA
 
-For each output image voxel, 
+For each output image voxel,
 *MRtrix3* `dwidenoise` computes the denoised version of the data for that voxel
 through truncation of the PCA where that voxel was at the centre of the kernel.
 `dwidenoise2` instead reconstructs the denoised data for each output voxel
