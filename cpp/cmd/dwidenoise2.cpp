@@ -129,7 +129,30 @@ void usage() {
             "By concatenating echoes along a new fifth image axis,"
             " the program will by default calculate the mean intensity per echo "
             " and regress this from the data prior to PCA; "
-            " this should reduce the signal rank and increase PCA precision.");
+            " this should reduce the signal rank and increase PCA precision. "
+            " One may also wish to consider the use of -filter thresh in the context of fMRI, "
+            " as it results in the least variance loss (for a given noise level estimator) "
+            " and therefore the least risk of BOLD signal attenuation.")
+
+  + Example("Denoising a very large image series",
+            "dwidenoise2 in.mif out.mif -onepass -decomposition selfadjoint -aspect_ratio 1.0 -subsample 6",
+            "Pending future software updates aimed at improving computational tractability for very large series,"
+            " there are some tweaks that can be applied utilising existing command-line options"
+            " to make computation more feasible for data larger than the typical DWI acquisition."
+            " -onepass option does a single noise level estimation and denoising step,"
+            " rather than the default iterative multi-resolution approach,"
+            " which means that variance-stabilising transformation will not be applied."
+            " The self-adjoint decomposition is not as numerically precise as the newer BDCSVD decomposition"
+            " but is typically around twice as fast."
+            " A spherical kernel with an aspect ratio of 1.0 is as small as one should go"
+            " before endangering erroneous noise level estimation and potentially biological signal removal."
+            " For large image series the sliding kernels become very large,"
+            " and so the ratio of number of voxels to number of kernels can be quite large"
+            " while still having the reconstructed data for each image voxel"
+            " come from a large number of denoised patches;"
+            " for ~ 1000 volumes a downsampling ratio of 6 works fine"
+            " (a heuristic for choosing a sensible default subsampling ratio"
+            " based on the size of the input dataset may be added in the future).");
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"

@@ -65,7 +65,11 @@ const char *filter_description =
     "---which was the behaviour of the dwidenoise command in version 3.0.x---"
     "can be activated using -filter truncate."
     "Alternatively, optimal truncation as described in Gavish and Donoho 2014 "
-    "can be utilised by specifying -filter optthresh.";
+    "can be utilised by specifying -filter optthresh. "
+    "For denoising of functional MRI data, "
+    "it is hypothesized (though not exhaustively tested) "
+    "that use of -filter truncate may be a superior choice to the default optimal shrinkage "
+    "as it minimises risk of loss of BOLD signal fluctuations near the noise floor.";
 
 const char *aggregation_description =
     "-aggregation exclusive corresponds to the behaviour of the dwidenoise command in version 3.0.x, "
