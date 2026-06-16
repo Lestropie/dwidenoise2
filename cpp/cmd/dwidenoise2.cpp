@@ -103,6 +103,18 @@ void usage() {
 
   + Denoise::non_gaussian_noise_description
 
+  + "For magnitude (or multi-channel sum-of-squares) input data,"
+    " the output by default has the noise-floor bias removed:"
+    " the variance-stabilising transform is reversed in such a way that the per-volume-group mean"
+    " is returned at the bias-free underlying signal level,"
+    " which prevents the characteristic residual \"haze\" that otherwise appears"
+    " in data denoised close to the noise floor,"
+    " while the denoised fluctuations are returned on the original intensity scale."
+    " This behaviour can be disabled using the -preserve_noise_bias option,"
+    " in which case conventional biased-magnitude-scale output is produced (the noise floor is retained)."
+    " For complex input data there is no such bias,"
+    " and the output is unaffected by this option."
+
   + demodulation_description
 
   + Kernel::shape_description
@@ -228,6 +240,9 @@ void usage() {
     + Argument("choice").type_choice(aggregators)
   // TODO For specifically the Gaussian aggregator,
   //   should ideally be possible to select the FWHM of the aggregator
+  + Option("preserve_noise_bias",
+           "retain the noise-floor bias in the output rather than removing it by default"
+           " (no effect for complex input data)")
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise_out",
@@ -320,6 +335,7 @@ void run(Header &dwi,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
+         const bias_handling_t bias_handling,
          const std::string &output_name,
          Exports &final_exports) {
 
@@ -466,7 +482,7 @@ void run(Header &dwi,
   }
 
   // reverse effects of preconditioning
-  preconditioner(output_preconditioned, output, true);
+  preconditioner(output_preconditioned, output, true, bias_handling);
 
   // Modify some optional outputs to better reflect utilisation of preconditioning
   const ssize_t preconditioner_null_rank = preconditioner.null_rank();
@@ -574,6 +590,13 @@ void run() {
   if (!opt.empty())
     aggregator = aggregator_type(int(opt[0][0]));
 
+  const bias_handling_t bias_handling =
+      get_options("preserve_noise_bias").empty() ? bias_handling_t::DEBIAS : bias_handling_t::PRESERVE;
+  if (bias_handling == bias_handling_t::PRESERVE && dwi.datatype().is_complex()) {
+    WARN("Option -preserve_noise_bias has no effect for complex input data: "
+         "there is no noise-floor bias to either preserve or remove");
+  }
+
   auto final_subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
   assert(final_subsample);
   if (aggregator == aggregator_type::EXCLUSIVE &&
@@ -679,6 +702,7 @@ void run() {
         estimator,      //
         filter,         //
         aggregator,     //
+        bias_handling,  //
         argument[1],    //
         final_exports); //
     break;
@@ -695,6 +719,7 @@ void run() {
         estimator,      //
         filter,         //
         aggregator,     //
+        bias_handling,  //
         argument[1],    //
         final_exports); //
     break;
@@ -710,6 +735,7 @@ void run() {
         estimator,      //
         filter,         //
         aggregator,     //
+        bias_handling,  //
         argument[1],    //
         final_exports); //
     break;
@@ -725,6 +751,7 @@ void run() {
         estimator,      //
         filter,         //
         aggregator,     //
+        bias_handling,  //
         argument[1],    //
         final_exports); //
     break;

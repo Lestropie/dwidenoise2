@@ -235,12 +235,6 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       }
     }
     assert(Xr.leftCols(n).allFinite());
-    // Undo prior within-patch variance-stabilising transform
-    if (std::isfinite(Estimate<F>::patch.centre_noise)) {
-      for (ssize_t i = 0; i != n; ++i)
-        if (Estimate<F>::patch.voxels[i].noise_level > 0.0)
-          Xr.col(i) *= Estimate<F>::patch.voxels[i].noise_level / Estimate<F>::patch.centre_noise;
-    }
     std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
     for (size_t voxel_index = 0; voxel_index != Estimate<F>::patch.voxels.size(); ++voxel_index) {
       assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(out);

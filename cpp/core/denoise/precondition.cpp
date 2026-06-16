@@ -230,6 +230,38 @@ vst_inverse(const NoiseModel::Base &model, const T in, const default_type sigma)
   return T(R(model.inverse_algebraic(default_type(in.real()), sigma)),
            R(model.inverse_algebraic(default_type(in.imag()), sigma)));
 }
+
+// Exact-unbiased inverse of the forward variance-stabilising transform,
+//   mapping a stabilised-domain (group) mean to the bias-free underlying level.
+// Applied only to the per-group DC term so that the magnitude noise-floor bias
+//   is not re-introduced into the denoised output.
+template <typename T>
+typename std::enable_if<!is_complex<T>::value, T>::type
+vst_inverse_unbiased(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  return T(model.inverse_unbiased(default_type(in), sigma));
+}
+template <typename T>
+typename std::enable_if<is_complex<T>::value, T>::type
+vst_inverse_unbiased(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  using R = typename T::value_type;
+  return T(R(model.inverse_unbiased(default_type(in.real()), sigma)),
+           R(model.inverse_unbiased(default_type(in.imag()), sigma)));
+}
+
+// Local gain of the inverse transform at the operating point: the linear factor
+//   by which a stabilised-domain residual is mapped back to the intensity scale.
+// For complex (Gaussian) data the gain is identical across the real and imaginary
+//   channels and independent of the operating point, so a single real factor suffices.
+template <typename T>
+typename std::enable_if<!is_complex<T>::value, default_type>::type
+vst_jacobian(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  return model.jacobian(default_type(in), sigma);
+}
+template <typename T>
+typename std::enable_if<is_complex<T>::value, default_type>::type
+vst_jacobian(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  return model.jacobian(default_type(in.real()), sigma);
+}
 } // namespace
 
 template <typename T>
@@ -455,7 +487,11 @@ template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
   }
 }
 
-template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> output, const bool inverse) const {
+template <typename T>
+void Precondition<T>::operator()(Image<T> input,
+                                 Image<T> output,
+                                 const bool inverse,
+                                 const bias_handling_t bias_handling) const {
 
   // For thread-safety / const-ness
   const Transform transform(input);
@@ -473,8 +509,27 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
     assert(dimensions_match(H_in, output));
 
     // The forward order is: phase demodulation -> variance-stabilising transform -> demeaning.
-    // Reversal therefore proceeds in the opposite order:
-    //   re-add the stabilised-domain mean -> invert the variance-stabilising transform -> re-modulate phase.
+    // Reversal therefore proceeds in the opposite order.
+    // Where a noise level map is available, the variance-stabilising transform and
+    //   demeaning are reversed jointly (vst_plan.md section 3.3): the per-group
+    //   operating point (DC term) is mapped through the nonlinear inverse, in one
+    //   of two modes selected by bias_handling, while the denoised residual is
+    //   mapped by a linear gain so that its Gaussian character is preserved.
+    // Where no noise level map is available (the demean-only bootstrap),
+    //   reversal reduces to re-addition of the stored (empirical) mean.
+
+    // Per-group operating point, its mapped DC value and the corresponding local
+    //   gain; sized once and reused across voxels to avoid repeated allocation.
+    const ssize_t num_groups = mean.valid() ? (mean.ndim() == 3 ? 1 : mean.size(3)) : 0;
+    std::vector<T> group_dc(num_groups);
+    std::vector<default_type> group_gain(num_groups);
+
+    if (vst && !mean.valid()) {
+      INFO("Reversing preconditioning without a demeaning reference: "
+           "using the per-voxel temporal mean of the denoised stabilised series "
+           "as the variance-stabilising-transform operating point");
+    }
+
     for (auto l_voxel = Loop("Reversing data preconditioning", H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
 
       for (ssize_t v = 0; v != H_out.size(3); ++v) {
@@ -482,8 +537,52 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
         data[v] = input.value();
       }
 
-      // Step 3 reversal: re-add the stabilised-domain mean
-      if (mean.valid()) {
+      if (vst) {
+        // Interpolate the noise level (variance-stabilising-transform scale) at this voxel.
+        vst->scanner(transform.voxel2scanner *                         //
+                     Eigen::Vector3d({default_type(input.index(0)),    //
+                                      default_type(input.index(1)),    //
+                                      default_type(input.index(2))})); //
+        const default_type sigma = vst->value();
+
+        if (mean.valid()) {
+          // Operating point per group = stored stabilised-domain mean;
+          //   the loaded data are the (already demeaned) denoised residual.
+          assign_pos_of(input, 0, 3).to(mean);
+          for (ssize_t group = 0; group != num_groups; ++group) {
+            if (mean.ndim() > 3)
+              mean.index(3) = group;
+            const T op = mean.value();
+            group_dc[group] = (bias_handling == bias_handling_t::DEBIAS)        //
+                                  ? vst_inverse_unbiased<T>(*noise_model, op, sigma)  //
+                                  : vst_inverse<T>(*noise_model, op, sigma);          //
+            group_gain[group] = vst_jacobian<T>(*noise_model, op, sigma);
+          }
+          for (ssize_t v = 0; v != H_out.size(3); ++v) {
+            const ssize_t group = num_groups == 1                                //
+                                      ? 0                                        //
+                                      : (!index2shell.empty() ? index2shell[v]   //
+                                                              : index2group[v]); //
+            data[v] = group_dc[group] + T(group_gain[group]) * data[v];
+          }
+        } else {
+          // No demeaning reference (-demean none): derive a per-voxel operating
+          //   point from the temporal mean of the denoised stabilised series
+          //   (vst_plan.md section 9), then debias the DC and map the residual linearly.
+          T sum(T(0));
+          for (ssize_t v = 0; v != H_out.size(3); ++v)
+            sum += data[v];
+          const T op = sum / T(H_out.size(3));
+          const T dc = (bias_handling == bias_handling_t::DEBIAS)         //
+                           ? vst_inverse_unbiased<T>(*noise_model, op, sigma)  //
+                           : vst_inverse<T>(*noise_model, op, sigma);          //
+          const default_type gain = vst_jacobian<T>(*noise_model, op, sigma);
+          for (ssize_t v = 0; v != H_out.size(3); ++v)
+            data[v] = dc + T(gain) * (data[v] - op);
+        }
+      } else if (mean.valid()) {
+        // No variance-stabilising transform (demean-only bootstrap):
+        //   reversal is simply re-addition of the stored mean.
         assign_pos_of(input, 0, 3).to(mean);
         if (mean.ndim() == 3) {
           const T mean_value = mean.value();
@@ -502,17 +601,6 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
           assert(false);
           data.fill(std::numeric_limits<T>::signaling_NaN());
         }
-      }
-
-      // Step 2 reversal: invert the variance-stabilising transform
-      if (vst) {
-        vst->scanner(transform.voxel2scanner *                         //
-                     Eigen::Vector3d({default_type(input.index(0)),    //
-                                      default_type(input.index(1)),    //
-                                      default_type(input.index(2))})); //
-        const default_type sigma = vst->value();
-        for (ssize_t v = 0; v != H_out.size(3); ++v)
-          data[v] = vst_inverse<T>(*noise_model, data[v], sigma);
       }
 
       // Step 1 reversal: re-modulate phase

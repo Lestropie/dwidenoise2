@@ -43,6 +43,17 @@ enum class demodulation_t { NONE, LINEAR, NONLINEAR };
 const std::vector<std::string> demean_choices = {"none", "volume_groups", "shells", "all"};
 enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
 
+// Handling of the noise-distribution bias when reversing preconditioning
+//   (the inverse variance-stabilising transform); see vst_plan.md section 3.3.
+// - DEBIAS: map the per-group operating point (DC term) to the bias-free
+//     underlying signal level, removing the magnitude noise-floor bias (the
+//     residual "haze"); the denoised fluctuations are mapped by a linear gain,
+//     so their Gaussian character and the homoscedasticity correction are retained.
+// - PRESERVE: map the operating point to the conventional biased-magnitude level,
+//     reproducing magnitude-scale output with the noise floor retained.
+// For complex (Gaussian) data there is no distribution bias and the two modes coincide.
+enum class bias_handling_t { DEBIAS, PRESERVE };
+
 App::OptionGroup precondition_options(const bool include_output);
 
 class Demodulation {
@@ -92,7 +103,14 @@ public:
     vst_noise_image = new_vst_noise;
     compute_means(input);
   }
-  void operator()(Image<T> input, Image<T> output, const bool inverse = false) const;
+  // The bias_handling argument applies only to the inverse transform
+  //   (inverse == true), selecting how the noise-distribution bias is treated
+  //   in the reconstructed output (see bias_handling_t); it is ignored for the
+  //   forward transform.
+  void operator()(Image<T> input,
+                  Image<T> output,
+                  const bool inverse = false,
+                  const bias_handling_t bias_handling = bias_handling_t::DEBIAS) const;
   const Header &header() const { return H_out; }
 
   ssize_t null_rank() const {
