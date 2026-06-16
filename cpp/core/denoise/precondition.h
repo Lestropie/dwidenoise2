@@ -17,14 +17,20 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include <Eigen/Dense>
+
 #include "app.h"
 #include "denoise/kernel/voxel.h"
+#include "denoise/noise_model/noise_model.h"
 #include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
+#include "interp/cubic.h"
+#include "transform.h"
 #include "types.h"
 
 namespace MR::Denoise {
@@ -72,22 +78,33 @@ template <typename T> struct DemodulatorSelector<std::complex<T>> {
 
 template <typename T> class Precondition {
 public:
-  Precondition(Image<T> &image, const Demodulation &demodulation, const demean_type demean, Image<float> &vst);
+  Precondition(Image<T> &image,
+               const Demodulation &demodulation,
+               const demean_type demean,
+               Image<float> &vst_noise,
+               std::shared_ptr<NoiseModel::Base> noise_model);
   Precondition(Precondition &) = default;
-  void update_vst_image(Image<float> new_vst_image) { vst_image = new_vst_image; }
+  // Refresh both variance-stabilising-transform parameters together:
+  //   the noise level map (VST scale) and, derived from it, the
+  //   stabilised-domain per-group means (VST offset); see vst_plan.md section 3.2.
+  // A pass over the input is required to recompute the stabilised-domain means.
+  void update_vst_parameters(Image<float> new_vst_noise, Image<T> input) {
+    vst_noise_image = new_vst_noise;
+    compute_means(input);
+  }
   void operator()(Image<T> input, Image<T> output, const bool inverse = false) const;
   const Header &header() const { return H_out; }
 
   ssize_t null_rank() const {
-    if (!mean_image.valid())
+    if (!vst_mean_image.valid())
       return 0;
-    if (mean_image.ndim() == 3)
+    if (vst_mean_image.ndim() == 3)
       return 1;
-    return mean_image.size(3);
+    return vst_mean_image.size(3);
   }
 
   bool noop() const {
-    return (num_volume_groups == 1 && !phase_image.valid() && !mean_image.valid() && !vst_image.valid());
+    return (num_volume_groups == 1 && !phase_image.valid() && !vst_mean_image.valid() && !vst_noise_image.valid());
   }
 
 private:
@@ -96,14 +113,35 @@ private:
   // For serialisation of >4D images
   ssize_t num_volume_groups;
   Image<uint32_t> serialise_image;
+  // Noise distribution governing the variance-stabilising transform (VST);
+  //   scalar configuration shared by forward stabilisation and inverse mapping.
+  std::shared_ptr<NoiseModel::Base> noise_model;
   // First step: Phase demodulation
   Image<cfloat> phase_image;
-  // Second step: Demeaning
+  // Second step (forward): variance-stabilising transform.
+  //   The noise level map is the VST scale / dispersion parameter.
+  Image<float> vst_noise_image;
+  // Third step (forward): demeaning, performed in the stabilised domain.
+  //   The stored means are the per-group means of the stabilised data
+  //   (the VST offset parameter; sigma-dependent), not the empirical magnitude means.
   std::vector<ssize_t> index2shell;
   std::vector<ssize_t> index2group;
-  Image<T> mean_image;
-  // Third step: Variance-stabilising transform
-  Image<float> vst_image;
+  Image<T> vst_mean_image;
+
+  // Serialise this voxel's volumes into "data", applying phase demodulation and,
+  //   where a noise level is available, the forward variance-stabilising transform.
+  // This is the common forward preprocessing shared by the Casorati fill
+  //   (operator() forward) and the stabilised-domain mean computation.
+  void serialise_and_stabilise(Image<T> &input,
+                               Image<cfloat> &phase,
+                               Image<uint32_t> &serialise,
+                               const Transform &transform,
+                               Interp::Cubic<Image<float>> *vst,
+                               Eigen::Array<T, Eigen::Dynamic, 1> &data) const;
+
+  // (Re)compute the stabilised-domain per-group means from the input,
+  //   using the currently stored noise level map for stabilisation.
+  void compute_means(Image<T> input);
 };
 
 } // namespace MR::Denoise

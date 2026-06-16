@@ -27,6 +27,7 @@
 #include "denoise/iterative.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/mask.h"
+#include "denoise/noise_model/noise_model.h"
 #include "denoise/precondition.h"
 #include "denoise/subsample.h"
 #include "dwi/gradient.h"
@@ -217,7 +218,17 @@ void run(Header &dwi,
   Image<bool> mask = generate_mask(input);
   Image<float> vst_image(user_vst_image);
 
-  Precondition<T> preconditioner(input, demodulation, demean, user_vst_image);
+  // Select the noise model governing the variance-stabilising transform:
+  //   complex (or phase-demodulated) data are Gaussian; magnitude data default to Rician.
+  // (Channel count and VST method will become user-configurable in a later phase;
+  //   the foi exact-unbiased strategy is the default.)
+  std::shared_ptr<NoiseModel::Base> noise_model =
+      NoiseModel::make(is_complex<T>::value ? NoiseModel::distribution_t::GAUSSIAN  //
+                                            : NoiseModel::distribution_t::RICIAN,   //
+                       1,                                                           //
+                       NoiseModel::vst_method_t::FOI);                              //
+
+  Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
   Image<T> input_preconditioned =
       Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
 
@@ -248,7 +259,7 @@ void run(Header &dwi,
                                              noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
                                              iterations[iteration].smooth_noiseout);
-    preconditioner.update_vst_image(vst_image);
+    preconditioner.update_vst_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
 
     rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");

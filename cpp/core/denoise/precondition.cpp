@@ -17,7 +17,9 @@
 
 #include "denoise/precondition.h"
 
+#include <algorithm>
 #include <limits>
+#include <memory>
 
 #include "algo/copy.h"
 #include "app.h"
@@ -171,15 +173,76 @@ demean_type select_demean(const Header &H) {
   return user_selection;
 }
 
+namespace {
+// Private functions to prevent compiler attempting to create complex functions for real types
+template <typename T>
+typename std::enable_if<std::is_same<T, cfloat>::value, T>::type demodulate(const cfloat in, const cfloat phase) {
+  return in * std::conj(phase);
+}
+template <typename T>
+typename std::enable_if<std::is_same<T, cdouble>::value, T>::type demodulate(const cdouble in, const cfloat phase) {
+  return in * std::conj(cdouble(phase));
+}
+template <typename T>
+typename std::enable_if<!is_complex<T>::value, T>::type demodulate(const T in, const cfloat phase) {
+  assert(false);
+  return in;
+}
+template <typename T>
+typename std::enable_if<std::is_same<T, cfloat>::value, T>::type modulate(const cfloat in, const cfloat phase) {
+  return in * phase;
+}
+template <typename T>
+typename std::enable_if<std::is_same<T, cdouble>::value, T>::type modulate(const cdouble in, const cfloat phase) {
+  return in * cdouble(phase);
+}
+template <typename T> typename std::enable_if<!is_complex<T>::value, T>::type modulate(const T in, const cfloat phase) {
+  assert(false);
+  return in;
+}
+
+// Forward variance-stabilising transform applied to a single datum.
+// For complex (Gaussian) data the transform is applied independently to the
+//   real and imaginary channels, as documented by the NoiseModel interface.
+template <typename T>
+typename std::enable_if<!is_complex<T>::value, T>::type
+vst_forward(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  return T(model.stabilise(default_type(in), sigma));
+}
+template <typename T>
+typename std::enable_if<is_complex<T>::value, T>::type
+vst_forward(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  using R = typename T::value_type;
+  return T(R(model.stabilise(default_type(in.real()), sigma)), R(model.stabilise(default_type(in.imag()), sigma)));
+}
+
+// Algebraic inverse of the forward variance-stabilising transform,
+//   recovering the conventional (still-biased) intensity scale.
+template <typename T>
+typename std::enable_if<!is_complex<T>::value, T>::type
+vst_inverse(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  return T(model.inverse_algebraic(default_type(in), sigma));
+}
+template <typename T>
+typename std::enable_if<is_complex<T>::value, T>::type
+vst_inverse(const NoiseModel::Base &model, const T in, const default_type sigma) {
+  using R = typename T::value_type;
+  return T(R(model.inverse_algebraic(default_type(in.real()), sigma)),
+           R(model.inverse_algebraic(default_type(in.imag()), sigma)));
+}
+} // namespace
+
 template <typename T>
 Precondition<T>::Precondition(Image<T> &image,
                               const Demodulation &demodulation,
                               const demean_type demean,
-                              Image<float> &vst_image)
-    : H_in(image),           //
-      H_out(image),          //
-      num_volume_groups(1),  //
-      vst_image(vst_image) { //
+                              Image<float> &vst_noise,
+                              std::shared_ptr<NoiseModel::Base> noise_model)
+    : H_in(image),                   //
+      H_out(image),                  //
+      num_volume_groups(1),          //
+      noise_model(noise_model),      //
+      vst_noise_image(vst_noise) {   //
 
   for (ssize_t axis = 4; axis != H_in.ndim(); ++axis) {
     num_volume_groups *= H_in.size(axis);
@@ -218,23 +281,20 @@ Precondition<T>::Precondition(Image<T> &image,
   }
 
   // Step 1: Phase demodulation
-  Image<T> dephased;
-  if (demodulation.mode == demodulation_t::NONE) {
-    dephased = image;
-  } else {
+  // Only the smooth phase needs to be retained here;
+  //   the actual demodulation of the data is performed on-the-fly,
+  //   both for the Casorati fill and for the stabilised-domain mean computation.
+  if (demodulation.mode != demodulation_t::NONE) {
     typename DemodulatorSelector<T>::type demodulator(image,                                        //
                                                       demodulation.axes,                            //
                                                       demodulation.mode == demodulation_t::LINEAR); //
     phase_image = demodulator();
-    // Only actually perform the dephasing of the input image within this constructor
-    //   if that result needs to be utilised in calculation of the mean
-    if (demean != demean_type::NONE) {
-      dephased = Image<T>::scratch(H_in, "Scratch dephased version of \"" + image.name() + "\" for mean calculation");
-      demodulator(image, dephased, false);
-    }
   }
 
   // Step 2: Demeaning
+  // Here only the structure is established (group indexing and storage allocation);
+  //   the stabilised-domain mean values are (re)computed by compute_means(),
+  //   which is sensitive to the current noise level map.
   Header H_mean(H_out);
   switch (demean) {
   case demean_type::NONE:
@@ -252,21 +312,7 @@ Precondition<T>::Precondition(Image<T> &image,
     serialise_image.reset();
     assert(group_index == num_volume_groups);
     H_mean.size(3) = num_volume_groups;
-    mean_image = Image<T>::scratch(H_mean, "Scratch image for per-volume-group mean intensity");
-    for (auto l_outer = Loop("Computing mean intensity image per volume group", H_in, 3)(dephased); //
-         l_outer;                                                                                   //
-         ++l_outer) {                                                                               //
-      // Which volume group does this volume belong to?
-      for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
-        serialise_image.index(axis - 3) = dephased.index(axis);
-      mean_image.index(3) = index2group[serialise_image.value()];
-      // Add the values within this volume to the mean intensity of the respective volume group
-      for (auto l_voxel = Loop(H_in, 0, 3)(dephased, mean_image); l_voxel; ++l_voxel)
-        mean_image.value() += dephased.value();
-    }
-    const default_type multiplier = 1.0 / H_in.size(3);
-    for (auto l = Loop(H_mean)(mean_image); l; ++l)
-      mean_image.value() *= multiplier;
+    vst_mean_image = Image<T>::scratch(H_mean, "Scratch image for per-volume-group stabilised-domain mean");
   } break;
   case demean_type::SHELLS: {
     Eigen::Matrix<default_type, Eigen::Dynamic, Eigen::Dynamic> grad;
@@ -285,20 +331,7 @@ Precondition<T>::Precondition(Image<T> &image,
       assert(*std::min_element(index2shell.begin(), index2shell.end()) == 0);
       H_mean.size(3) = shells.count();
       DWI::stash_DW_scheme(H_mean, grad);
-      mean_image = Image<T>::scratch(H_mean, "Scratch image for per-shell mean intensity");
-      for (auto l_voxel = Loop("Computing mean intensities within shells", H_mean, 0, 3)(dephased, mean_image); //
-           l_voxel;                                                                                             //
-           ++l_voxel) {                                                                                         //
-        for (ssize_t volume_idx = 0; volume_idx != H_in.size(3); ++volume_idx) {
-          dephased.index(3) = volume_idx;
-          mean_image.index(3) = index2shell[volume_idx];
-          mean_image.value() += dephased.value();
-        }
-        for (ssize_t shell_idx = 0; shell_idx != shells.count(); ++shell_idx) {
-          mean_image.index(3) = shell_idx;
-          mean_image.value() /= T(shells[shell_idx].count());
-        }
-      }
+      vst_mean_image = Image<T>::scratch(H_mean, "Scratch image for per-shell stabilised-domain mean");
     } catch (Exception &e) {
       throw Exception(e, "Cannot demean by shells as unable to establish b-value shell structure");
     }
@@ -306,52 +339,121 @@ Precondition<T>::Precondition(Image<T> &image,
   case demean_type::ALL: {
     H_mean.ndim() = 3;
     DWI::clear_DW_scheme(H_mean);
-    mean_image = Image<T>::scratch(H_mean, "Scratch image for mean intensity across all volumes");
-    const T multiplier = T(1) / T(H_out.size(3));
-    for (auto l_voxel = Loop("Computing mean intensity across all volumes", H_mean)(dephased, mean_image); //
-         l_voxel;                                                                                          //
-         ++l_voxel) {                                                                                      //
-      T mean(T(0));
-      for (auto l_volume = Loop(3, dephased.ndim())(dephased); l_volume; ++l_volume)
-        mean += T(dephased.value());
-      mean_image.value() = multiplier * mean;
-    }
+    vst_mean_image = Image<T>::scratch(H_mean, "Scratch image for stabilised-domain mean across all volumes");
   } break;
   }
 
-  // Step 3: Variance-stabilising transform
-  // Image<float> vst is already set within constructor definition;
-  //   no preparation work to do here
+  // Compute the initial stabilised-domain means.
+  // With no noise level map available at construction (the iteration-1 bootstrap),
+  //   the forward transform is the identity, so this reduces to the empirical means;
+  //   when a noise level map is supplied (e.g. -vst / -noise_in),
+  //   the means are formed in the stabilised domain (vst_plan.md section 3.2).
+  compute_means(image);
 }
 
-namespace {
-// Private functions to prevent compiler attempting to create complex functions for real types
+// Serialise this voxel's volumes into "data", applying phase demodulation and,
+//   where a noise level map is available, the forward variance-stabilising transform.
 template <typename T>
-typename std::enable_if<std::is_same<T, cfloat>::value, T>::type demodulate(const cfloat in, const cfloat phase) {
-  return in * std::conj(phase);
+void Precondition<T>::serialise_and_stabilise(Image<T> &input,
+                                              Image<cfloat> &phase,
+                                              Image<uint32_t> &serialise,
+                                              const Transform &transform,
+                                              Interp::Cubic<Image<float>> *vst,
+                                              Eigen::Array<T, Eigen::Dynamic, 1> &data) const {
+  // Load all volumes within this voxel into "data"
+  if (H_in.ndim() == 4) {
+    for (ssize_t v = 0; v != H_out.size(3); ++v) {
+      input.index(3) = v;
+      data[v] = input.value();
+    }
+  } else {
+    for (auto l = Loop(H_in, 3)(input); l; ++l) {
+      for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
+        serialise.index(axis - 3) = input.index(axis);
+      data[serialise.value()] = input.value();
+    }
+  }
+
+  // Phase demodulation
+  if (phase.valid()) {
+    assign_pos_of(input, 0, 3).to(phase);
+    if (H_in.ndim() == 4) {
+      for (ssize_t v = 0; v != H_out.size(3); ++v) {
+        phase.index(3) = v;
+        data[v] = demodulate<T>(data[v], phase.value());
+      }
+    } else {
+      for (auto l = Loop(H_in, 3)(phase); l; ++l) {
+        for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
+          serialise.index(axis - 3) = phase.index(axis);
+        data[serialise.value()] = demodulate<T>(data[serialise.value()], phase.value());
+      }
+    }
+  }
+
+  // Forward variance-stabilising transform
+  if (vst != nullptr) {
+    vst->scanner(transform.voxel2scanner *                         //
+                 Eigen::Vector3d({default_type(input.index(0)),    //
+                                  default_type(input.index(1)),    //
+                                  default_type(input.index(2))})); //
+    const default_type sigma = vst->value();
+    for (ssize_t v = 0; v != H_out.size(3); ++v)
+      data[v] = vst_forward<T>(*noise_model, data[v], sigma);
+  }
 }
-template <typename T>
-typename std::enable_if<std::is_same<T, cdouble>::value, T>::type demodulate(const cdouble in, const cfloat phase) {
-  return in * std::conj(cdouble(phase));
+
+template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
+  if (!vst_mean_image.valid())
+    return;
+
+  const Transform transform(input_arg);
+  Image<T> input(input_arg);
+  Image<cfloat> phase(phase_image);
+  Image<uint32_t> serialise(serialise_image);
+  Image<T> mean(vst_mean_image);
+  std::unique_ptr<Interp::Cubic<Image<float>>> vst;
+  if (vst_noise_image.valid())
+    vst.reset(new Interp::Cubic<Image<float>>(vst_noise_image));
+
+  // Volume counts per group, required as divisors.
+  // - across all volumes: the total number of volumes;
+  // - per volume group: the number of volumes within each (equally-sized) group;
+  // - per shell: the per-shell volume count.
+  std::vector<ssize_t> group_counts;
+  if (mean.ndim() > 3) {
+    group_counts.assign(mean.size(3), 0);
+    if (!index2shell.empty()) {
+      for (const ssize_t shell_index : index2shell)
+        ++group_counts[shell_index];
+    } else {
+      assert(!index2group.empty());
+      std::fill(group_counts.begin(), group_counts.end(), H_in.size(3));
+    }
+  }
+
+  Eigen::Array<T, Eigen::Dynamic, 1> data(H_out.size(3));
+  // Per-group accumulator, reused across voxels to avoid repeated allocation.
+  std::vector<T> sums(mean.ndim() > 3 ? mean.size(3) : 0);
+  for (auto l_voxel = Loop("Computing stabilised-domain mean intensities", H_in, 0, 3)(input); l_voxel; ++l_voxel) {
+    serialise_and_stabilise(input, phase, serialise, transform, vst.get(), data);
+    assign_pos_of(input, 0, 3).to(mean);
+    if (mean.ndim() == 3) {
+      T sum(T(0));
+      for (ssize_t v = 0; v != H_out.size(3); ++v)
+        sum += data[v];
+      mean.value() = sum / T(H_out.size(3));
+    } else {
+      std::fill(sums.begin(), sums.end(), T(0));
+      for (ssize_t v = 0; v != H_out.size(3); ++v)
+        sums[!index2shell.empty() ? index2shell[v] : index2group[v]] += data[v];
+      for (ssize_t group = 0; group != mean.size(3); ++group) {
+        mean.index(3) = group;
+        mean.value() = group_counts[group] > 0 ? sums[group] / T(group_counts[group]) : T(0);
+      }
+    }
+  }
 }
-template <typename T>
-typename std::enable_if<!is_complex<T>::value, T>::type demodulate(const T in, const cfloat phase) {
-  assert(false);
-  return in;
-}
-template <typename T>
-typename std::enable_if<std::is_same<T, cfloat>::value, T>::type modulate(const cfloat in, const cfloat phase) {
-  return in * phase;
-}
-template <typename T>
-typename std::enable_if<std::is_same<T, cdouble>::value, T>::type modulate(const cdouble in, const cfloat phase) {
-  return in * cdouble(phase);
-}
-template <typename T> typename std::enable_if<!is_complex<T>::value, T>::type modulate(const T in, const cfloat phase) {
-  assert(false);
-  return in;
-}
-} // namespace
 
 template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> output, const bool inverse) const {
 
@@ -359,10 +461,10 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
   const Transform transform(input);
   Image<uint32_t> serialise(serialise_image);
   Image<cfloat> phase(phase_image);
-  Image<T> mean(mean_image);
+  Image<T> mean(vst_mean_image);
   std::unique_ptr<Interp::Cubic<Image<float>>> vst;
-  if (vst_image.valid())
-    vst.reset(new Interp::Cubic<Image<float>>(vst_image));
+  if (vst_noise_image.valid())
+    vst.reset(new Interp::Cubic<Image<float>>(vst_noise_image));
 
   Eigen::Array<T, Eigen::Dynamic, 1> data(H_out.size(3));
   if (inverse) {
@@ -370,27 +472,17 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
     assert(dimensions_match(H_out, input));
     assert(dimensions_match(H_in, output));
 
+    // The forward order is: phase demodulation -> variance-stabilising transform -> demeaning.
+    // Reversal therefore proceeds in the opposite order:
+    //   re-add the stabilised-domain mean -> invert the variance-stabilising transform -> re-modulate phase.
     for (auto l_voxel = Loop("Reversing data preconditioning", H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
 
-      // Step 3: Reverse variance-stabilising transform
-      if (vst) {
-        vst->scanner(transform.voxel2scanner *                         //
-                     Eigen::Vector3d({default_type(input.index(0)),    //
-                                      default_type(input.index(1)),    //
-                                      default_type(input.index(2))})); //
-        const T sigma = T(vst->value());
-        for (ssize_t v = 0; v != H_out.size(3); ++v) {
-          input.index(3) = v;
-          data[v] = T(input.value()) * sigma;
-        }
-      } else {
-        for (ssize_t v = 0; v != H_out.size(3); ++v) {
-          input.index(3) = v;
-          data[v] = input.value();
-        }
+      for (ssize_t v = 0; v != H_out.size(3); ++v) {
+        input.index(3) = v;
+        data[v] = input.value();
       }
 
-      // Step 2: Reverse demeaning
+      // Step 3 reversal: re-add the stabilised-domain mean
       if (mean.valid()) {
         assign_pos_of(input, 0, 3).to(mean);
         if (mean.ndim() == 3) {
@@ -412,7 +504,18 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
         }
       }
 
-      // Step 1: Reverse phase demodulation
+      // Step 2 reversal: invert the variance-stabilising transform
+      if (vst) {
+        vst->scanner(transform.voxel2scanner *                         //
+                     Eigen::Vector3d({default_type(input.index(0)),    //
+                                      default_type(input.index(1)),    //
+                                      default_type(input.index(2))})); //
+        const default_type sigma = vst->value();
+        for (ssize_t v = 0; v != H_out.size(3); ++v)
+          data[v] = vst_inverse<T>(*noise_model, data[v], sigma);
+      }
+
+      // Step 1 reversal: re-modulate phase
       if (phase.valid()) {
         assign_pos_of(input, 0, 3).to(phase);
         if (serialise.valid()) {
@@ -449,41 +552,16 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
   assert(dimensions_match(H_in, input));
   assert(dimensions_match(H_out, output));
 
-  // Applying forward preconditioning
+  // Applying forward preconditioning.
+  // Order: phase demodulation -> variance-stabilising transform -> demeaning;
+  //   demeaning is performed in the stabilised domain so that the Casorati entries
+  //   are zero-mean per group (vst_plan.md section 3.1).
   for (auto l_voxel = Loop("Applying data preconditioning", H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
 
-    // Serialise all data within this voxel into "data"
-    if (H_in.ndim() == 4) {
-      for (ssize_t v = 0; v != H_out.size(3); ++v) {
-        input.index(3) = v;
-        data[v] = input.value();
-      }
-    } else {
-      for (auto l = Loop(H_in, 3)(input); l; ++l) {
-        for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
-          serialise.index(axis - 3) = input.index(axis);
-        data[serialise.value()] = input.value();
-      }
-    }
+    // Steps 1 & 2: serialise, phase demodulation, variance-stabilising transform
+    serialise_and_stabilise(input, phase, serialise, transform, vst.get(), data);
 
-    // Step 1: Phase demodulation
-    if (phase.valid()) {
-      assign_pos_of(input, 0, 3).to(phase);
-      if (H_in.ndim() == 4) {
-        for (ssize_t v = 0; v != H_out.size(3); ++v) {
-          phase.index(3) = v;
-          data[v] = demodulate<T>(data[v], phase.value());
-        }
-      } else {
-        for (auto l = Loop(H_in, 3)(phase); l; ++l) {
-          for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
-            serialise.index(axis - 3) = phase.index(axis);
-          data[serialise.value()] = demodulate<T>(data[serialise.value()], phase.value());
-        }
-      }
-    }
-
-    // Step 2: Demeaning
+    // Step 3: demeaning (in the stabilised domain)
     if (mean.valid()) {
       assign_pos_of(input, 0, 3).to(mean);
       if (mean.ndim() == 3) {
@@ -504,17 +582,6 @@ template <typename T> void Precondition<T>::operator()(Image<T> input, Image<T> 
         assert(false);
         data.fill(std::numeric_limits<T>::signaling_NaN());
       }
-    }
-
-    // Step 3: Variance-stabilising transform
-    if (vst) {
-      vst->scanner(transform.voxel2scanner                             //
-                   * Eigen::Vector3d({default_type(input.index(0)),    //
-                                      default_type(input.index(1)),    //
-                                      default_type(input.index(2))})); //
-      const default_type sigma = vst->value();
-      const default_type multiplier = 1.0 / sigma;
-      data *= multiplier;
     }
 
     // Write to output

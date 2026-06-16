@@ -69,7 +69,12 @@ void estimate(Image<T> &input,
     func.report_warnings();
   }
   // If a VST was applied to the input data for this iteration,
-  //   need to remove its effect from the estimated noise map
+  //   need to remove its effect from the estimated noise map.
+  // Under the nonlinear variance-stabilising transform the stabilised data are
+  //   homoscedastic with variance ~ 1 by construction, so the estimate on the
+  //   stabilised data is a unit-less correction factor; multiplying by the noise
+  //   level used for stabilisation (sigma_{k-1}) yields the first-order refinement
+  //   sigma_k = sigma_{k-1} * (post-VST sigma) (vst_plan.md section 5).
   if (vst_image.valid()) {
     Interp::Cubic<Image<float>> vst_interp(vst_image);
     const Transform transform(subsample->header());
