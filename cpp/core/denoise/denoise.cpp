@@ -17,6 +17,8 @@
 
 #include "denoise/denoise.h"
 
+#include <optional>
+
 #include "axes.h"
 #include "filter/smooth.h"
 #include "transform.h"
@@ -41,10 +43,18 @@ const char *first_step_description =
     " has been applied to the data prior to denoising.";
 
 const char *non_gaussian_noise_description =
-    "Note that this function does not correct for non-Gaussian noise biases"
-    " present in magnitude-reconstructed MRI images."
-    " If available, including the MRI phase data as part of a complex input image"
-    " can reduce such non-Gaussian biases.";
+    "Magnitude-reconstructed MRI data exhibit non-Gaussian noise statistics"
+    " (Rician for a single receive channel,"
+    " or non-central chi for multiple channels combined by sum-of-squares reconstruction),"
+    " which deviate from the Gaussian noise model that underlies PCA-based denoising,"
+    " most prominently for data close to the noise floor."
+    " This command accounts for these statistics through a noise-model-aware variance-stabilising transform"
+    " (configurable via the -vst_method and -noise_dof options)"
+    " that renders the data approximately Gaussian and homoscedastic prior to PCA."
+    " Nonetheless, where the complex image data are available,"
+    " including the MRI phase as part of a complex input image remains preferable,"
+    " as phase demodulation yields zero-mean Gaussian noise"
+    " and thereby avoids the non-Gaussian regime altogether.";
 
 const char *decomposition_description =
     "By default, the command uses Eigen's Bidirectional Divide-and-Conquer"
@@ -156,6 +166,34 @@ Image<float> condition_noise_map(Image<float> &in,
     smooth_filter(out);
   }
   return out;
+}
+
+Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial) {
+  // Detect whether a scalar value or an image path was provided,
+  //   matching the dispatch used by Estimator::make_estimator().
+  std::optional<default_type> scalar_value;
+  try {
+    scalar_value = default_type(arg);
+  } catch (Exception &) {
+  }
+  Image<float> in;
+  if (scalar_value.has_value()) {
+    if (scalar_value.value() <= 0.0)
+      throw Exception("Noise level provided via -noise_in must be greater than zero");
+    Header H(H_spatial);
+    H.ndim() = 3;
+    H.reset_intensity_scaling();
+    H.datatype() = DataType::Float32;
+    H.datatype().set_byte_order_native();
+    in = Image<float>::scratch(H, "Spatially-constant noise level map");
+    for (auto l = Loop(in)(in); l; ++l)
+      in.value() = float(scalar_value.value());
+  } else {
+    in = Image<float>::open(std::string(arg));
+    if (in.ndim() != 3)
+      throw Exception("Noise level image provided via -noise_in must be 3-dimensional");
+  }
+  return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, noise_smooth_type::NONE);
 }
 
 } // namespace MR::Denoise

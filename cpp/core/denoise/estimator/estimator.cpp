@@ -38,8 +38,7 @@ const Option estimator_option =
            "* Exp1: the original estimator used in Veraart et al. (2016); \n"
            "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
            "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
-           "* MRM2023: the alternative estimator introduced in Olesen et al. (2023). \n"
-           "Operation will be bypassed if -noise_in or -fixed_rank are specified")
+           "* MRM2023: the alternative estimator introduced in Olesen et al. (2023).")
       + Argument("algorithm").type_choice(estimators);
 
 const OptionGroup estimator_denoise_options =
@@ -48,8 +47,9 @@ const OptionGroup estimator_denoise_options =
     + estimator_option
 
     + Option("noise_in",
-             "manually specify the noise level rather than estimating from the data, "
-             "whether as a scalar value or as a pre-estimated spatial map")
+             "import a pre-estimated noise level, either as a scalar value or as a 3D image, "
+             "to be used directly rather than estimated from the data; "
+             "this bypasses noise level estimation and also parameterises the variance-stabilising transform")
       + Argument("value/image").type_float(0.0).type_image_in()
 
     + Option("fixed_rank",

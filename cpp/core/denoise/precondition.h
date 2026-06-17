@@ -56,6 +56,15 @@ enum class bias_handling_t { DEBIAS, PRESERVE };
 
 App::OptionGroup precondition_options(const bool include_output);
 
+// Construct the noise model governing the variance-stabilising transform
+//   from the -noise_dof and -vst_method command-line options.
+// For complex (or phase-demodulated) data, pass complex == true to obtain the
+//   Gaussian model; -noise_dof is then ignored (with a warning if specified).
+// For magnitude data, the receive-channel count N from -noise_dof selects a
+//   Rician (N == 1) or non-central chi (N > 1) model, built with the requested
+//   -vst_method strategy.
+std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex);
+
 class Demodulation {
 public:
   Demodulation(demodulation_t mode) : mode(mode) {}

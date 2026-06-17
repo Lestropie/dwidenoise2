@@ -62,8 +62,12 @@ void usage() {
     " to which filtering can be applied,"
     " which can then be utilised for the actual image series denoising,"
     " without computing an unwanted intermediate denoised image series."
+    " The resulting (optionally filtered) noise map can subsequently be supplied"
+    " to the dwidenoise2 -noise_in option to perform that denoising."
 
   + Denoise::patent_description
+
+  + Denoise::non_gaussian_noise_description
 
   + "Important note:"
     " noise level estimation should only be performed as the first step of an image processing pipeline."
@@ -88,6 +92,18 @@ void usage() {
   + Kernel::default_size_description
 
   + Kernel::cuboid_size_description;
+
+  EXAMPLES
+  + Example("Estimate a noise map, filter it, then denoise using the filtered map",
+            "dwi2noise DWI.mif noise.mif;"
+            " mrfilter noise.mif smooth noise_smooth.mif;"
+            " dwidenoise2 DWI.mif DWI_denoised.mif -noise_in noise_smooth.mif",
+            "Estimating the noise map with dwi2noise as a separate step makes it possible"
+            " to inspect and post-process (e.g. smooth) the map before it is used for denoising;"
+            " the curated map is then supplied to dwidenoise2 via -noise_in,"
+            " which both parameterises the variance-stabilising transform"
+            " and fixes the noise level so that no further data-driven estimation"
+            " is performed during denoising.");
 
   AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)"
            " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
@@ -136,6 +152,11 @@ void usage() {
   + datatype_option
   + decomposition_option
   + Estimator::estimator_option
+  + Option("noise_in",
+           "provide a pre-estimated noise level (scalar value or 3D image) to seed the"
+           " variance-stabilising transform, bypassing the iterative bootstrap and instead"
+           " performing a single noise level refinement pass on the stabilised data")
+    + Argument("value/image").type_float(0.0).type_image_in()
   + Option("onepass",
            "Derive noise level estimate with a single pass through the image,"
            " rather than the default iterative multi-resolution process")
@@ -218,15 +239,9 @@ void run(Header &dwi,
   Image<bool> mask = generate_mask(input);
   Image<float> vst_image(user_vst_image);
 
-  // Select the noise model governing the variance-stabilising transform:
-  //   complex (or phase-demodulated) data are Gaussian; magnitude data default to Rician.
-  // (Channel count and VST method will become user-configurable in a later phase;
-  //   the foi exact-unbiased strategy is the default.)
-  std::shared_ptr<NoiseModel::Base> noise_model =
-      NoiseModel::make(is_complex<T>::value ? NoiseModel::distribution_t::GAUSSIAN  //
-                                            : NoiseModel::distribution_t::RICIAN,   //
-                       1,                                                           //
-                       NoiseModel::vst_method_t::FOI);                              //
+  // Noise model governing the variance-stabilising transform, configured from
+  //   the -noise_dof and -vst_method options (Gaussian for complex data).
+  std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
   Image<T> input_preconditioned =
@@ -306,27 +321,27 @@ void run() {
   if (!opt.empty())
     decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
 
+  // A pre-estimated noise level provided via -noise_in seeds the variance-stabilising
+  //   transform (the VST scale) as a prior; unlike dwidenoise2 it does not bypass
+  //   estimation (make_estimator below keeps permit_bypass == false), so a genuine
+  //   estimator still runs and the output map is the refinement sigma_in * (post-VST sigma).
+  //   The forward transform is well-posed without a mean, so -demean none is permitted
+  //   (see vst_plan.md sections 2.1 and 6.2).
   Image<float> user_vst_image;
-  opt = get_options("vst");
-  if (!opt.empty()) {
-    if (demean == demean_type::NONE)
-      throw Exception("Cannot currently apply variance-stabilising transform in the absence of demeaning");
-    user_vst_image = Image<float>::open(opt[0][0]);
-    if (user_vst_image.ndim() != 3)
-      throw Exception("Variance-stabilising transform noise level image must be 3D");
-    user_vst_image = Denoise::condition_noise_map(user_vst_image,
-                                                  noise_impute_type::NONE,
-                                                  noise_pad_type::PAD,
-                                                  noise_smooth_type::NONE);
-  }
+  opt = get_options("noise_in");
+  if (!opt.empty())
+    user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
 
   // Need to set up the subsampling header of the final iteration for configuration of final exports
   auto final_subsample = Subsample::make(dwi, default_subsample_ratio);
 
+  // Supplying an external noise level via -noise_in seeds the variance-stabilising transform
+  //   directly, so the iterative multi-resolution bootstrap is bypassed in favour of a single
+  //   refinement pass (as for -onepass).
   std::vector<Iterative::Iteration> iterations;
-  if (get_options("onepass").empty()) {
+  if (get_options("onepass").empty() && get_options("noise_in").empty()) {
     if (!get_options("subsample").empty())
       throw Exception("Implementation does not support use of both -iterative and -subsample");
     iterations = default_iterations;

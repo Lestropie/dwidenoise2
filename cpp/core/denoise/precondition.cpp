@@ -63,9 +63,16 @@ OptionGroup precondition_options(const bool include_output)
            "options are: " + join(demean_choices, ",") + " "
            "(default: 'shells' if DWI gradient table available; 'volume_groups' if volume groups present; 'all' otherwise)")
     + Argument("mode").type_choice(demean_choices)
-  + Option("vst",
-           "apply a within-patch variance-stabilising transformation based on a pre-estimated noise level map")
-    + Argument("image").type_image_in();
+  + Option("noise_dof",
+           "the number of receive channels N combined by sum-of-squares reconstruction of magnitude data, "
+           "such that the noise follows a non-central chi distribution with 2N degrees of freedom "
+           "(default: 1, i.e. Rician; ignored for complex input data)")
+    + Argument("count").type_integer(1)
+  + Option("vst_method",
+           "the strategy used to construct the variance-stabilising transform and its bias-corrected inverse "
+           "for magnitude data; options are: " + join(NoiseModel::vst_methods, ",") + " "
+           "(default: foi; ignored for complex input data)")
+    + Argument("method").type_choice(NoiseModel::vst_methods);
   if (include_output) {
     result
     + Option("preconditioned_input",
@@ -83,6 +90,28 @@ OptionGroup precondition_options(const bool include_output)
   return result;
 }
 // clang-format on
+
+std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
+  auto opt_dof = get_options("noise_dof");
+  auto opt_method = get_options("vst_method");
+  const NoiseModel::vst_method_t vst_method = opt_method.empty()                                  //
+                                                  ? NoiseModel::vst_method_t::FOI                  //
+                                                  : NoiseModel::vst_method_t(int(opt_method[0][0])); //
+  if (complex) {
+    if (!opt_dof.empty()) {
+      WARN("Option -noise_dof is ignored for complex input data: "
+           "the demodulated noise is Gaussian (one degree of freedom per channel)");
+    }
+    // The forward transform for Gaussian data is linear, so -vst_method has no effect;
+    //   the default is harmless and no warning is emitted.
+    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
+  }
+  const ssize_t num_channels = opt_dof.empty() ? 1 : ssize_t(opt_dof[0][0]);
+  const NoiseModel::distribution_t distribution = num_channels == 1                          //
+                                                      ? NoiseModel::distribution_t::RICIAN   //
+                                                      : NoiseModel::distribution_t::NONCENTRALCHI; //
+  return NoiseModel::make(distribution, num_channels, vst_method);
+}
 
 Demodulation select_demodulation(const Header &H) {
   const bool complex = H.datatype().is_complex();

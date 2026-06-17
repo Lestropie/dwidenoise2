@@ -343,15 +343,9 @@ void run(Header &dwi,
   Image<bool> mask = generate_mask(input);
   Image<float> vst_image(user_vst_image);
 
-  // Select the noise model governing the variance-stabilising transform:
-  //   complex (or phase-demodulated) data are Gaussian; magnitude data default to Rician.
-  // (Channel count and VST method will become user-configurable in a later phase;
-  //   the foi exact-unbiased strategy is the default.)
-  std::shared_ptr<NoiseModel::Base> noise_model =
-      NoiseModel::make(is_complex<T>::value ? NoiseModel::distribution_t::GAUSSIAN  //
-                                            : NoiseModel::distribution_t::RICIAN,   //
-                       1,                                                           //
-                       NoiseModel::vst_method_t::FOI);                              //
+  // Noise model governing the variance-stabilising transform, configured from
+  //   the -noise_dof and -vst_method options (Gaussian for complex data).
+  std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
   Image<T> input_preconditioned =
@@ -570,19 +564,18 @@ void run() {
   if (!opt.empty())
     decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
 
+  // A pre-estimated noise level provided via -noise_in is authoritative:
+  //   it parameterises the variance-stabilising transform (the VST scale),
+  //   and via the Fixed/Import estimator (make_estimator below) it bypasses
+  //   noise level estimation, yielding sigma^2 ~ 1 on the stabilised data
+  //   (equivalent to -estimator unity); see vst_plan.md section 6.2.
   Image<float> user_vst_image;
-  opt = get_options("vst");
+  opt = get_options("noise_in");
   if (!opt.empty()) {
     if (demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
     }
-    user_vst_image = Image<float>::open(opt[0][0]);
-    if (user_vst_image.ndim() != 3)
-      throw Exception("Variance-stabilising transform noise level image must be 3D");
-    user_vst_image = Denoise::condition_noise_map(user_vst_image,
-                                                  noise_impute_type::NONE,
-                                                  noise_pad_type::PAD,
-                                                  noise_smooth_type::NONE);
+    user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
   }
 
   aggregator_type aggregator = aggregator_type::GAUSSIAN;

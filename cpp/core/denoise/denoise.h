@@ -82,4 +82,12 @@ Image<float> condition_noise_map(Image<float> &in,
                                  const noise_pad_type pad = noise_pad_type::PAD,
                                  const noise_smooth_type smooth = noise_smooth_type::NONE);
 
+// Construct the externally-provided noise level map (the variance-stabilising-transform scale)
+//   from a -noise_in command-line argument, which may be either:
+// - a scalar value, yielding a spatially-constant map over the spatial grid of H_spatial; or
+// - the filesystem path to a pre-estimated 3D noise level image.
+// The scalar-vs-image dispatch mirrors that of Estimator::make_estimator().
+// The returned map is conditioned (padded) for safe cubic interpolation.
+Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial);
+
 } // namespace MR::Denoise
