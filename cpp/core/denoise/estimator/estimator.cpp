@@ -24,6 +24,7 @@
 #include "denoise/estimator/med.h"
 #include "denoise/estimator/mrm2023.h"
 #include "denoise/estimator/rank.h"
+#include "denoise/estimator/tbme2022.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -38,7 +39,8 @@ const Option estimator_option =
            "* Exp1: the original estimator used in Veraart et al. (2016); \n"
            "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
            "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
-           "* MRM2023: the alternative estimator introduced in Olesen et al. (2023).")
+           "* MRM2023: the alternative estimator introduced in Olesen et al. (2023); \n"
+           "* TBME2022: the multiple-moment generalised-quarter-circle estimator of Zhu et al. (2022).")
       + Argument("algorithm").type_choice(estimators);
 
 const OptionGroup estimator_denoise_options =
@@ -88,6 +90,8 @@ std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool perm
     return std::make_shared<Med>();
   case estimator_type::MRM2023:
     return std::make_shared<MRM2023>();
+  case estimator_type::TBME2022:
+    return std::make_shared<TBME2022>();
   default:
     assert(false);
   }

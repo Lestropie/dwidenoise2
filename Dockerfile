@@ -33,7 +33,7 @@ COPY cpp/cmd/dwi2noise.cpp /src/mrtrix3/cpp/cmd/dwi2noise.cpp
 COPY cpp/core/denoise /src/mrtrix3/cpp/core/denoise
 
 RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON --preset=release \
-    && cmake --build build -j 2 --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert
+    && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert
 
 # Build final image.
 FROM base AS final

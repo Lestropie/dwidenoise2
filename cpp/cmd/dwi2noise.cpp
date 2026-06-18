@@ -138,6 +138,11 @@ void usage() {
     "Tensor denoising of multidimensional MRI data. "
     "Magnetic Resonance in Medicine, 2023, 89(3), 1160-1172"
 
+  + "* If using -estimator tbme2022: "
+    "Zhu, W.; Ma, X.; Zhu, X.-H.; Ugurbil, K.; Chen, W.; Wu, X. "
+    "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
+    "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"
+
   + "* If using -estimator med: "
     "Gavish, M.; Donoho, D.L. "
     "The Optimal Hard Threshold for Singular Values is 4/sqrt(3). "
@@ -343,7 +348,7 @@ void run() {
   std::vector<Iterative::Iteration> iterations;
   if (get_options("onepass").empty() && get_options("noise_in").empty()) {
     if (!get_options("subsample").empty())
-      throw Exception("Implementation does not support use of both -iterative and -subsample");
+      throw Exception("Implementation does not support use of -subsample without -onepass");
     iterations = default_iterations;
   }
   if (iterations.empty()) {

@@ -199,6 +199,11 @@ void usage() {
     "Tensor denoising of multidimensional MRI data. "
     "Magnetic Resonance in Medicine, 2023, 89(3), 1160-1172"
 
+  + "* If using -estimator tbme2022: "
+    "Zhu, W.; Ma, X.; Zhu, X.-H.; Ugurbil, K.; Chen, W.; Wu, X. "
+    "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
+    "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"
+
   + "* If using anything other than -aggregation exclusive: "
     "Manjon, J.V.; Coupe, P.; Concha, L.; Buades, A.; D. Collins, D.L.; Robles, M. "
     "Diffusion Weighted Image Denoising Using Overcomplete Local PCA. "
@@ -665,10 +670,6 @@ void run() {
 
   std::vector<Iterative::Iteration> iterations;
   if (get_options("onepass").empty() && get_options("noise_in").empty() && get_options("fixed_rank").empty()) {
-    if (demean == demean_type::NONE) {
-      WARN("Use of both -iterative and -demean none should be treated with scepticism,"
-           " as correction of heteroscedasticity will introduce false tissue contrast");
-    }
     iterations = default_iterations;
   } else {
     Iterative::Iteration config;
