@@ -20,6 +20,7 @@
 #include <array>
 #include <vector>
 
+#include "algo/threaded_copy.h"
 #include "algo/threaded_loop.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
@@ -60,7 +61,7 @@ void estimate(Image<T> &input,
                                     rank_per_mm_image);
   kernel->set_mask(mask);
   if (preconditioner.noop())
-    input_preconditioned = input;
+    threaded_copy(input, input_preconditioned);
   else
     preconditioner(input, input_preconditioned, false);
   {
