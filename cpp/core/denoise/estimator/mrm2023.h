@@ -42,24 +42,27 @@ public:
     const ssize_t mprime = rank_nonzero(m, n, rp);
     const ssize_t nprime = dimlong_nonzero(m, n, rp);
     const double sigmasq_to_lamplus = Math::pow2(std::sqrt(nprime) + std::sqrt(mprime));
-    double clam = s.segment(rz, mprime).sum() / nprime;
+    double clam = s.segment(rz, mprime).sum();
     // Unlike Exp# code,
     //   MRM2023 article uses p to index number of signal components,
     //   and here doing a direct translation of the manuscript content to code
-    double lamplusprev = -std::numeric_limits<double>::infinity();
+
     Result result;
     for (ssize_t p = 0; p < mprime; ++p) {
       const ssize_t i = s.size() - 1 - p;
-      const double lam = s[i] / nprime;
-      if (lam < lamplusprev)
+      const double sigmasq = clam / (static_cast<double>(mprime - p) * static_cast<double>(nprime - p));
+      const double lamplus = sigmasq * sigmasq_to_lamplus;
+      if (s[i] < lamplus) {
+        result.cutoff_p = i + 1;
+        result.sigma2 = sigmasq;
+        result.lamplus = lamplus / nprime;
         return result;
-      clam -= lam;
-      const double sigmasq = clam / ((mprime - p) * (nprime - p));
-      lamplusprev = sigmasq * sigmasq_to_lamplus;
-      result.cutoff_p = i;
-      result.sigma2 = sigmasq;
-      result.lamplus = lamplusprev;
+      }
+      clam -= s[i];
     }
+    result.cutoff_p = 0;
+    result.sigma2 = 0.0;
+    result.lamplus = 0.0;
     return result;
   }
 };
