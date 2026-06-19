@@ -45,7 +45,7 @@ public:
     const double ymed = (s.size() - rz) & 1                                                            //
                             ? s[rz + (s.size() - rz) / 2]                                              //
                             : (0.5 * (s[rz + (s.size() - rz) / 2 - 1] + s[rz + (s.size() - rz) / 2])); //
-    const ssize_t beta = double(rnz) / double(qnz);
+    const double beta = double(rnz) / double(qnz);
     Result result;
     result.lamplus = ymed / (qnz * mu(beta));
     // It is not true that cutoff_p can be set as half of the rank
