@@ -294,6 +294,19 @@ std::string Rician::description() const { return "Rician (2 DOF; VST: " + vst_me
 std::shared_ptr<Base> make(const distribution_t distribution, //
                            const ssize_t num_channels,        //
                            const vst_method_t vst_method) {   //
+  // -vst_method none / linear select the transform directly, independent of the
+  //   underlying noise distribution:
+  //   - none   : identity (no variance stabilisation);
+  //   - linear : the simple linear scaling u = m / sigma (the Gaussian model),
+  //              exact for additive Gaussian (complex / phase-demodulated) noise.
+  switch (vst_method) {
+  case vst_method_t::NONE:
+    return std::make_shared<Identity>();
+  case vst_method_t::LINEAR:
+    return std::make_shared<Gaussian>();
+  default:
+    break;
+  }
   switch (distribution) {
   case distribution_t::GAUSSIAN:
     return std::make_shared<Gaussian>();

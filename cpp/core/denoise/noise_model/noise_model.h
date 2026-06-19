@@ -35,18 +35,29 @@ namespace MR::Denoise::NoiseModel {
 const std::vector<std::string> distributions = {"gaussian", "rician", "noncentralchi"};
 enum class distribution_t { GAUSSIAN, RICIAN, NONCENTRALCHI };
 
-// Strategy used to build the (nonlinear) variance-stabilising transform and,
+// Variance-stabilising transform (VST) applied to the raw data prior to PCA.
+// Two of the options select the transform directly, independent of the noise
+//   distribution:
+// - NONE:   identity; no transform is applied (the data reach PCA unmodified
+//             save for any demeaning). As nothing is divided by the noise level,
+//             refining that level across iterations has no effect on subsequent
+//             processing, so the calling commands fall back to a single pass.
+// - LINEAR: the simple linear transform u = m / sigma (the Gaussian model);
+//             exact for additive Gaussian (complex / phase-demodulated) noise,
+//             but only a scale normalisation for magnitude data (which remains
+//             heteroscedastic near the floor) and with no noise-floor debiasing.
+// The remaining options build the nonlinear transform for magnitude data and,
 //   in particular, the exact-unbiased inverse that debiases the noise floor:
-// - FOI: Foi (2011)-style exact-unbiased inverse via numerical integration;
-//          smooth and well-defined across the entire SNR range including nu=0.
+// - FOI:  Foi (2011)-style exact-unbiased inverse via numerical integration;
+//           smooth and well-defined across the entire SNR range including nu=0.
 // - KOAY: Koay-Basser (2006) first-moment inverse with a hard floor clamp
-//          (no unique solution below SNR ~1.913).
-// - MOM: method-of-moments (closed-form) first-moment inverse.
-// The forward stabilising transform itself is shared across strategies;
-//   the strategies differ only in how the stabilised domain is mapped back
-//   to a bias-free underlying level (the inverse / debias step).
-const std::vector<std::string> vst_methods = {"foi", "koay", "mom"};
-enum class vst_method_t { FOI, KOAY, MOM };
+//           (no unique solution below SNR ~1.913).
+// - MOM:  method-of-moments (closed-form) first-moment inverse.
+// For these three the forward stabilising transform itself is shared;
+//   they differ only in how the stabilised domain is mapped back to a
+//   bias-free underlying level (the inverse / debias step).
+const std::vector<std::string> vst_methods = {"none", "linear", "foi", "koay", "mom"};
+enum class vst_method_t { NONE, LINEAR, FOI, KOAY, MOM };
 
 // Reusable lookup table on a uniform grid, with linear interpolation in the
 //   interior and linear extrapolation beyond either end.
@@ -130,6 +141,28 @@ public:
   virtual ssize_t dof() const = 0;
 
   virtual std::string description() const = 0;
+};
+
+// Identity ("none") noise model: no variance-stabilising transform.
+//
+// Every mapping is the identity with unit Jacobian, so the data reach PCA
+//   unmodified (save for any demeaning) and the inverse simply re-adds the
+//   subtracted mean. None of the mappings involve the noise level sigma, so the
+//   stabilised-domain group means carry no sigma dependence and the post-PCA
+//   noise estimate is already in absolute units (no sigma rescaling applies);
+//   iterating to refine sigma therefore cannot influence subsequent processing.
+class Identity : public Base {
+public:
+  Identity() = default;
+  default_type stabilise(const default_type m, const default_type /*sigma*/) const final { return m; }
+  default_type inverse_algebraic(const default_type u, const default_type /*sigma*/) const final { return u; }
+  default_type inverse_unbiased(const default_type u, const default_type /*sigma*/) const final { return u; }
+  default_type jacobian(const default_type /*u*/, const default_type /*sigma*/) const final { return default_type(1); }
+  default_type mean(const default_type nu, const default_type /*sigma*/) const final { return nu; }
+  default_type variance(const default_type /*nu*/, const default_type sigma) const final { return sigma * sigma; }
+  ssize_t num_channels() const final { return 1; }
+  ssize_t dof() const final { return 2; }
+  std::string description() const final { return "none (no variance-stabilising transform)"; }
 };
 
 // Gaussian (complex / phase-demodulated) noise model.

@@ -180,11 +180,34 @@ void test_gaussian() {
   check_near(g->variance(5.0, 2.0), 4.0, 1e-12, "Gaussian variance = sigma^2");
 }
 
+// -vst_method none / linear select the transform directly, independent of the
+//   requested noise distribution.
+void test_none_and_linear() {
+  // none: identity mapping with unit Jacobian for every distribution.
+  for (const distribution_t dist : {distribution_t::GAUSSIAN, distribution_t::RICIAN, distribution_t::NONCENTRALCHI}) {
+    auto none = make(dist, 4, vst_method_t::NONE);
+    check_near(none->stabilise(7.0, 2.0), 7.0, 1e-12, "none stabilise = m (no transform)");
+    check_near(none->inverse_algebraic(7.0, 2.0), 7.0, 1e-12, "none inverse_algebraic = u");
+    check_near(none->inverse_unbiased(7.0, 2.0), 7.0, 1e-12, "none inverse_unbiased = u (no debias)");
+    check_near(none->jacobian(7.0, 2.0), 1.0, 1e-12, "none Jacobian = 1 (sigma-independent)");
+  }
+  // linear: the simple linear transform u = m / sigma for any distribution
+  //   (identical to the Gaussian model; sigma scaling, no noise-floor debias).
+  for (const distribution_t dist : {distribution_t::RICIAN, distribution_t::NONCENTRALCHI}) {
+    auto lin = make(dist, 4, vst_method_t::LINEAR);
+    check_near(lin->stabilise(7.0, 2.0), 3.5, 1e-12, "linear stabilise = m/sigma");
+    check_near(lin->inverse_algebraic(3.5, 2.0), 7.0, 1e-12, "linear inverse_algebraic = sigma*u");
+    check_near(lin->inverse_unbiased(3.5, 2.0), 7.0, 1e-12, "linear inverse_unbiased = sigma*u (no bias)");
+    check_near(lin->jacobian(123.0, 2.0), 2.0, 1e-12, "linear Jacobian = sigma");
+  }
+}
+
 } // namespace
 
 int main() {
   std::mt19937 rng(1);
   test_gaussian();
+  test_none_and_linear();
   for (const int N : {1, 2, 4})
     test_magnitude(N, rng);
   if (failures == 0)

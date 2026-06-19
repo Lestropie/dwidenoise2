@@ -569,6 +569,16 @@ void run() {
   if (!opt.empty())
     decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
 
+  // Resolve the requested variance-stabilising transform up-front:
+  //   -vst_method none disables the transform entirely, which makes iterative
+  //   refinement of the noise level pointless (handled below) and is incompatible
+  //   with -noise_in (which exists only to parameterise the transform).
+  auto opt_vstmethod = get_options("vst_method");
+  const NoiseModel::vst_method_t vst_method =
+      opt_vstmethod.empty() ? NoiseModel::vst_method_t::FOI
+                            : NoiseModel::vst_method_t(int(opt_vstmethod[0][0]));
+  const bool vst_none = (vst_method == NoiseModel::vst_method_t::NONE);
+
   // A pre-estimated noise level provided via -noise_in is authoritative:
   //   it parameterises the variance-stabilising transform (the VST scale),
   //   and via the Fixed/Import estimator (make_estimator below) it bypasses
@@ -577,6 +587,10 @@ void run() {
   Image<float> user_vst_image;
   opt = get_options("noise_in");
   if (!opt.empty()) {
+    if (vst_none)
+      throw Exception("Options -noise_in and -vst_method none are incompatible: "
+                      "a pre-estimated noise level is used to parameterise the variance-stabilising transform, "
+                      "which is disabled by -vst_method none");
     if (demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
     }
@@ -669,7 +683,19 @@ void run() {
     final_exports.set_eigenspectra_path(opt[0][0]);
 
   std::vector<Iterative::Iteration> iterations;
-  if (get_options("onepass").empty() && get_options("noise_in").empty() && get_options("fixed_rank").empty()) {
+  const bool single_pass_requested =
+      !get_options("onepass").empty() || !get_options("noise_in").empty() || !get_options("fixed_rank").empty();
+  // With -vst_method none the data are not stabilised, so the noise level estimated
+  //   by one iteration has zero effect on the processing of the next: iterating is
+  //   wasted computation (and the multi-resolution machinery additionally assumes a
+  //   unit-variance stabilised domain that does not hold here). Fall back to a single
+  //   estimation/denoising pass.
+  if (vst_none && !single_pass_requested) {
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
+         "refining the noise level estimate would have no effect on subsequent iterations "
+         "and is therefore wasted computation; performing a single pass instead");
+  }
+  if (!single_pass_requested && !vst_none) {
     iterations = default_iterations;
   } else {
     Iterative::Iteration config;

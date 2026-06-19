@@ -326,6 +326,16 @@ void run() {
   if (!opt.empty())
     decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
 
+  // Resolve the requested variance-stabilising transform up-front:
+  //   -vst_method none disables the transform entirely, which makes iterative
+  //   refinement of the noise level pointless (handled below) and is incompatible
+  //   with -noise_in (which exists only to parameterise the transform).
+  auto opt_vstmethod = get_options("vst_method");
+  const NoiseModel::vst_method_t vst_method =
+      opt_vstmethod.empty() ? NoiseModel::vst_method_t::FOI
+                            : NoiseModel::vst_method_t(int(opt_vstmethod[0][0]));
+  const bool vst_none = (vst_method == NoiseModel::vst_method_t::NONE);
+
   // A pre-estimated noise level provided via -noise_in seeds the variance-stabilising
   //   transform (the VST scale) as a prior; unlike dwidenoise2 it does not bypass
   //   estimation (make_estimator below keeps permit_bypass == false), so a genuine
@@ -334,8 +344,13 @@ void run() {
   //   (see vst_plan.md sections 2.1 and 6.2).
   Image<float> user_vst_image;
   opt = get_options("noise_in");
-  if (!opt.empty())
+  if (!opt.empty()) {
+    if (vst_none)
+      throw Exception("Options -noise_in and -vst_method none are incompatible: "
+                      "a pre-estimated noise level is used to parameterise the variance-stabilising transform, "
+                      "which is disabled by -vst_method none");
     user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
+  }
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
 
@@ -346,7 +361,16 @@ void run() {
   //   directly, so the iterative multi-resolution bootstrap is bypassed in favour of a single
   //   refinement pass (as for -onepass).
   std::vector<Iterative::Iteration> iterations;
-  if (get_options("onepass").empty() && get_options("noise_in").empty()) {
+  const bool single_pass_requested = !get_options("onepass").empty() || !get_options("noise_in").empty();
+  // With -vst_method none the data are not stabilised, so the noise level estimated
+  //   by one iteration has zero effect on the processing of the next: iterating is
+  //   wasted computation. Fall back to a single estimation pass.
+  if (vst_none && !single_pass_requested) {
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
+         "refining the noise level estimate would have no effect on subsequent iterations "
+         "and is therefore wasted computation; performing a single pass instead");
+  }
+  if (!single_pass_requested && !vst_none) {
     if (!get_options("subsample").empty())
       throw Exception("Implementation does not support use of -subsample without -onepass");
     iterations = default_iterations;

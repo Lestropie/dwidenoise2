@@ -69,9 +69,14 @@ OptionGroup precondition_options(const bool include_output)
            "(default: 1, i.e. Rician; ignored for complex input data)")
     + Argument("count").type_integer(1)
   + Option("vst_method",
-           "the strategy used to construct the variance-stabilising transform and its bias-corrected inverse "
-           "for magnitude data; options are: " + join(NoiseModel::vst_methods, ",") + " "
-           "(default: foi; ignored for complex input data)")
+           "the variance-stabilising transform to apply prior to PCA; "
+           "options are: " + join(NoiseModel::vst_methods, ",") + "; "
+           "'none' applies no transform; "
+           "'linear' divides by the noise level (the appropriate transform for Gaussian-distributed, "
+           "e.g. complex or phase-demodulated, data); "
+           "'foi', 'koay' and 'mom' construct a non-linear transform with bias-corrected inverse "
+           "for magnitude data, differing only in the inverse / debias strategy "
+           "(default: foi for magnitude data; complex data always use the linear transform)")
     + Argument("method").type_choice(NoiseModel::vst_methods);
   if (include_output) {
     result
@@ -97,13 +102,32 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
   const NoiseModel::vst_method_t vst_method = opt_method.empty()                                  //
                                                   ? NoiseModel::vst_method_t::FOI                  //
                                                   : NoiseModel::vst_method_t(int(opt_method[0][0])); //
+  // -vst_method none: no variance-stabilising transform (identity), for any data type.
+  //   The noise distribution and -noise_dof are irrelevant, and the data reach PCA
+  //   unmodified (save for any demeaning); see the single-pass fallback / warning in
+  //   the calling commands.
+  if (vst_method == NoiseModel::vst_method_t::NONE) {
+    if (!opt_dof.empty())
+      WARN("Option -noise_dof is ignored when -vst_method none is specified: "
+           "no variance-stabilising transform is applied");
+    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
+  }
   if (complex) {
     if (!opt_dof.empty()) {
       WARN("Option -noise_dof is ignored for complex input data: "
            "the demodulated noise is Gaussian (one degree of freedom per channel)");
     }
-    // The forward transform for Gaussian data is linear, so -vst_method has no effect;
-    //   the default is harmless and no warning is emitted.
+    // The forward transform for Gaussian data is linear, so foi/koay/mom collapse to
+    //   the linear transform; the default is harmless and no warning is emitted.
+    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
+  }
+  // -vst_method linear: the simple linear transform u = m / sigma for magnitude data too.
+  //   This only normalises the scale (the magnitude noise remains heteroscedastic near
+  //   the floor) and performs no noise-floor debiasing; -noise_dof has no effect.
+  if (vst_method == NoiseModel::vst_method_t::LINEAR) {
+    if (!opt_dof.empty())
+      WARN("Option -noise_dof is ignored when -vst_method linear is specified: "
+           "the linear transform does not model the magnitude noise distribution");
     return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
   }
   const ssize_t num_channels = opt_dof.empty() ? 1 : ssize_t(opt_dof[0][0]);
