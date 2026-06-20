@@ -1,0 +1,24 @@
+# dwi2noise noise level estimation schedule: "default"
+#
+# This file reproduces the built-in default schedule of the dwi2noise command.
+# It is provided as a starting point for authoring bespoke schedules.
+#
+# Format:
+#  - One row per iteration of the multi-resolution noise level estimation.
+#  - The first non-comment line names the columns; columns may appear in any
+#    order, and any omitted column takes its default value.
+#  - The final row produces the estimated noise level map that is output.
+#
+# Columns:
+#  - subsample    : per-axis subsampling factor; a single integer (isotropic)
+#                   or a comma-separated triplet "x,y,z". Larger values perform
+#                   fewer PCAs (coarser, faster). Default: 2.
+#  - kernel_size  : multiplier applied to the PCA patch size. Default: 1.
+#  - smooth       : whether to smooth the estimated noise map before it is
+#                   passed to the next iteration ("none" or "smooth").
+#                   Default: none.
+#
+subsample   kernel_size   smooth
+8,8,8       16            none
+4,4,4       4             none
+2,2,2       1             smooth

@@ -1,0 +1,13 @@
+# dwidenoise2 noise level estimation schedule: "thorough"
+#
+# An extended schedule that performs the final reconstruction pass without
+# spatial subsampling (subsample 1), so that every voxel is the centre of its
+# own PCA patch. This is more complete (and considerably more expensive) than
+# the default schedule. The final row is the reconstruction (denoising) pass.
+# See "default" for documentation of the file format and columns.
+#
+subsample   kernel_size   smooth
+8,8,8       16            none
+4,4,4       4             none
+2,2,2       1             smooth
+1,1,1       1             none

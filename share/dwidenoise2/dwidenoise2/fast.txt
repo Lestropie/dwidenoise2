@@ -1,0 +1,11 @@
+# dwidenoise2 noise level estimation schedule: "fast"
+#
+# A reduced schedule that omits the coarsest pyramid level of the default
+# schedule, trading some accuracy of the noise level estimate for speed.
+# The final row is the reconstruction (denoising) pass.
+# See "default" for documentation of the file format and columns.
+#
+subsample   kernel_size   smooth
+4,4,4       4             none
+2,2,2       1             smooth
+2,2,2       1             none

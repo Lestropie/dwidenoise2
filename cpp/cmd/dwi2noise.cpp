@@ -29,6 +29,7 @@
 #include "denoise/mask.h"
 #include "denoise/noise_model/noise_model.h"
 #include "denoise/precondition.h"
+#include "denoise/schedule.h"
 #include "denoise/subsample.h"
 #include "dwi/gradient.h"
 #include "exception.h"
@@ -91,7 +92,9 @@ void usage() {
 
   + Kernel::default_size_description
 
-  + Kernel::cuboid_size_description;
+  + Kernel::cuboid_size_description
+
+  + Schedule::schedule_file_description;
 
   EXAMPLES
   + Example("Estimate a noise map, filter it, then denoise using the filtered map",
@@ -167,6 +170,7 @@ void usage() {
            " rather than the default iterative multi-resolution process")
   + Kernel::options
   + subsample_option
+  + Schedule::schedule_file_option
   + precondition_options(false)
 
   + DWI::GradImportOptions()
@@ -288,8 +292,10 @@ void run(Header &dwi,
   }
 
   // Last iteration
-  // Note that this may be modified by the user at the command-line
-  auto subsample = Subsample::make(dwi, default_subsample_ratio);
+  // The subsampling of the final iteration follows the final entry of the schedule
+  //   (which for the default schedule is the global default), and may additionally
+  //   be overridden at the command-line via -subsample.
+  auto subsample = Subsample::make(dwi, iterations.back().subsample_ratios);
   Iterative::estimate(input,
                       input_preconditioned,
                       mask,
@@ -354,33 +360,54 @@ void run() {
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
 
-  // Need to set up the subsampling header of the final iteration for configuration of final exports
-  auto final_subsample = Subsample::make(dwi, default_subsample_ratio);
-
-  // Supplying an external noise level via -noise_in seeds the variance-stabilising transform
-  //   directly, so the iterative multi-resolution bootstrap is bypassed in favour of a single
-  //   refinement pass (as for -onepass).
+  // Resolve the iteration schedule and the subsampling of the final iteration together:
+  //   the final exports are allocated on the final subsampling grid, which must match
+  //   the subsampling used for that pass.
   std::vector<Iterative::Iteration> iterations;
   const bool single_pass_requested = !get_options("onepass").empty() || !get_options("noise_in").empty();
-  // With -vst_method none the data are not stabilised, so the noise level estimated
-  //   by one iteration has zero effect on the processing of the next: iterating is
-  //   wasted computation. Fall back to a single estimation pass.
-  if (vst_none && !single_pass_requested) {
-    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-         "refining the noise level estimate would have no effect on subsequent iterations "
-         "and is therefore wasted computation; performing a single pass instead");
-  }
-  if (!single_pass_requested && !vst_none) {
+  std::shared_ptr<Subsample> final_subsample;
+  if (Schedule::requested()) {
+    // A user-specified schedule defines the iterative process explicitly, and is thus
+    //   incompatible with options that force a single pass, that set a single global
+    //   subsampling factor, or that disable the transform coupling the iterations.
+    if (single_pass_requested)
+      throw Exception("Option -schedule_file cannot be combined with -onepass or -noise_in, "
+                      "each of which forces a single-pass process");
     if (!get_options("subsample").empty())
-      throw Exception("Implementation does not support use of -subsample without -onepass");
-    iterations = default_iterations;
-  }
-  if (iterations.empty()) {
-    Iterative::Iteration config;
-    config.subsample_ratios = final_subsample->get_factors();
-    config.kernel_size_multiplier = 1.0;
-    config.smooth_noiseout = noise_smooth_type::SMOOTH;
-    iterations.push_back(config);
+      throw Exception("Options -schedule_file and -subsample are mutually exclusive: "
+                      "the schedule file sets the subsampling factor for each iteration");
+    if (vst_none)
+      throw Exception("Option -schedule_file cannot be combined with -vst_method none: "
+                      "without a variance-stabilising transform there is no coupling "
+                      "between iterations for the schedule to control");
+    iterations = Schedule::load("dwi2noise");
+    final_subsample = std::make_shared<Subsample>(dwi, iterations.back().subsample_ratios);
+  } else {
+    // Need to set up the subsampling header of the final iteration for configuration of final exports
+    final_subsample = Subsample::make(dwi, default_subsample_ratio);
+    // Supplying an external noise level via -noise_in seeds the variance-stabilising transform
+    //   directly, so the iterative multi-resolution bootstrap is bypassed in favour of a single
+    //   refinement pass (as for -onepass).
+    // With -vst_method none the data are not stabilised, so the noise level estimated
+    //   by one iteration has zero effect on the processing of the next: iterating is
+    //   wasted computation. Fall back to a single estimation pass.
+    if (vst_none && !single_pass_requested) {
+      WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
+           "refining the noise level estimate would have no effect on subsequent iterations "
+           "and is therefore wasted computation; performing a single pass instead");
+    }
+    if (!single_pass_requested && !vst_none) {
+      if (!get_options("subsample").empty())
+        throw Exception("Implementation does not support use of -subsample without -onepass");
+      iterations = default_iterations;
+    }
+    if (iterations.empty()) {
+      Iterative::Iteration config;
+      config.subsample_ratios = final_subsample->get_factors();
+      config.kernel_size_multiplier = 1.0;
+      config.smooth_noiseout = noise_smooth_type::SMOOTH;
+      iterations.push_back(config);
+    }
   }
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1]);

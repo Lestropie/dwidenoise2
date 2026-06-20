@@ -41,6 +41,7 @@
 #include "denoise/noise_model/noise_model.h"
 #include "denoise/precondition.h"
 #include "denoise/recon.h"
+#include "denoise/schedule.h"
 #include "denoise/subsample.h"
 #include "dwi/gradient.h"
 
@@ -125,7 +126,9 @@ void usage() {
 
   + Denoise::filter_description
 
-  + Denoise::aggregation_description;
+  + Denoise::aggregation_description
+
+  + Schedule::schedule_file_description;
 
   EXAMPLES
   + Example("To approximately replicate the behaviour of the original dwidenoise command",
@@ -229,6 +232,7 @@ void usage() {
   + Estimator::estimator_denoise_options
   + Kernel::options
   + subsample_option
+  + Schedule::schedule_file_option
   + precondition_options(true)
 
   + OptionGroup("Options that affect reconstruction of the output image series")
@@ -609,7 +613,52 @@ void run() {
          "there is no noise-floor bias to either preserve or remove");
   }
 
-  auto final_subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
+  // Resolve the iteration schedule and the subsampling of the final (reconstruction)
+  //   pass together: the export images allocated below sit on the final subsampling
+  //   grid, which must match the subsampling used for that pass.
+  std::vector<Iterative::Iteration> iterations;
+  const bool single_pass_requested =
+      !get_options("onepass").empty() || !get_options("noise_in").empty() || !get_options("fixed_rank").empty();
+  std::shared_ptr<Subsample> final_subsample;
+  if (Schedule::requested()) {
+    // A user-specified schedule defines the iterative process explicitly, and is thus
+    //   incompatible with options that force a single pass, that set a single global
+    //   subsampling factor, or that disable the transform coupling the iterations.
+    if (single_pass_requested)
+      throw Exception("Option -schedule_file cannot be combined with "
+                      "-onepass, -noise_in or -fixed_rank, "
+                      "each of which forces a single-pass process");
+    if (!get_options("subsample").empty())
+      throw Exception("Options -schedule_file and -subsample are mutually exclusive: "
+                      "the schedule file sets the subsampling factor for each iteration");
+    if (vst_none)
+      throw Exception("Option -schedule_file cannot be combined with -vst_method none: "
+                      "without a variance-stabilising transform there is no coupling "
+                      "between iterations for the schedule to control");
+    iterations = Schedule::load("dwidenoise2");
+    final_subsample = std::make_shared<Subsample>(dwi, iterations.back().subsample_ratios);
+  } else {
+    final_subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
+    // With -vst_method none the data are not stabilised, so the noise level estimated
+    //   by one iteration has zero effect on the processing of the next: iterating is
+    //   wasted computation (and the multi-resolution machinery additionally assumes a
+    //   unit-variance stabilised domain that does not hold here). Fall back to a single
+    //   estimation/denoising pass.
+    if (vst_none && !single_pass_requested) {
+      WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
+           "refining the noise level estimate would have no effect on subsequent iterations "
+           "and is therefore wasted computation; performing a single pass instead");
+    }
+    if (!single_pass_requested && !vst_none) {
+      iterations = default_iterations;
+    } else {
+      Iterative::Iteration config;
+      config.subsample_ratios = final_subsample->get_factors();
+      config.kernel_size_multiplier = 1.0;
+      config.smooth_noiseout = noise_smooth_type::NONE;
+      iterations.push_back(config);
+    }
+  }
   assert(final_subsample);
   if (aggregator == aggregator_type::EXCLUSIVE &&
       *std::max_element(final_subsample->get_factors().begin(), final_subsample->get_factors().end()) > 1) {
@@ -681,29 +730,6 @@ void run() {
   opt = get_options("eigenspectra");
   if (!opt.empty())
     final_exports.set_eigenspectra_path(opt[0][0]);
-
-  std::vector<Iterative::Iteration> iterations;
-  const bool single_pass_requested =
-      !get_options("onepass").empty() || !get_options("noise_in").empty() || !get_options("fixed_rank").empty();
-  // With -vst_method none the data are not stabilised, so the noise level estimated
-  //   by one iteration has zero effect on the processing of the next: iterating is
-  //   wasted computation (and the multi-resolution machinery additionally assumes a
-  //   unit-variance stabilised domain that does not hold here). Fall back to a single
-  //   estimation/denoising pass.
-  if (vst_none && !single_pass_requested) {
-    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-         "refining the noise level estimate would have no effect on subsequent iterations "
-         "and is therefore wasted computation; performing a single pass instead");
-  }
-  if (!single_pass_requested && !vst_none) {
-    iterations = default_iterations;
-  } else {
-    Iterative::Iteration config;
-    config.subsample_ratios = final_subsample->get_factors();
-    config.kernel_size_multiplier = 1.0;
-    config.smooth_noiseout = noise_smooth_type::NONE;
-    iterations.push_back(config);
-  }
 
   int prec = get_option_value("datatype", 0); // default: single precision
   if (dwi.datatype().is_complex())

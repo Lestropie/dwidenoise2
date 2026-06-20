@@ -35,6 +35,10 @@ COPY cpp/core/denoise /src/mrtrix3/cpp/core/denoise
 RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON --preset=release \
     && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert
 
+# Bundle the example noise estimation schedules alongside the binaries,
+#   so that they can be referenced by name via the -schedule_file option.
+COPY share /src/mrtrix3/build/share
+
 # Build final image.
 FROM base AS final
 
@@ -54,6 +58,9 @@ COPY --from=mrtrix3-builder /src/mrtrix3/build /opt/mrtrix3
 ENV PATH="/opt/mrtrix3/bin:$PATH"
 
 ENV LD_LIBRARY_PATH="/opt/mrtrix3/cpp/core/"
+
+# Location of the bundled noise estimation schedules (-schedule_file)
+ENV DWIDENOISE2_SCHEDULE_PATH="/opt/mrtrix3/share/dwidenoise2"
 
 # TODO Define an entrypoint for the container
 #ENTRYPOINT ["/opt/mrtrix3/bin/dwidenoise2"]

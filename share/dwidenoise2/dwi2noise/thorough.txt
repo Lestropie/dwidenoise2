@@ -1,0 +1,12 @@
+# dwi2noise noise level estimation schedule: "thorough"
+#
+# An extended schedule that adds a final full-resolution estimation pass
+# (subsample 1) with smoothing of the output noise map. This is more complete
+# (and considerably more expensive) than the default schedule.
+# See "default" for documentation of the file format and columns.
+#
+subsample   kernel_size   smooth
+8,8,8       16            none
+4,4,4       4             none
+2,2,2       1             none
+1,1,1       1             smooth
