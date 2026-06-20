@@ -17,15 +17,68 @@
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
+#include <string>
 
 #include "algo/loop.h"
 #include "datatype.h"
 #include "exception.h"
 #include "header.h"
 #include "image.h"
+#include "metadata/bids.h"
 
 namespace MR::Denoise {
+
+// Threshold on the number of voxels with invalid data above which a warning
+//   (rather than merely an informational message) is justified.
+// This is set to the largest number of voxels contained within a single slice
+//   taken orthogonal to any of the three image axes.
+// Where the slice encoding direction is known from the image metadata,
+//   that axis is excluded from the quantification,
+//   such that the presence of invalid data spanning as little as a single acquired slice
+//   is sufficient to trigger the warning.
+inline size_t invalid_data_warning_threshold(const Header &H) {
+  size_t slice_axis = 3; // Sentinel: no slice encoding direction identified from metadata
+  auto slice_encoding_it = H.keyval().find("SliceEncodingDirection");
+  if (slice_encoding_it != H.keyval().end()) {
+    const Metadata::BIDS::axis_vector_type dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
+    for (size_t axis = 0; axis != 3; ++axis) {
+      if (dir[axis]) {
+        slice_axis = axis;
+        break;
+      }
+    }
+  }
+  size_t threshold = 0;
+  for (size_t axis = 0; axis != 3; ++axis) {
+    if (axis == slice_axis)
+      continue;
+    // Number of voxels within a single slice orthogonal to this axis
+    size_t slice_voxels = 1;
+    for (size_t a = 0; a != 3; ++a) {
+      if (a != axis)
+        slice_voxels *= H.size(a);
+    }
+    threshold = std::max(threshold, slice_voxels);
+  }
+  return threshold;
+}
+
+// Report on the presence of voxels with invalid data,
+//   escalating from an informational message to a warning
+//   only where the prevalence of such voxels strictly exceeds the threshold defined above
+inline void report_invalid_data(const size_t excluded_count, const Header &H) {
+  if (excluded_count == 0)
+    return;
+  const std::string message = "A total of " + str(excluded_count) +     //
+                              " voxels were found with invalid data;"    //
+                              " these will be excluded from processing"; //
+  if (excluded_count > invalid_data_warning_threshold(H))
+    WARN(message);
+  else
+    INFO(message);
+}
 
 // Need to sweep through the input data,
 //   identify voxels that cannot be utilised in PCA,
@@ -73,10 +126,7 @@ template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>
     else
       ++excluded_count;
   }
-  if (excluded_count > 0) {
-    INFO(str(excluded_count) + " voxels were found with invalid data;"
-                               " these will be excluded from processing");
-  }
+  report_invalid_data(excluded_count, H);
   return mask;
 }
 
@@ -103,11 +153,7 @@ template <typename T> typename std::enable_if<!is_complex<T>::value, Image<bool>
     else
       ++excluded_count;
   }
-  if (excluded_count > 0) {
-    WARN("A total of " + str(excluded_count) +
-         " voxels were found with invalid data;"
-         " these will be excluded from processing");
-  }
+  report_invalid_data(excluded_count, H);
   return mask;
 }
 
