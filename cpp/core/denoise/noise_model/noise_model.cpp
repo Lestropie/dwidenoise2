@@ -31,8 +31,14 @@ namespace {
 // --- Tabulation grid parameters -------------------------------------------
 // All transforms are tabulated as functions of the normalised intensity
 //   theta = m / sigma (equivalently the normalised SNR a = nu / sigma).
-// The grids extend well beyond the high-SNR regime, where the transforms become
-//   linear and the Lut linear extrapolation is exact to first order.
+// The grids cover the low-to-moderate SNR regime in which the transforms are
+//   appreciably nonlinear. Real data routinely exceed these bounds (DWI b=0 SNR
+//   reaches several hundred), so values beyond the tabulated maximum are NOT
+//   clamped: the forward / algebraic-inverse Luts already extrapolate linearly
+//   (slope -> 1 at high SNR), and the unbiased-inverse construction does the same
+//   via interp_increasing_extrap(). The transforms are asymptotically linear
+//   there (the magnitude bias vanishes, a -> theta_m), so the first-order
+//   extrapolation is accurate; A_MAX / X_MAX need only bound the nonlinear range.
 constexpr default_type A_MAX = 32.0; // maximum tabulated normalised SNR (nu / sigma)
 constexpr default_type X_MAX = 64.0; // maximum tabulated normalised intensity (m / sigma)
 constexpr ssize_t N_A = 2048;        // samples on the normalised-SNR grid
@@ -86,6 +92,40 @@ default_type interp_increasing(const std::vector<default_type> &xtab, //
     return ytab.front();
   if (x >= xtab.back())
     return ytab.back();
+  ssize_t lo = 0;
+  ssize_t hi = n - 1;
+  while (hi - lo > 1) {
+    const ssize_t mid = (lo + hi) / 2;
+    if (xtab[mid] <= x)
+      lo = mid;
+    else
+      hi = mid;
+  }
+  const default_type frac = (x - xtab[lo]) / (xtab[lo + 1] - xtab[lo]);
+  return ytab[lo] * (1.0 - frac) + ytab[lo + 1] * frac;
+}
+
+// As interp_increasing(), but above the tabulated range linearly extrapolates
+//   using the slope of the final tabulated segment rather than clamping to the
+//   last value (the behaviour below the range is unchanged: clamp to the first).
+// Used when inverting the stabilising functions (eta, mu) to recover the
+//   normalised SNR a = nu / sigma. Both are asymptotically linear with unit slope
+//   at high SNR (the magnitude bias vanishes, so a -> theta_m), and beyond the
+//   maximum tabulated SNR continuing that trend is far more accurate than
+//   saturating at the table edge. Saturating would instead return a constant
+//   a = A_MAX and, via the derived Jacobian, a vanishing inverse-transform gain,
+//   collapsing every high-SNR voxel onto a noise-level-scaled pedestal with no
+//   residual detail (see vst_plan.md; the failure mode this replaces).
+default_type interp_increasing_extrap(const std::vector<default_type> &xtab, //
+                                      const std::vector<default_type> &ytab, //
+                                      const default_type x) {                //
+  const ssize_t n = ssize_t(xtab.size());
+  if (x <= xtab.front())
+    return ytab.front();
+  if (x >= xtab.back()) {
+    const default_type slope = (ytab[n - 1] - ytab[n - 2]) / (xtab[n - 1] - xtab[n - 2]);
+    return ytab[n - 1] + (x - xtab[n - 1]) * slope;
+  }
   ssize_t lo = 0;
   ssize_t hi = n - 1;
   while (hi - lo > 1) {
@@ -222,7 +262,7 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     }
 
     for (ssize_t k = 0; k != N_U; ++k)
-      psi[k] = interp_increasing(eta, a_grid, u_grid[k]);
+      psi[k] = interp_increasing_extrap(eta, a_grid, u_grid[k]);
   } break;
   case vst_method_t::KOAY:
   case vst_method_t::MOM: {
@@ -238,7 +278,7 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
       if (vst_method == vst_method_t::KOAY && theta_m <= floor_mean)
         psi[k] = 0.0;
       else
-        psi[k] = interp_increasing(mu, a_grid, theta_m);
+        psi[k] = interp_increasing_extrap(mu, a_grid, theta_m);
     }
   } break;
   }
