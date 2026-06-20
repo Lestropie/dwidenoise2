@@ -31,22 +31,26 @@ namespace {
 // --- Tabulation grid parameters -------------------------------------------
 // All transforms are tabulated as functions of the normalised intensity
 //   theta = m / sigma (equivalently the normalised SNR a = nu / sigma).
-// The grids cover SNR up to A_MAX, spanning the regime in which the magnitude
-//   bias is non-negligible (it falls as ~1/(2*a) for a Rician). Real data exceed
-//   this (DWI b=0 SNR reaches several hundred), so beyond the tabulated range the
-//   bias-corrected inverse is NOT extrapolated: the magnitude bias has effectively
-//   vanished, so the unbiased inverse reverts exactly to the algebraic inverse
-//   (nu = m, the high-SNR limit), with unit local gain. This avoids any drift /
-//   overshoot from extrapolating the inverse's terminal slope, and bounds the
-//   error by the (already tiny) residual bias at a = A_MAX (~1/(2*A_MAX)).
-//   X_MAX = 2 * A_MAX gives headroom for the noise distribution's upper tail when
-//   tabulating the forward transform / eta integral, and tabulates the algebraic
-//   inverse out to SNR = X_MAX (beyond which the Lut extrapolates it, slope -> 1).
-constexpr default_type A_MAX = 64.0;  // maximum tabulated normalised SNR (nu / sigma)
-constexpr default_type X_MAX = 128.0; // maximum tabulated normalised intensity (m / sigma)
-constexpr ssize_t N_A = 4096;         // samples on the normalised-SNR grid
-constexpr ssize_t N_X = 16384;        // samples on the normalised-intensity grid
-constexpr ssize_t N_U = 8192;         // samples on the stabilised-domain grid
+//
+// The grids cover SNR up to A_MAX, the regime in which the magnitude bias is
+//   non-negligible (it falls as ~(2N-1)/(2a) for 2N degrees of freedom). Beyond
+//   the tabulated range the bias-corrected inverse is NOT extrapolated: the bias
+//   has effectively vanished, so the unbiased inverse reverts to the algebraic
+//   inverse (nu = m, unit local gain). The residual bias frozen at the revert
+//   point is ~(2N-1)/(2*A_MAX); to keep this ~constant for any receive-channel
+//   count N, A_MAX is scaled with N (A_MAX = A_POISSON*(2N-1)) rather than being a
+//   hard-coded constant, so high-channel sum-of-squares data is handled correctly.
+//   The grid STEP SIZES are instead fixed (independent of N); the sample counts
+//   N_A / N_X / N_U are derived per-model from the ranges (see the constructor).
+//
+// The exact-unbiased (FOI) eta integral is an O(A_MAX^2) Poisson mixture, so it is
+//   evaluated only up to A_POISSON (a fixed SNR); beyond that the Jensen correction
+//   is negligible and eta(a) -> f(mean_normalised(a)) (the moment-inverse limit,
+//   where FOI and MOM coincide). This keeps the build cost independent of N.
+constexpr default_type GRID_STEP_THETA = 128.0 / 16383.0;   // normalised-intensity step (m/sigma), ~0.0078
+constexpr default_type GRID_STEP_A = 64.0 / 4095.0;         // normalised-SNR step (nu/sigma), ~0.0156
+constexpr default_type GRID_STEP_U = 2.0 * GRID_STEP_THETA; // stabilised-domain step
+constexpr default_type A_POISSON = 64.0;                    // SNR cap for the exact (Poisson-mixture) eta
 
 // 1F1(alpha; gamma; w) (confluent hypergeometric / Kummer) for w >= 0,
 //   evaluated as a positive-term series (no catastrophic cancellation).
@@ -134,6 +138,14 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
   if (N < 1)
     throw Exception("Non-central chi noise model requires at least one receive channel");
 
+  // Tabulated SNR / intensity ranges, scaled with the channel count so the
+  //   residual bias frozen at the revert point (~(2N-1)/(2*A_MAX)) is ~constant;
+  //   the step sizes are fixed, so the sample counts grow with N (and DOF).
+  const default_type A_MAX = A_POISSON * default_type(2 * N - 1);
+  const default_type X_MAX = A_MAX + A_POISSON; // headroom for the noise distribution's upper tail
+  const ssize_t N_A = ssize_t(std::lround(A_MAX / GRID_STEP_A)) + 1;
+  const ssize_t N_X = ssize_t(std::lround(X_MAX / GRID_STEP_THETA)) + 1;
+
   floor_mean = mean_normalised(0.0, N);
   const default_type floor_sd = std::sqrt(variance_normalised(0.0, N));
 
@@ -166,6 +178,7 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
   forward = Lut(0.0, dx, std::vector<default_type>(f));
 
   // --- Algebraic inverse f^{-1}(u) ------------------------------------------
+  const ssize_t N_U = ssize_t(std::lround(u_max / GRID_STEP_U)) + 1;
   const std::vector<default_type> u_grid = uniform_grid(u_max, N_U);
   const default_type du = u_grid[1] - u_grid[0];
   {
@@ -184,7 +197,9 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     //   E_j = E[ f(sqrt(chi^2_{2(N+j)})) ] is independent of a (precomputed once),
     //   and eta(a) = sum_j Poisson(j; a^2/2) E_j.
     // Psi = eta^{-1}, the exact-unbiased inverse: smooth and well-defined at a=0.
-    const default_type lambda_max = 0.5 * A_MAX * A_MAX;
+    // Evaluated only up to A_POISSON; eta(a > A_POISSON) uses the high-SNR
+    //   asymptote below (the Poisson mixture is O(A^2), this keeps it N-independent).
+    const default_type lambda_max = 0.5 * A_POISSON * A_POISSON;
     const ssize_t Jmax = ssize_t(std::ceil(lambda_max + 8.0 * std::sqrt(lambda_max))) + 5;
 
     // Central chi pdf (2N DOF) on the intensity grid, advanced across orders by
@@ -193,27 +208,30 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     // The advance is purely additive, so the pdf stays accurate at its (high-x)
     //   peak for every order. Advancing the linear-space pdf instead would zero the
     //   high-x entries irrecoverably (the j=0 initialiser exp(-x^2/2) underflows in
-    //   double precision for x > ~38.6), capping the reachable SNR near 38, i.e.
-    //   below A_MAX. exp() is taken only to evaluate the integrand (clamped to zero
-    //   far below the peak, where the contribution is negligible).
-    std::vector<default_type> log_x(N_X, -std::numeric_limits<default_type>::infinity());
-    for (ssize_t i = 1; i != N_X; ++i)
+    //   double precision for x > ~38.6). exp() is taken only to evaluate the
+    //   integrand (clamped to zero far below the peak, where it is negligible).
+    // The integral is truncated to the pdf's support: the highest order's chi peak
+    //   is at x = sqrt(2(N+Jmax)-1) (set by A_POISSON, ~70), so x up to A_POISSON+16
+    //   suffices; this bounds the per-order cost independently of N / X_MAX.
+    const ssize_t n_int = std::min(N_X, ssize_t(std::lround((A_POISSON + 16.0) / GRID_STEP_THETA)) + 1);
+    std::vector<default_type> log_x(n_int, -std::numeric_limits<default_type>::infinity());
+    for (ssize_t i = 1; i != n_int; ++i)
       log_x[i] = std::log(x_grid[i]);
-    std::vector<default_type> log_p(N_X);
+    std::vector<default_type> log_p(n_int);
     const default_type log_norm = (default_type(N) - 1.0) * std::log(2.0) + std::lgamma(default_type(N));
-    for (ssize_t i = 0; i != N_X; ++i)
+    for (ssize_t i = 0; i != n_int; ++i)
       log_p[i] = default_type(2 * N - 1) * log_x[i] - 0.5 * x_grid[i] * x_grid[i] - log_norm;
-    std::vector<default_type> p(N_X);
+    std::vector<default_type> p(n_int);
     std::vector<default_type> E(Jmax + 1);
     for (ssize_t j = 0; j <= Jmax; ++j) {
-      for (ssize_t i = 0; i != N_X; ++i)
+      for (ssize_t i = 0; i != n_int; ++i)
         p[i] = log_p[i] > -700.0 ? std::exp(log_p[i]) : 0.0;
       default_type integral = 0.0;
-      for (ssize_t i = 0; i != N_X - 1; ++i)
+      for (ssize_t i = 0; i != n_int - 1; ++i)
         integral += 0.5 * (f[i] * p[i] + f[i + 1] * p[i + 1]) * dx;
       E[j] = integral;
       const default_type log_scale = -std::log(default_type(2 * (N + j)));
-      for (ssize_t i = 0; i != N_X; ++i)
+      for (ssize_t i = 0; i != n_int; ++i)
         log_p[i] += 2.0 * log_x[i] + log_scale;
     }
 
@@ -224,6 +242,13 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     std::vector<default_type> eta(N_A);
     eta[0] = E[0]; // a = 0: pure central chi, eta(0) = E_0
     for (ssize_t i = 1; i != N_A; ++i) {
+      if (a_grid[i] > A_POISSON) {
+        // High-SNR asymptote: the Jensen correction is negligible, so
+        //   eta(a) = E[f(m/sigma)] -> f(E[m/sigma]) = f(mean_normalised(a)).
+        //   (Here the exact-unbiased inverse coincides with the moment inverse.)
+        eta[i] = interp_increasing(x_grid, f, mean_normalised(a_grid[i], N));
+        continue;
+      }
       const default_type lambda = 0.5 * a_grid[i] * a_grid[i];
       const default_type log_lambda = std::log(lambda);
       default_type log_max = -std::numeric_limits<default_type>::infinity();
