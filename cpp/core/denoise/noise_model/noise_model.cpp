@@ -31,19 +31,22 @@ namespace {
 // --- Tabulation grid parameters -------------------------------------------
 // All transforms are tabulated as functions of the normalised intensity
 //   theta = m / sigma (equivalently the normalised SNR a = nu / sigma).
-// The grids cover the low-to-moderate SNR regime in which the transforms are
-//   appreciably nonlinear. Real data routinely exceed these bounds (DWI b=0 SNR
-//   reaches several hundred), so values beyond the tabulated maximum are NOT
-//   clamped: the forward / algebraic-inverse Luts already extrapolate linearly
-//   (slope -> 1 at high SNR), and the unbiased-inverse construction does the same
-//   via interp_increasing_extrap(). The transforms are asymptotically linear
-//   there (the magnitude bias vanishes, a -> theta_m), so the first-order
-//   extrapolation is accurate; A_MAX / X_MAX need only bound the nonlinear range.
-constexpr default_type A_MAX = 32.0; // maximum tabulated normalised SNR (nu / sigma)
-constexpr default_type X_MAX = 64.0; // maximum tabulated normalised intensity (m / sigma)
-constexpr ssize_t N_A = 2048;        // samples on the normalised-SNR grid
-constexpr ssize_t N_X = 8192;        // samples on the normalised-intensity grid
-constexpr ssize_t N_U = 4096;        // samples on the stabilised-domain grid
+// The grids cover SNR up to A_MAX, spanning the regime in which the magnitude
+//   bias is non-negligible (it falls as ~1/(2*a) for a Rician). Real data exceed
+//   this (DWI b=0 SNR reaches several hundred), so beyond the tabulated range the
+//   bias-corrected inverse is NOT extrapolated: the magnitude bias has effectively
+//   vanished, so the unbiased inverse reverts exactly to the algebraic inverse
+//   (nu = m, the high-SNR limit), with unit local gain. This avoids any drift /
+//   overshoot from extrapolating the inverse's terminal slope, and bounds the
+//   error by the (already tiny) residual bias at a = A_MAX (~1/(2*A_MAX)).
+//   X_MAX = 2 * A_MAX gives headroom for the noise distribution's upper tail when
+//   tabulating the forward transform / eta integral, and tabulates the algebraic
+//   inverse out to SNR = X_MAX (beyond which the Lut extrapolates it, slope -> 1).
+constexpr default_type A_MAX = 64.0;  // maximum tabulated normalised SNR (nu / sigma)
+constexpr default_type X_MAX = 128.0; // maximum tabulated normalised intensity (m / sigma)
+constexpr ssize_t N_A = 4096;         // samples on the normalised-SNR grid
+constexpr ssize_t N_X = 16384;        // samples on the normalised-intensity grid
+constexpr ssize_t N_U = 8192;         // samples on the stabilised-domain grid
 
 // 1F1(alpha; gamma; w) (confluent hypergeometric / Kummer) for w >= 0,
 //   evaluated as a positive-term series (no catastrophic cancellation).
@@ -92,40 +95,6 @@ default_type interp_increasing(const std::vector<default_type> &xtab, //
     return ytab.front();
   if (x >= xtab.back())
     return ytab.back();
-  ssize_t lo = 0;
-  ssize_t hi = n - 1;
-  while (hi - lo > 1) {
-    const ssize_t mid = (lo + hi) / 2;
-    if (xtab[mid] <= x)
-      lo = mid;
-    else
-      hi = mid;
-  }
-  const default_type frac = (x - xtab[lo]) / (xtab[lo + 1] - xtab[lo]);
-  return ytab[lo] * (1.0 - frac) + ytab[lo + 1] * frac;
-}
-
-// As interp_increasing(), but above the tabulated range linearly extrapolates
-//   using the slope of the final tabulated segment rather than clamping to the
-//   last value (the behaviour below the range is unchanged: clamp to the first).
-// Used when inverting the stabilising functions (eta, mu) to recover the
-//   normalised SNR a = nu / sigma. Both are asymptotically linear with unit slope
-//   at high SNR (the magnitude bias vanishes, so a -> theta_m), and beyond the
-//   maximum tabulated SNR continuing that trend is far more accurate than
-//   saturating at the table edge. Saturating would instead return a constant
-//   a = A_MAX and, via the derived Jacobian, a vanishing inverse-transform gain,
-//   collapsing every high-SNR voxel onto a noise-level-scaled pedestal with no
-//   residual detail (see vst_plan.md; the failure mode this replaces).
-default_type interp_increasing_extrap(const std::vector<default_type> &xtab, //
-                                      const std::vector<default_type> &ytab, //
-                                      const default_type x) {                //
-  const ssize_t n = ssize_t(xtab.size());
-  if (x <= xtab.front())
-    return ytab.front();
-  if (x >= xtab.back()) {
-    const default_type slope = (ytab[n - 1] - ytab[n - 2]) / (xtab[n - 1] - xtab[n - 2]);
-    return ytab[n - 1] + (x - xtab[n - 1]) * slope;
-  }
   ssize_t lo = 0;
   ssize_t hi = n - 1;
   while (hi - lo > 1) {
@@ -218,23 +187,34 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     const default_type lambda_max = 0.5 * A_MAX * A_MAX;
     const ssize_t Jmax = ssize_t(std::ceil(lambda_max + 8.0 * std::sqrt(lambda_max))) + 5;
 
-    // Central chi pdf (2N DOF) on the intensity grid; advanced across orders by
-    //   the recurrence p(x; 2(N+j)) = p(x; 2(N+j-1)) * x^2 / (2(N+j-1)).
-    std::vector<default_type> p(N_X, 0.0);
+    // Central chi pdf (2N DOF) on the intensity grid, advanced across orders by
+    //   the recurrence p(x; 2(N+j)) = p(x; 2(N+j-1)) * x^2 / (2(N+j-1)), carried in
+    //   log space: log p(x; 2(N+j+1)) = log p(x; 2(N+j)) + 2 log(x) - log(2(N+j)).
+    // The advance is purely additive, so the pdf stays accurate at its (high-x)
+    //   peak for every order. Advancing the linear-space pdf instead would zero the
+    //   high-x entries irrecoverably (the j=0 initialiser exp(-x^2/2) underflows in
+    //   double precision for x > ~38.6), capping the reachable SNR near 38, i.e.
+    //   below A_MAX. exp() is taken only to evaluate the integrand (clamped to zero
+    //   far below the peak, where the contribution is negligible).
+    std::vector<default_type> log_x(N_X, -std::numeric_limits<default_type>::infinity());
+    for (ssize_t i = 1; i != N_X; ++i)
+      log_x[i] = std::log(x_grid[i]);
+    std::vector<default_type> log_p(N_X);
     const default_type log_norm = (default_type(N) - 1.0) * std::log(2.0) + std::lgamma(default_type(N));
-    for (ssize_t i = 1; i != N_X; ++i) {
-      const default_type x = x_grid[i];
-      p[i] = std::exp(default_type(2 * N - 1) * std::log(x) - 0.5 * x * x - log_norm);
-    }
+    for (ssize_t i = 0; i != N_X; ++i)
+      log_p[i] = default_type(2 * N - 1) * log_x[i] - 0.5 * x_grid[i] * x_grid[i] - log_norm;
+    std::vector<default_type> p(N_X);
     std::vector<default_type> E(Jmax + 1);
     for (ssize_t j = 0; j <= Jmax; ++j) {
+      for (ssize_t i = 0; i != N_X; ++i)
+        p[i] = log_p[i] > -700.0 ? std::exp(log_p[i]) : 0.0;
       default_type integral = 0.0;
       for (ssize_t i = 0; i != N_X - 1; ++i)
         integral += 0.5 * (f[i] * p[i] + f[i + 1] * p[i + 1]) * dx;
       E[j] = integral;
-      const default_type scale = 1.0 / default_type(2 * (N + j));
+      const default_type log_scale = -std::log(default_type(2 * (N + j)));
       for (ssize_t i = 0; i != N_X; ++i)
-        p[i] *= x_grid[i] * x_grid[i] * scale;
+        log_p[i] += 2.0 * log_x[i] + log_scale;
     }
 
     // eta(a) on the SNR grid via numerically-stable (max-subtracted) Poisson sum.
@@ -261,8 +241,20 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
       eta[i] = num / den;
     }
 
-    for (ssize_t k = 0; k != N_U; ++k)
-      psi[k] = interp_increasing_extrap(eta, a_grid, u_grid[k]);
+    // Within the tabulated range Psi = eta^{-1}. Beyond it (u >= eta(A_MAX)) the
+    //   magnitude bias has effectively vanished, so the unbiased inverse reverts to
+    //   the algebraic inverse nu = m (= theta_m = f^{-1}(u)), the high-SNR limit
+    //   with unit local gain. This avoids the drift / overshoot of extrapolating
+    //   eta^{-1}'s terminal slope. The (tiny) residual bias at the join is held
+    //   constant ("bias_join") so that Psi -- and hence the derived local gain --
+    //   is continuous across the join (no spurious gain spike); the resulting
+    //   constant offset from nu = m is bounded by bias(A_MAX) ~ 1/(2*A_MAX).
+    const default_type eta_max = eta.back();
+    const default_type bias_join = interp_increasing(f, x_grid, eta_max) - A_MAX;
+    for (ssize_t k = 0; k != N_U; ++k) {
+      const default_type theta_m = interp_increasing(f, x_grid, u_grid[k]);
+      psi[k] = (u_grid[k] >= eta_max) ? (theta_m - bias_join) : interp_increasing(eta, a_grid, u_grid[k]);
+    }
   } break;
   case vst_method_t::KOAY:
   case vst_method_t::MOM: {
@@ -273,12 +265,19 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     //   known-sigma / group-mean setting the Koay-Basser fixed point coincides
     //   with the first-moment inverse (its distinctive sub-SNR-1.913 behaviour
     //   requires a per-group variance estimate, which is not propagated here).
+    // As for FOI, beyond the tabulated SNR range (theta_m >= mu(A_MAX)) the bias
+    //   has vanished and the inverse reverts to nu = m (theta_m), with the residual
+    //   bias held constant at the join (bias_join) for gain continuity.
+    const default_type mu_max = mu.back();
+    const default_type bias_join = mu_max - A_MAX;
     for (ssize_t k = 0; k != N_U; ++k) {
       const default_type theta_m = interp_increasing(f, x_grid, u_grid[k]);
       if (vst_method == vst_method_t::KOAY && theta_m <= floor_mean)
         psi[k] = 0.0;
+      else if (theta_m >= mu_max)
+        psi[k] = theta_m - bias_join;
       else
-        psi[k] = interp_increasing_extrap(mu, a_grid, theta_m);
+        psi[k] = interp_increasing(mu, a_grid, theta_m);
     }
   } break;
   }
