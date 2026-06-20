@@ -17,24 +17,21 @@
 
 #pragma once
 
-#include <memory>
 #include <string>
-#include <vector>
 
-#include "app.h"
-#include "image.h"
+#include "denoise/noise_model/noise_model.h"
+#include "denoise/noise_model/noncentralchi.h"
 
-namespace MR::Denoise::Estimator {
+namespace MR::Denoise::NoiseModel {
 
-class Base;
+// Rician noise model: the single-channel (N = 1) special case of the
+//   non-central chi distribution.
+class Rician : public NonCentralChi {
+public:
+  explicit Rician(const vst_method_t vst_method) : NonCentralChi(1, vst_method) {}
+  std::string description() const final {
+    return "Rician (2 DOF; VST: " + vst_methods[size_t(vst_method)] + ")";
+  }
+};
 
-extern const App::Option estimator_option;
-extern const App::OptionGroup estimator_denoise_options;
-const std::vector<std::string> estimators = {"exp1", "exp2", "med", "mrm2023", "tbme2022"};
-enum class estimator_type { EXP1, EXP2, MED, MRM2023, TBME2022 };
-// Default data-driven estimator, used both to populate the -estimator help text
-//   and as the fallback when the option is not specified.
-constexpr estimator_type default_estimator = estimator_type::TBME2022;
-std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool permit_bypass);
-
-} // namespace MR::Denoise::Estimator
+} // namespace MR::Denoise::NoiseModel

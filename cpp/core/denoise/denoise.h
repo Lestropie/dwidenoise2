@@ -86,7 +86,7 @@ Image<float> condition_noise_map(Image<float> &in,
 //   from a -noise_in command-line argument, which may be either:
 // - a scalar value, yielding a spatially-constant map over the spatial grid of H_spatial; or
 // - the filesystem path to a pre-estimated 3D noise level image.
-// The scalar-vs-image dispatch mirrors that of Estimator::make_estimator().
+// The scalar-vs-image dispatch mirrors that of Estimator::make_imposed().
 // The returned map is conditioned (padded) for safe cubic interpolation.
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial);
 

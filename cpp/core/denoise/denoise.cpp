@@ -170,7 +170,7 @@ Image<float> condition_noise_map(Image<float> &in,
 
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial) {
   // Detect whether a scalar value or an image path was provided,
-  //   matching the dispatch used by Estimator::make_estimator().
+  //   matching the dispatch used by Estimator::make_imposed().
   std::optional<default_type> scalar_value;
   try {
     scalar_value = default_type(arg);

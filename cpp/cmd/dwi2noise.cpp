@@ -138,7 +138,7 @@ void usage() {
     "Tensor denoising of multidimensional MRI data. "
     "Magnetic Resonance in Medicine, 2023, 89(3), 1160-1172"
 
-  + "* If using -estimator tbme2022: "
+  + "* If using -estimator tbme2022 (the default): "
     "Zhu, W.; Ma, X.; Zhu, X.-H.; Ugurbil, K.; Chen, W.; Wu, X. "
     "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
     "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"

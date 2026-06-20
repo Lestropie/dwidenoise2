@@ -17,22 +17,34 @@
 
 #pragma once
 
-#include <string>
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <memory>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/result.h"
 #include "image.h"
-#include "interp/cubic.h"
+#include "math/math.h"
 
 namespace MR::Denoise::Estimator {
 
-class Import : public Base {
+// Intermediate base for the "imposed" (non-data-driven) noise-level classes.
+//
+// Unlike the data-driven estimators (-estimator exp1/exp2/med/mrm2023/tbme2022),
+//   which infer the noise level from the patch eigenvalue spectrum, these classes
+//   obtain a *known* noise level sigma^2 from an external source -- a fixed scalar
+//   (Fixed), an imported image (Import), or the unit level reached after iterative
+//   variance-stabilising-transform refinement (Unity) -- and then apply the
+//   standard Marchenko-Pastur threshold: the upper bulk edge
+//   lambda+ = (1 + sqrt(rnz/qnz))^2 * sigma^2 sets the signal/noise boundary, and
+//   the signal rank is the count of sub-threshold eigenvalues.
+//
+// This shared threshold logic lives here so that the subclasses need only supply
+//   the per-patch sigma^2 via get_sigma_sq().
+class ImposedSigma : public Base {
 public:
-  Import(const std::string &path, Image<float> &vst_image) //
-      : noise_image(Image<float>::open(path)),             //
-        vst_image(vst_image) {}                            //
-  void update_vst_image(Image<float> &new_vst_image) override { vst_image = new_vst_image; }
   Result operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
                     const ssize_t m,                              //
                     const ssize_t n,                              //
@@ -43,28 +55,10 @@ public:
     const ssize_t rz = rank_zero(m, n, rp);
     const ssize_t rnz = rank_nonzero(m, n, rp);
     Result result;
-    {
-      // Construct on each call to preserve const-ness & thread-safety
-      Interp::Cubic<Image<float>> interp(noise_image);
-      // TODO This will cause issues at the edge of the image FoV
-      // Addressing this may require integration of the mrfilter changes
-      //   that provide wrappers for various handling of FoV edges
-      // For now, just expect that denoising won't do anything
-      //   where the patch centre is too close to the image edge for cubic interpolation
-      if (!interp.scanner(pos))
-        return result;
-      // If the data have been preconditioned at input based on a pre-estimated noise level,
-      //   then we need to rescale the threshold that we load from this image
-      //   based on knowledge of that rescaling
-      if (vst_image.valid()) {
-        Interp::Cubic<Image<float>> vst_interp(vst_image);
-        if (!vst_interp.scanner(pos))
-          return result;
-        result.sigma2 = Math::pow2(interp.value() / vst_interp.value());
-      } else {
-        result.sigma2 = Math::pow2(interp.value());
-      }
-    }
+    double sigma_sq;
+    if (!get_sigma_sq(pos, sigma_sq))
+      return result;
+    result.sigma2 = sigma_sq;
     // From this noise level,
     //   get the upper bound of the MP distribution and rank of signal
     //   given the ordered list of eigenvalues
@@ -75,13 +69,19 @@ public:
         break;
       result.cutoff_p = p + 1;
     }
-
     return result;
   }
 
-private:
-  Image<float> noise_image;
-  Image<float> vst_image;
+protected:
+  // Provide sigma^2 at the patch centre `pos`; return false if it cannot be
+  //   determined there (e.g. cubic interpolation outside the image FoV), in which
+  //   case the patch is left unprocessed (an invalid Result is returned).
+  virtual bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const = 0;
 };
+
+// Construct an imposed (non-data-driven) estimator from the -noise_in / -fixed_rank
+//   command-line options, or nullptr if neither is supplied (in which case
+//   data-driven estimation via make_estimator() should be used instead).
+std::shared_ptr<Base> make_imposed(Image<float> &vst_noise_in);
 
 } // namespace MR::Denoise::Estimator

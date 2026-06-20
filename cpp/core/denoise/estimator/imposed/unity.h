@@ -17,11 +17,8 @@
 
 #pragma once
 
-#include <string>
-
 #include "denoise/denoise.h"
-#include "denoise/estimator/base.h"
-#include "denoise/estimator/result.h"
+#include "denoise/estimator/imposed/imposed.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -32,32 +29,14 @@ namespace MR::Denoise::Estimator {
 // Where this occurs,
 //   the levels for the a priori noise level estimate and the VST are always identical,
 //   and so sigma^2 == 1.0 always
-class Unity : public Base {
+class Unity : public ImposedSigma {
 public:
-  Unity() {}
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
-                    const ssize_t m,                              //
-                    const ssize_t n,                              //
-                    const ssize_t rp,                             //
-                    const Eigen::Vector3d &pos) const final {     //
-    assert(s.size() == std::min(m, n));
-    const ssize_t qnz = dimlong_nonzero(m, n, rp);
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t rnz = rank_nonzero(m, n, rp);
-    Result result;
-    result.sigma2 = 1.0;
-    // From this noise level,
-    //   get the upper bound of the MP distribution and rank of signal
-    //   given the ordered list of eigenvalues
-    result.lamplus = Math::pow2(1.0 + std::sqrt(double(rnz) / double(qnz)));
-    result.cutoff_p = rz;
-    for (ssize_t p = rz; p != s.size(); ++p) {
-      if (s[p] / qnz > result.lamplus)
-        break;
-      result.cutoff_p = p + 1;
-    }
+  Unity() = default;
 
-    return result;
+protected:
+  bool get_sigma_sq(const Eigen::Vector3d & /*pos*/, double &sigma_sq) const override {
+    sigma_sq = 1.0;
+    return true;
   }
 };
 

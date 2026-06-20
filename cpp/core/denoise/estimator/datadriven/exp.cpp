@@ -15,7 +15,7 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/estimator/exp.h"
+#include "denoise/estimator/datadriven/exp.h"
 
 // Necessary for precompiler flags
 #include "denoise/denoise.h"

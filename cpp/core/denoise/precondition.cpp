@@ -205,11 +205,8 @@ demean_type select_demean(const Header &H) {
   auto opt = get_options("demean");
   if (opt.empty()) {
     if (shells_available) {
-      if (volume_groups_available)
-        throw Exception("Cannot automatically determine how to demean, "
-                        "as input series is >4D and also has a diffusion gradient table");
-      INFO("Automatically demeaning per b-value shell based on input gradient table");
-      return demean_type::SHELLS;
+      INFO("Automatically demeaning across all volumes based on input gradient table");
+      return demean_type::ALL;
     }
     if (volume_groups_available) {
       INFO("Automatically demeaning by volume groups");
