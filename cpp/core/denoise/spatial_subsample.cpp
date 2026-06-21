@@ -15,19 +15,11 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/subsample.h"
+#include "denoise/spatial_subsample.h"
 
 namespace MR::Denoise {
 
-const App::Option subsample_option =
-    App::Option("subsample",
-                "reduce the number of PCA kernels relative to the number of image voxels; "
-                "can provide either an integer subsampling factor, "
-                "or a comma-separated list of three factors; "
-                "default: 2") +
-    App::Argument("factor").type_integer(1);
-
-Subsample::Subsample(const Header &in, const std::array<ssize_t, 3> &factors)
+SpatialSubsample::SpatialSubsample(const Header &in, const std::array<ssize_t, 3> &factors)
     : H_in(make_input_header(in)),
       factors(factors),
       size({(in.size(0) + factors[0] - 1) / factors[0],
@@ -38,7 +30,7 @@ Subsample::Subsample(const Header &in, const std::array<ssize_t, 3> &factors)
               (in.size(2) - factors[2] * (size[2] - 1) - 1) / 2}),
       H_ss(make_subsample_header()) {}
 
-bool Subsample::process(const Kernel::Voxel::index_type &pos) const {
+bool SpatialSubsample::process(const Kernel::Voxel::index_type &pos) const {
   for (ssize_t axis = 0; axis != 3; ++axis) {
     if (pos[axis] % factors[axis] != origin[axis])
       return false;
@@ -46,7 +38,7 @@ bool Subsample::process(const Kernel::Voxel::index_type &pos) const {
   return true;
 }
 
-std::array<ssize_t, 3> Subsample::in2ss(const Kernel::Voxel::index_type &pos) const {
+std::array<ssize_t, 3> SpatialSubsample::in2ss(const Kernel::Voxel::index_type &pos) const {
   // Do not attempt to map an unprocessed voxel to a voxel index in subsampled space
   assert(process(pos));
   assert(!is_out_of_bounds(H_in, pos, 0, 3));
@@ -55,45 +47,14 @@ std::array<ssize_t, 3> Subsample::in2ss(const Kernel::Voxel::index_type &pos) co
                                  (pos[2] - origin[2]) / factors[2]}); //
 }
 
-std::array<ssize_t, 3> Subsample::ss2in(const Kernel::Voxel::index_type &pos) const {
+std::array<ssize_t, 3> SpatialSubsample::ss2in(const Kernel::Voxel::index_type &pos) const {
   assert(!is_out_of_bounds(H_ss, pos));
   return std::array<ssize_t, 3>({pos[0] * factors[0] + origin[0],   //
                                  pos[1] * factors[1] + origin[1],   //
                                  pos[2] * factors[2] + origin[2]}); //
 }
 
-std::shared_ptr<Subsample> Subsample::make(const Header &in, const ssize_t default_factor) {
-  auto opt = App::get_options("subsample");
-  std::array<ssize_t, 3> factors({default_factor, default_factor, default_factor});
-  if (!opt.empty()) {
-    const std::vector<ssize_t> userinput = parse_ints<ssize_t>(opt[0][0]);
-    if (userinput.size() == 1)
-      factors = {userinput[0], userinput[0], userinput[0]};
-    else if (userinput.size() == 3)
-      factors = {userinput[0], userinput[1], userinput[2]};
-    else
-      throw Exception("Subsampling factor must be either a single positive integer, "
-                      "or a comma-separated list of three positive integers");
-  }
-  return std::make_shared<Subsample>(in, factors);
-}
-
-std::shared_ptr<Subsample> Subsample::make(const Header &in, std::array<ssize_t, 3> factors) {
-  auto opt = App::get_options("subsample");
-  if (!opt.empty()) {
-    const std::vector<ssize_t> userinput = parse_ints<ssize_t>(opt[0][0]);
-    if (userinput.size() == 1)
-      factors = {userinput[0], userinput[0], userinput[0]};
-    else if (userinput.size() == 3)
-      factors = {userinput[0], userinput[1], userinput[2]};
-    else
-      throw Exception("Subsampling factor must be either a single positive integer, "
-                      "or a comma-separated list of three positive integers");
-  }
-  return std::make_shared<Subsample>(in, factors);
-}
-
-Header Subsample::make_input_header(const Header &H_in) const {
+Header SpatialSubsample::make_input_header(const Header &H_in) const {
   Header H(H_in);
   H.ndim() = 3;
   H.reset_intensity_scaling();
@@ -102,7 +63,7 @@ Header Subsample::make_input_header(const Header &H_in) const {
   return H;
 }
 
-Header Subsample::make_subsample_header() const {
+Header SpatialSubsample::make_subsample_header() const {
   Header H(H_in);
   H.ndim() = 3;
   H.reset_intensity_scaling();

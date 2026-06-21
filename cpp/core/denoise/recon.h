@@ -36,7 +36,7 @@ template <typename F> class Recon : public Estimate<F> {
 
 public:
   Recon(const Image<F> &image,
-        std::shared_ptr<Subsample> subsample,
+        std::shared_ptr<SpatialSubsample> subsample,
         std::shared_ptr<Kernel::Base> kernel,
         const decomp_type decomposition,
         std::shared_ptr<Estimator::Base> estimator,

@@ -59,8 +59,8 @@ ENV PATH="/opt/mrtrix3/bin:$PATH"
 
 ENV LD_LIBRARY_PATH="/opt/mrtrix3/cpp/core/"
 
-# Location of the bundled noise estimation schedules (-schedule_file)
-ENV DWIDENOISE2_SCHEDULE_PATH="/opt/mrtrix3/share/dwidenoise2"
+# The bundled noise estimation schedules (-schedule_file) are located relative to the
+#   executable (<exe dir>/../share/dwidenoise2), so no environment variable is required.
 
 # TODO Define an entrypoint for the container
 #ENTRYPOINT ["/opt/mrtrix3/bin/dwidenoise2"]

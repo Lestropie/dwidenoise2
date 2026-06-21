@@ -79,9 +79,11 @@ protected:
   virtual bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const = 0;
 };
 
-// Construct an imposed (non-data-driven) estimator from the -noise_in / -fixed_rank
-//   command-line options, or nullptr if neither is supplied (in which case
-//   data-driven estimation via make_estimator() should be used instead).
+// Construct an imposed (non-data-driven) estimator from the -fixed_rank command-line
+//   option, or nullptr if it is not supplied (in which case data-driven estimation via
+//   make_estimator() is used). Note: -noise_in does NOT yield an imposed estimator; it
+//   only seeds the variance-stabilising transform and the schedule then refines the
+//   estimate (the vst_noise_in argument is retained for interface symmetry but unused).
 std::shared_ptr<Base> make_imposed(Image<float> &vst_noise_in);
 
 } // namespace MR::Denoise::Estimator

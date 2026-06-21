@@ -20,6 +20,6 @@
 # schedule, trading some accuracy of the noise level estimate for speed.
 # See "default" for documentation of the file format and columns.
 #
-subsample   kernel_size   smooth
+spatial_subsample   kernel_size   smooth
 4,4,4       4             none
 2,2,2       1             smooth

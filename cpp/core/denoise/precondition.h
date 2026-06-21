@@ -30,6 +30,7 @@
 #include "header.h"
 #include "image.h"
 #include "interp/cubic.h"
+#include "math/rng.h"
 #include "transform.h"
 #include "types.h"
 
@@ -53,6 +54,21 @@ enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
 //     reproducing magnitude-scale output with the noise floor retained.
 // For complex (Gaussian) data there is no distribution bias and the two modes coincide.
 enum class bias_handling_t { DEBIAS, PRESERVE };
+
+// Operating point at which the non-linear inverse variance-stabilising transform (and its
+//   noise-floor debiasing) is evaluated when reversing preconditioning:
+// - SAMPLE: undo the demeaning offset first, then apply the inverse pointwise at each
+//     volume's own denoised value (operating point = group mean + denoised residual). The
+//     demeaning is treated purely as PCA conditioning and is reversed exactly before the
+//     inverse transform; debiasing is then independent of the demeaning grouping, and the
+//     natural (signal-dependent) heteroscedasticity is restored on the output scale. (default)
+// - GROUP_MEAN: linearise the inverse about the per-group stabilised-domain mean (the
+//     demeaning offset), mapping the denoised residual through the local Jacobian. Reproduces
+//     the prior behaviour; debiasing accuracy then depends on how far each volume departs from
+//     its group mean. Applies only to the DEBIAS bias handling: the PRESERVE (algebraic)
+//     inverse is always evaluated pointwise (a faithful, grouping-independent reversal).
+enum class debias_anchor_t { SAMPLE, GROUP_MEAN };
+const std::vector<std::string> debias_anchor_choices = {"sample", "group_mean"};
 
 App::OptionGroup precondition_options(const bool include_output);
 
@@ -112,15 +128,35 @@ public:
     vst_noise_image = new_vst_noise;
     compute_means(input);
   }
-  // The bias_handling argument applies only to the inverse transform
-  //   (inverse == true), selecting how the noise-distribution bias is treated
-  //   in the reconstructed output (see bias_handling_t); it is ignored for the
-  //   forward transform.
+  // The bias_handling and debias_anchor arguments apply only to the inverse transform
+  //   (inverse == true) and are ignored for the forward transform:
+  // - bias_handling selects how the noise-distribution bias is treated in the
+  //     reconstructed output (see bias_handling_t);
+  // - debias_anchor selects the operating point for the (non-linear) inverse
+  //     (see debias_anchor_t); the default SAMPLE undoes demeaning then inverts pointwise.
   void operator()(Image<T> input,
                   Image<T> output,
                   const bool inverse = false,
-                  const bias_handling_t bias_handling = bias_handling_t::DEBIAS) const;
-  const Header &header() const { return H_out; }
+                  const bias_handling_t bias_handling = bias_handling_t::DEBIAS,
+                  const debias_anchor_t debias_anchor = debias_anchor_t::SAMPLE) const;
+
+  // Select a stratified random subset of "fraction" of the volumes (along the
+  //   supra-spatial axes) for the next forward preconditioning + mean computation.
+  //   The subset is stratified by the active demeaning grouping (b-value shells or
+  //   volume groups; a single stratum for -demean none/all), so the relative
+  //   proportions of volumes from each group are preserved; each stratum keeps at
+  //   least min_per_group volumes. fraction >= 1 clears any subset (use all volumes).
+  // While a subset is active, header().size(3) and the forward output hold only the
+  //   m' selected volumes, so downstream code (Estimate / kernel sizing) sees m'
+  //   volumes and need not know that sub-sampling occurred.
+  // A subsequent update_vst_parameters() / compute_means() forms the per-group means
+  //   over this same subset, keeping the stabilised Casorati matrix exactly
+  //   rank-deficient by null_rank().
+  void set_temporal_subsample(default_type fraction, Math::RNG &rng, ssize_t min_per_group);
+
+  // Header of the preconditioned data: the full serialised header, or, while a
+  //   temporal subset is active, the subset header (size(3) == m').
+  const Header &header() const { return temporal_subset.empty() ? H_out : H_out_subset; }
 
   ssize_t null_rank() const {
     if (!vst_mean_image.valid())
@@ -131,12 +167,19 @@ public:
   }
 
   bool noop() const {
-    return (num_volume_groups == 1 && !phase_image.valid() && !vst_mean_image.valid() && !vst_noise_image.valid());
+    return (temporal_subset.empty() && num_volume_groups == 1 && !phase_image.valid() &&
+            !vst_mean_image.valid() && !vst_noise_image.valid());
   }
 
 private:
   const Header H_in;
   Header H_out;
+  // Subset header (a copy of H_out with size(3) == m') returned by header() while a
+  //   temporal subset is active; the preconditioned data then hold only the subset volumes.
+  Header H_out_subset;
+  // Current temporal subset: sorted original (serialised) volume indices used for noise
+  //   level estimation in this iteration; empty ⇒ all volumes (no temporal sub-sampling).
+  std::vector<ssize_t> temporal_subset;
   // For serialisation of >4D images
   ssize_t num_volume_groups;
   Image<uint32_t> serialise_image;

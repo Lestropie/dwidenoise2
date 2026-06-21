@@ -21,6 +21,7 @@
 #include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
+#include "math/rng.h"
 #include "stride.h"
 
 #include <Eigen/Dense>
@@ -42,7 +43,7 @@
 #include "denoise/precondition.h"
 #include "denoise/recon.h"
 #include "denoise/schedule.h"
-#include "denoise/subsample.h"
+#include "denoise/spatial_subsample.h"
 #include "dwi/gradient.h"
 
 using namespace MR;
@@ -132,7 +133,7 @@ void usage() {
 
   EXAMPLES
   + Example("To approximately replicate the behaviour of the original dwidenoise command",
-            "dwidenoise2 DWI.mif out.mif -shape cuboid -subsample 1 -demodulate none -demean none -filter truncate -aggregator exclusive",
+            "dwidenoise2 DWI.mif out.mif -shape cuboid -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive",
             "While this is neither guaranteed to match exactly the output of the original dwidenoise command"
             " nor is it a recommended use case,"
             " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
@@ -151,13 +152,14 @@ void usage() {
             " and therefore the least risk of BOLD signal attenuation.")
 
   + Example("Denoising a very large image series",
-            "dwidenoise2 in.mif out.mif -onepass -decomposition selfadjoint -aspect_ratio 1.0 -subsample 6",
+            "dwidenoise2 in.mif out.mif -schedule_file onepass.txt -decomposition selfadjoint -aspect_ratio 1.0",
             "Pending future software updates aimed at improving computational tractability for very large series,"
-            " there are some tweaks that can be applied utilising existing command-line options"
-            " to make computation more feasible for data larger than the typical DWI acquisition."
-            " -onepass option does a single noise level estimation and denoising step,"
-            " rather than the default iterative multi-resolution approach,"
-            " which means that variance-stabilising transformation will not be applied."
+            " there are some tweaks that can be applied to make computation more feasible for data larger than"
+            " the typical DWI acquisition."
+            " A single-row schedule file (here \"onepass.txt\", e.g. a header line \"spatial_subsample kernel_size"
+            " update_noise\" followed by \"6 1 true\") performs a single noise level estimation and denoising step,"
+            " rather than the default iterative multi-resolution approach;"
+            " a larger spatial_subsample reduces the number of PCA kernels evaluated."
             " The self-adjoint decomposition is not as numerically precise as the newer BDCSVD decomposition"
             " but is typically around twice as fast."
             " A spherical kernel with an aspect ratio of 1.0 is as small as one should go"
@@ -166,9 +168,7 @@ void usage() {
             " and so the ratio of number of voxels to number of kernels can be quite large"
             " while still having the reconstructed data for each image voxel"
             " come from a large number of denoised patches;"
-            " for ~ 1000 volumes a downsampling ratio of 6 works fine"
-            " (a heuristic for choosing a sensible default subsampling ratio"
-            " based on the size of the input dataset may be added in the future).");
+            " for ~ 1000 volumes a spatial subsampling ratio of 6 works fine.");
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"
@@ -223,15 +223,10 @@ void usage() {
 
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
-  + Option("onepass",
-           "perform noise level estimation and denoising in a single pass of the data"
-           " instead of the default iterative noise level map optimisation")
-
   + datatype_option
   + decomposition_option
   + Estimator::estimator_denoise_options
   + Kernel::options
-  + subsample_option
   + Schedule::schedule_file_option
   + precondition_options(true)
 
@@ -252,6 +247,16 @@ void usage() {
   + Option("preserve_noise_bias",
            "retain the noise-floor bias in the output rather than removing it by default"
            " (no effect for complex input data)")
+  + Option("debias_anchor",
+           "operating point at which the non-linear variance-stabilising transform is inverted"
+           " when removing the noise-floor bias; options are: " + join(debias_anchor_choices, ",") + " "
+           "(default: sample)."
+           " 'sample' inverts the transform at each volume's own denoised value, so debiasing is"
+           " independent of the -demean grouping;"
+           " 'group_mean' reproduces the prior behaviour, linearising the inverse about the"
+           " per-group demeaning mean"
+           " (no effect with -preserve_noise_bias or for complex input data)")
+    + Argument("mode").type_choice(debias_anchor_choices)
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise_out",
@@ -316,6 +321,9 @@ void usage() {
 // (operations combining complex & real types not allowed to be of different precision)
 std::complex<double> operator/(const std::complex<double> &c, const float n) { return c / double(n); }
 
+// The command's default multi-resolution noise estimation schedule, embedded in the command
+//   (used when the user does not override it via -schedule_file). The final row is the
+//   reconstruction (denoising) pass.
 const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, noise_smooth_type::NONE},  //
                                                             {{4, 4, 4}, 4.0, noise_smooth_type::NONE},   //
                                                             {{2, 2, 2}, 1.0, noise_smooth_type::SMOOTH}, //
@@ -345,6 +353,7 @@ void run(Header &dwi,
          filter_type filter,
          aggregator_type aggregator,
          const bias_handling_t bias_handling,
+         const debias_anchor_t debias_anchor,
          const std::string &output_name,
          Exports &final_exports) {
 
@@ -357,14 +366,28 @@ void run(Header &dwi,
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
-  Image<T> input_preconditioned =
-      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+  Image<T> input_preconditioned;
 
   Image<float> rank_per_mm;
 
-  // All but the last iteration
+  // Random number generator for drawing temporal sub-sampling subsets.
+  Math::RNG rng;
+  constexpr ssize_t temporal_min_per_group = 2;
+
+  // All but the last iteration: estimate (and progressively refine) the noise level.
   for (ssize_t iteration = 0; iteration != iterations.size() - 1; ++iteration) {
-    std::shared_ptr<Subsample> subsample = std::make_shared<Subsample>(dwi, iterations[iteration].subsample_ratios);
+    // Draw this iteration's temporal subset (stratified by demeaning group) and (re)compute
+    //   the stabilised-domain per-group means over that same subset, under the current noise
+    //   level map. The preconditioned data then hold only the m' subset volumes, so the
+    //   downstream Estimate / kernel sizing see m' volumes without any knowledge of sub-sampling.
+    preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
+    preconditioner.update_vst_parameters(vst_image, input);
+    estimator->update_vst_image(vst_image);
+    input_preconditioned =
+        Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+    std::shared_ptr<SpatialSubsample> subsample =
+        std::make_shared<SpatialSubsample>(dwi, iterations[iteration].spatial_subsample_ratios);
     // For internal iterations, we only save the output noise level estimate
     Exports iteration_exports(dwi, subsample->header());
     iteration_exports.set_noise_out();
@@ -387,33 +410,41 @@ void run(Header &dwi,
                                              noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
                                              iterations[iteration].smooth_noiseout);
-//    input_preconditioned.dump_to_mrtrix_file("preconditioned_iter" + str(iteration) + ".mif");
-//    vst_image.dump_to_mrtrix_file("noise_iter" + str(iteration) + ".mif");
-    preconditioner.update_vst_parameters(vst_image, input);
-    estimator->update_vst_image(vst_image);
     rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
     for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
       rank_per_mm.value() = iteration_exports.rank_input.value() / iteration_exports.max_dist.value();
   }
 
-  auto subsample = Subsample::make(dwi, iterations.back().subsample_ratios);
+  // Final (reconstruction) pass: the schedule's final row is validated to have
+  //   temporal_subsample == 1, so all volumes are reconstructed. Clear any subset and
+  //   recompute the full-data means under the final noise level map.
+  preconditioner.set_temporal_subsample(1.0, rng, temporal_min_per_group);
+  preconditioner.update_vst_parameters(vst_image, input);
+  estimator->update_vst_image(vst_image);
+
+  auto subsample = std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);
 
   // Implementation from here differs to that of dwi2noise
-  auto kernel = Kernel::make_kernel(input,
-                                    subsample->get_factors(),
-                                    iterations.back().kernel_size_multiplier,
-                                    rank_per_mm);
-  kernel->set_mask(mask);
-
-  // If we're doing an iterative optimisation,
-  //   then in the final iteration we assume that the variance-stabilising transform
-  //   results in a noise level of 1.0 everywhere
-  if (iterations.size() > 1)
-    estimator.reset(new Estimator::Unity());
-
   auto opt = get_options("preconditioned_input");
   if (!opt.empty())
     input_preconditioned = Image<T>::create(opt[0][0], preconditioner.header());
+  else
+    input_preconditioned =
+        Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+  auto kernel = Kernel::make_kernel(input_preconditioned,
+                                    subsample->get_factors(),
+                                    iterations.back().kernel_size_multiplier,
+                                    rank_per_mm,
+                                    Denoise::num_volumes(input));
+  kernel->set_mask(mask);
+
+  // Unless the final schedule row is configured to (re)estimate the noise level, assume the
+  //   variance-stabilising transform yields a noise level of 1.0 everywhere (dummy Unity
+  //   estimator), carrying through the estimate refined by the preceding iterations.
+  if (!iterations.back().update_noise.value())
+    estimator.reset(new Estimator::Unity());
+
   preconditioner(input, input_preconditioned, false);
   Recon<T> func(input_preconditioned,
                 subsample,
@@ -443,7 +474,7 @@ void run(Header &dwi,
         "Scratch buffer for denoised data before undoing preconditioning"); //
 
   const bool final_iteration_includes_MP =
-      iterations.size() == 1 && get_options("noise_in").empty() && get_options("fixed_rank").empty();
+      iterations.back().update_noise.value() && get_options("fixed_rank").empty();
   ThreadedLoop(final_iteration_includes_MP                                 //
                    ? "running MP-PCA noise level estimation and denoising" //
                    : "running PCA denoising",                              //
@@ -485,7 +516,7 @@ void run(Header &dwi,
   }
 
   // reverse effects of preconditioning
-  preconditioner(output_preconditioned, output, true, bias_handling);
+  preconditioner(output_preconditioned, output, true, bias_handling, debias_anchor);
 
   // Modify some optional outputs to better reflect utilisation of preconditioning
   const ssize_t preconditioner_null_rank = preconditioner.null_rank();
@@ -608,58 +639,104 @@ void run() {
 
   const bias_handling_t bias_handling =
       get_options("preserve_noise_bias").empty() ? bias_handling_t::DEBIAS : bias_handling_t::PRESERVE;
-  if (bias_handling == bias_handling_t::PRESERVE && dwi.datatype().is_complex()) {
-    WARN("Option -preserve_noise_bias has no effect for complex input data: "
-         "there is no noise-floor bias to either preserve or remove");
+  // -preserve_noise_bias governs how the noise-floor bias of the magnitude noise
+  //   distribution is handled when reversing the variance-stabilising transform. It is
+  //   meaningless whenever the noise model is linear (Gaussian / identity), i.e. when there
+  //   is no estimated noise bias to either preserve or remove. This linear case arises from
+  //   complex input data (Gaussian noise) or from the user requesting a linear transform
+  //   (-vst_method none / linear) on the command line; mirrors make_noise_model().
+  if (bias_handling == bias_handling_t::PRESERVE) {
+    const bool complex = dwi.datatype().is_complex();
+    const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
+    if (complex || vst_none || vst_linear) {
+      const std::string reason =
+          vst_none    ? "-vst_method none applies no variance-stabilising transform"               //
+          : complex   ? "the input data are complex, for which the noise is Gaussian-distributed"   //
+                      : "-vst_method linear uses a linear (Gaussian) noise model";                  //
+      WARN("Option -preserve_noise_bias has no effect: " + reason + ", "
+           "so the noise model is linear and there is no estimated noise bias "
+           "to either preserve or remove");
+    }
   }
 
-  // Resolve the iteration schedule and the subsampling of the final (reconstruction)
-  //   pass together: the export images allocated below sit on the final subsampling
-  //   grid, which must match the subsampling used for that pass.
+  // Operating point for reversing the non-linear variance-stabilising transform when debiasing
+  //   (see debias_anchor_t); the default inverts the transform at each volume's own denoised
+  //   value, so debiasing no longer depends on the demeaning grouping.
+  debias_anchor_t debias_anchor = debias_anchor_t::SAMPLE;
+  opt = get_options("debias_anchor");
+  if (!opt.empty())
+    debias_anchor = debias_anchor_t(int(opt[0][0]));
+
+  // Resolve the iteration schedule. When the user supplies -schedule_file it is the single
+  //   source of truth for both the spatial and temporal sub-sampling of each iteration;
+  //   otherwise the command's embedded default schedule (default_iterations) is used.
+  //   "one-pass" operation is simply a single-row schedule. -fixed_rank imposes the signal
+  //   rank at a single kernel size, and -vst_method none removes the coupling between
+  //   iterations; either reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
-  const bool single_pass_requested =
-      !get_options("onepass").empty() || !get_options("noise_in").empty() || !get_options("fixed_rank").empty();
-  std::shared_ptr<Subsample> final_subsample;
+  const bool fixed_rank = !get_options("fixed_rank").empty();
   if (Schedule::requested()) {
-    // A user-specified schedule defines the iterative process explicitly, and is thus
-    //   incompatible with options that force a single pass, that set a single global
-    //   subsampling factor, or that disable the transform coupling the iterations.
-    if (single_pass_requested)
-      throw Exception("Option -schedule_file cannot be combined with "
-                      "-onepass, -noise_in or -fixed_rank, "
-                      "each of which forces a single-pass process");
-    if (!get_options("subsample").empty())
-      throw Exception("Options -schedule_file and -subsample are mutually exclusive: "
-                      "the schedule file sets the subsampling factor for each iteration");
     if (vst_none)
       throw Exception("Option -schedule_file cannot be combined with -vst_method none: "
                       "without a variance-stabilising transform there is no coupling "
                       "between iterations for the schedule to control");
     iterations = Schedule::load("dwidenoise2");
-    final_subsample = std::make_shared<Subsample>(dwi, iterations.back().subsample_ratios);
-  } else {
-    final_subsample = Subsample::make(dwi, aggregator == aggregator_type::EXCLUSIVE ? 1 : default_subsample_ratio);
-    // With -vst_method none the data are not stabilised, so the noise level estimated
-    //   by one iteration has zero effect on the processing of the next: iterating is
-    //   wasted computation (and the multi-resolution machinery additionally assumes a
-    //   unit-variance stabilised domain that does not hold here). Fall back to a single
-    //   estimation/denoising pass.
-    if (vst_none && !single_pass_requested) {
+  } else if (vst_none || fixed_rank) {
+    if (vst_none)
       WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
            "refining the noise level estimate would have no effect on subsequent iterations "
            "and is therefore wasted computation; performing a single pass instead");
-    }
-    if (!single_pass_requested && !vst_none) {
-      iterations = default_iterations;
-    } else {
-      Iterative::Iteration config;
-      config.subsample_ratios = final_subsample->get_factors();
-      config.kernel_size_multiplier = 1.0;
-      config.smooth_noiseout = noise_smooth_type::NONE;
-      iterations.push_back(config);
-    }
+    const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
+    Iterative::Iteration config;
+    config.spatial_subsample_ratios = {f, f, f};
+    config.kernel_size_multiplier = 1.0;
+    config.smooth_noiseout = noise_smooth_type::NONE;
+    config.temporal_subsample = 1.0;
+    config.update_noise = true; // a single-pass schedule must estimate the noise level
+    iterations.push_back(config);
+  } else {
+    iterations = default_iterations;
+    Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
-  assert(final_subsample);
+  std::shared_ptr<SpatialSubsample> final_subsample =
+      std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);
+
+  // Resolve per-iteration update_noise defaults: non-final unset -> true; final unset ->
+  //   false (carry the prior estimate through the reconstruction via the dummy Unity estimator).
+  for (size_t i = 0; i + 1 < iterations.size(); ++i)
+    if (!iterations[i].update_noise.has_value())
+      iterations[i].update_noise = true;
+  if (!iterations.back().update_noise.has_value())
+    iterations.back().update_noise = false;
+
+  // dwidenoise2's final (reconstruction) pass must reconstruct every volume.
+  if (iterations.back().temporal_subsample < 1.0)
+    throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
+                    "volumes (temporal_subsample = 1); sub-sample only the noise-estimation iterations");
+  // -fixed_rank is only meaningful at a single kernel size, as the signal rank varies with it.
+  if (fixed_rank) {
+    for (const auto &it : iterations)
+      if (it.kernel_size_multiplier != 1.0)
+        throw Exception("Option -fixed_rank cannot be combined with a schedule that uses non-unity "
+                        "kernel_size multipliers, as the signal rank varies with kernel size; "
+                        "use a schedule whose kernel_size is 1 throughout");
+  }
+  // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.
+  {
+    bool any_update = false;
+    for (const auto &it : iterations)
+      any_update = any_update || it.update_noise.value();
+    if (!any_update && get_options("noise_in").empty())
+      throw Exception("The schedule never estimates the noise level (every update_noise is false) "
+                      "and no -noise_in seed was provided; there is no noise level with which to denoise");
+  }
+  // For a multi-stage schedule, -noise_in only seeds the first iteration; the noise map used to
+  //   denoise is re-estimated internally and differs from the supplied image.
+  if (!get_options("noise_in").empty() && iterations.size() > 1)
+    WARN("Option -noise_in provides only an initial noise level seed for the iterative schedule; "
+         "the noise map used to denoise the data is re-estimated internally and differs from the "
+         "supplied image");
+
   if (aggregator == aggregator_type::EXCLUSIVE &&
       *std::max_element(final_subsample->get_factors().begin(), final_subsample->get_factors().end()) > 1) {
     WARN("Utilising subsampling in conjunction with -aggregator exclusive "
@@ -749,6 +826,7 @@ void run() {
         filter,         //
         aggregator,     //
         bias_handling,  //
+        debias_anchor,  //
         argument[1],    //
         final_exports); //
     break;
@@ -766,6 +844,7 @@ void run() {
         filter,         //
         aggregator,     //
         bias_handling,  //
+        debias_anchor,  //
         argument[1],    //
         final_exports); //
     break;
@@ -782,6 +861,7 @@ void run() {
         filter,         //
         aggregator,     //
         bias_handling,  //
+        debias_anchor,  //
         argument[1],    //
         final_exports); //
     break;
@@ -798,6 +878,7 @@ void run() {
         filter,         //
         aggregator,     //
         bias_handling,  //
+        debias_anchor,  //
         argument[1],    //
         final_exports); //
     break;

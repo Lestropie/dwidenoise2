@@ -26,15 +26,25 @@
 #  - The final row corresponds to the reconstruction (denoising) pass.
 #
 # Columns:
-#  - subsample    : per-axis subsampling factor; a single integer (isotropic)
-#                   or a comma-separated triplet "x,y,z". Larger values perform
-#                   fewer PCAs (coarser, faster). Default: 2.
-#  - kernel_size  : multiplier applied to the PCA patch size. Default: 1.
-#  - smooth       : whether to smooth the estimated noise map before it is
-#                   passed to the next iteration ("none" or "smooth").
-#                   Default: none. (No effect on the final row.)
+#  - spatial_subsample   : per-axis spatial subsampling factor; a single integer
+#                          (isotropic) or a comma-separated triplet "x,y,z". Larger
+#                          values perform fewer PCAs (coarser, faster). Default: 2.
+#  - kernel_size         : multiplier applied to the PCA patch size. Default: 1.
+#  - smooth              : whether to smooth the estimated noise map before it is
+#                          passed to the next iteration ("none" or "smooth").
+#                          Default: none. (No effect on the final row.)
+#  - temporal_subsample  : fraction of volumes (along the supra-spatial axes) used
+#                          for noise level estimation in this iteration, within
+#                          (0.0, 1.0]; the subset is drawn stratified by demeaning
+#                          group. Default: 1.0 (all volumes). For dwidenoise2 the
+#                          final (reconstruction) row must be 1.0.
+#  - update_noise        : whether the noise level estimate is (re)computed in this
+#                          iteration ("true" or "false"). Must be true for any
+#                          non-final iteration. Default: true for non-final rows;
+#                          for the final row, false (carry the prior estimate
+#                          through the reconstruction, as the built-in default does).
 #
-subsample   kernel_size   smooth
+spatial_subsample   kernel_size   smooth
 8,8,8       16            none
 4,4,4       4             none
 2,2,2       1             smooth

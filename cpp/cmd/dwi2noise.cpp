@@ -30,12 +30,13 @@
 #include "denoise/noise_model/noise_model.h"
 #include "denoise/precondition.h"
 #include "denoise/schedule.h"
-#include "denoise/subsample.h"
+#include "denoise/spatial_subsample.h"
 #include "dwi/gradient.h"
 #include "exception.h"
 #include "filter/demodulate.h"
 #include "filter/smooth.h"
 #include "interp/linear.h"
+#include "math/rng.h"
 
 using namespace MR;
 using namespace App;
@@ -162,14 +163,11 @@ void usage() {
   + Estimator::estimator_option
   + Option("noise_in",
            "provide a pre-estimated noise level (scalar value or 3D image) to seed the"
-           " variance-stabilising transform, bypassing the iterative bootstrap and instead"
-           " performing a single noise level refinement pass on the stabilised data")
+           " variance-stabilising transform for the first iteration of the schedule;"
+           " the schedule then refines the estimate (for a multi-stage schedule the supplied"
+           " image is only an initial seed, not the final estimated output)")
     + Argument("value/image").type_float(0.0).type_image_in()
-  + Option("onepass",
-           "Derive noise level estimate with a single pass through the image,"
-           " rather than the default iterative multi-resolution process")
   + Kernel::options
-  + subsample_option
   + Schedule::schedule_file_option
   + precondition_options(false)
 
@@ -230,6 +228,9 @@ void usage() {
 }
 // clang-format on
 
+// The command's default multi-resolution noise estimation schedule, embedded in the command
+//   (used when the user does not override it via -schedule_file). The final row produces the
+//   estimated noise level map that is output.
 const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, noise_smooth_type::NONE},    //
                                                             {{4, 4, 4}, 4.0, noise_smooth_type::NONE},     //
                                                             {{2, 2, 2}, 1.0, noise_smooth_type::SMOOTH}}); //
@@ -253,14 +254,27 @@ void run(Header &dwi,
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
-  Image<T> input_preconditioned =
-      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+  Image<T> input_preconditioned;
 
   Image<float> rank_per_mm;
 
+  // Random number generator for drawing temporal sub-sampling subsets.
+  Math::RNG rng;
+  constexpr ssize_t temporal_min_per_group = 2;
+
   // All but the last iteration
   for (ssize_t iteration = 0; iteration != iterations.size() - 1; ++iteration) {
-    std::shared_ptr<Subsample> subsample = std::make_shared<Subsample>(dwi, iterations[iteration].subsample_ratios);
+    // Draw this iteration's temporal subset (stratified by demeaning group) and (re)compute
+    //   the stabilised-domain per-group means over that subset, under the current noise level
+    //   map; the preconditioned data then hold only the m' subset volumes.
+    preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
+    preconditioner.update_vst_parameters(vst_image, input);
+    estimator->update_vst_image(vst_image);
+    input_preconditioned =
+        Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+    std::shared_ptr<SpatialSubsample> subsample =
+        std::make_shared<SpatialSubsample>(dwi, iterations[iteration].spatial_subsample_ratios);
     // For internal iterations, we only save the output noise level estimate
     Exports iteration_exports(dwi, subsample->header());
     iteration_exports.set_noise_out();
@@ -283,19 +297,21 @@ void run(Header &dwi,
                                              noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
                                              iterations[iteration].smooth_noiseout);
-    preconditioner.update_vst_parameters(vst_image, input);
-    estimator->update_vst_image(vst_image);
 
     rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
     for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
       rank_per_mm.value() = iteration_exports.rank_input.value() / iteration_exports.max_dist.value();
   }
 
-  // Last iteration
-  // The subsampling of the final iteration follows the final entry of the schedule
-  //   (which for the default schedule is the global default), and may additionally
-  //   be overridden at the command-line via -subsample.
-  auto subsample = Subsample::make(dwi, iterations.back().subsample_ratios);
+  // Last iteration. Unlike dwidenoise2, dwi2noise may sub-sample the volumes of its final
+  //   (output) iteration: it produces a noise level map, which is volume-count-independent
+  //   in expectation. The spatial subsampling follows the final entry of the schedule.
+  preconditioner.set_temporal_subsample(iterations.back().temporal_subsample, rng, temporal_min_per_group);
+  preconditioner.update_vst_parameters(vst_image, input);
+  estimator->update_vst_image(vst_image);
+  input_preconditioned =
+      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+  auto subsample = std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);
   Iterative::estimate(input,
                       input_preconditioned,
                       mask,
@@ -360,55 +376,48 @@ void run() {
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
 
-  // Resolve the iteration schedule and the subsampling of the final iteration together:
-  //   the final exports are allocated on the final subsampling grid, which must match
-  //   the subsampling used for that pass.
+  // Resolve the iteration schedule. When the user supplies -schedule_file it is the single
+  //   source of truth for the spatial and temporal sub-sampling of each iteration; otherwise
+  //   the command's embedded default schedule (default_iterations) is used. "one-pass"
+  //   operation is simply a single-row schedule. -vst_method none removes the coupling between
+  //   iterations and so reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
-  const bool single_pass_requested = !get_options("onepass").empty() || !get_options("noise_in").empty();
-  std::shared_ptr<Subsample> final_subsample;
   if (Schedule::requested()) {
-    // A user-specified schedule defines the iterative process explicitly, and is thus
-    //   incompatible with options that force a single pass, that set a single global
-    //   subsampling factor, or that disable the transform coupling the iterations.
-    if (single_pass_requested)
-      throw Exception("Option -schedule_file cannot be combined with -onepass or -noise_in, "
-                      "each of which forces a single-pass process");
-    if (!get_options("subsample").empty())
-      throw Exception("Options -schedule_file and -subsample are mutually exclusive: "
-                      "the schedule file sets the subsampling factor for each iteration");
     if (vst_none)
       throw Exception("Option -schedule_file cannot be combined with -vst_method none: "
                       "without a variance-stabilising transform there is no coupling "
                       "between iterations for the schedule to control");
     iterations = Schedule::load("dwi2noise");
-    final_subsample = std::make_shared<Subsample>(dwi, iterations.back().subsample_ratios);
+  } else if (vst_none) {
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
+         "refining the noise level estimate would have no effect on subsequent iterations "
+         "and is therefore wasted computation; performing a single pass instead");
+    Iterative::Iteration config;
+    config.spatial_subsample_ratios = {default_spatial_subsample_ratio,
+                                       default_spatial_subsample_ratio,
+                                       default_spatial_subsample_ratio};
+    config.kernel_size_multiplier = 1.0;
+    config.smooth_noiseout = noise_smooth_type::NONE;
+    config.temporal_subsample = 1.0;
+    config.update_noise = true;
+    iterations.push_back(config);
   } else {
-    // Need to set up the subsampling header of the final iteration for configuration of final exports
-    final_subsample = Subsample::make(dwi, default_subsample_ratio);
-    // Supplying an external noise level via -noise_in seeds the variance-stabilising transform
-    //   directly, so the iterative multi-resolution bootstrap is bypassed in favour of a single
-    //   refinement pass (as for -onepass).
-    // With -vst_method none the data are not stabilised, so the noise level estimated
-    //   by one iteration has zero effect on the processing of the next: iterating is
-    //   wasted computation. Fall back to a single estimation pass.
-    if (vst_none && !single_pass_requested) {
-      WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-           "refining the noise level estimate would have no effect on subsequent iterations "
-           "and is therefore wasted computation; performing a single pass instead");
-    }
-    if (!single_pass_requested && !vst_none) {
-      if (!get_options("subsample").empty())
-        throw Exception("Implementation does not support use of -subsample without -onepass");
-      iterations = default_iterations;
-    }
-    if (iterations.empty()) {
-      Iterative::Iteration config;
-      config.subsample_ratios = final_subsample->get_factors();
-      config.kernel_size_multiplier = 1.0;
-      config.smooth_noiseout = noise_smooth_type::SMOOTH;
-      iterations.push_back(config);
-    }
+    iterations = default_iterations;
+    Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
+  std::shared_ptr<SpatialSubsample> final_subsample =
+      std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);
+
+  // dwi2noise (re)estimates the noise level in every iteration, including the final one
+  //   (its output is the estimate). Resolve any unset update_noise to true and reject a
+  //   schedule that disables estimation in the final iteration.
+  for (auto &it : iterations)
+    if (!it.update_noise.has_value())
+      it.update_noise = true;
+  if (!iterations.back().update_noise.value())
+    throw Exception("dwi2noise requires the final schedule iteration to estimate the noise "
+                    "level (update_noise = true), as that iteration produces the output map");
+
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1]);
   opt = get_options("lamplus");

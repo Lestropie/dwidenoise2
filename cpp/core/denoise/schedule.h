@@ -48,4 +48,11 @@ bool requested();
 // Precondition: requested() is true.
 std::vector<Iterative::Iteration> load(const std::string &command);
 
+// Issue a warning when a command's embedded default noise estimation schedule is used on a
+//   dataset large enough that the full multi-resolution default may be slow, suggesting a
+//   lighter -schedule_file. "num_volumes" is the total number of volumes implied by the input
+//   (the product of all non-spatial dimensions). Called by the commands when no -schedule_file
+//   was supplied and the embedded default schedule is therefore in effect.
+void warn_if_default_schedule_slow(size_t num_volumes);
+
 } // namespace MR::Denoise::Schedule

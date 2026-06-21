@@ -46,11 +46,11 @@ const char *const shape_description =
 const char *const default_size_description =
     "The following describes the ways in which "
     "the size of the sliding window is chosen by default. "
-    "Under default iterative optimisation operation, "
+    "Under default multi-resolution iterative operation, "
     "the size of the default spherical kernel is set in such a way "
     "that the excess number of voxels relative to the number of volumes "
     "is at least as large as the estimated rank of the non-noise signal at that location. "
-    "For one-pass operation, "
+    "For a single-iteration schedule (e.g. an iteration prior to any rank estimate being available), "
     "the size of the default spherical kernel is set to select a number of voxels that is "
     "1.0 / 0.85 ~ 1.18 times the number of volumes in the input series. "
     "If a cuboid kernel is requested, "
@@ -97,14 +97,57 @@ const OptionGroup options = OptionGroup("Options for controlling the sliding spa
   + Argument("window").type_sequence_int();
 // clang-format on
 
+namespace {
+// Warn when temporal sub-sampling leaves the Casorati matrix with an unsuitable shape.
+//   n              : representative voxel count of the kernel (matrix columns)
+//   m_eff          : number of volumes used this iteration (rows; m' when sub-sampling)
+//   m_full         : number of volumes in the absence of temporal sub-sampling
+//   volume_derived : whether the kernel size is derived from the volume count (dynamic
+//                    spherical kernels) rather than fixed by geometry (fixed-radius / cuboid)
+void warn_casorati_shape(const ssize_t n,
+                         const ssize_t m_eff,
+                         const ssize_t m_full,
+                         const Header &H,
+                         const bool volume_derived) {
+  if (m_full <= m_eff) // no temporal sub-sampling this iteration
+    return;
+  if (volume_derived) {
+    // Dynamic spherical kernel: the kernel size tracks the (reduced) volume count, so the
+    //   target aspect ratio is normally preserved; it can only become unachievable if the
+    //   target patch exceeds the voxels available within the image field of view.
+    const ssize_t image_voxels = H.size(0) * H.size(1) * H.size(2);
+    if (n > image_voxels)
+      WARN("Temporal sub-sampling in conjunction with the kernel_size multiplier yields a "
+           "target spherical kernel of " + str(n) + " voxels, which exceeds the available "
+           "image voxel count (" + str(image_voxels) + "); "
+           "the intended Casorati matrix aspect ratio cannot be achieved");
+  } else {
+    // Fixed-geometry kernel (fixed-radius sphere or cuboid): the voxel count is independent
+    //   of the number of volumes, so reducing the number of rows cannot remove the
+    //   "more columns (voxels) than rows (volumes)" property. The guard below issues a
+    //   warning only if temporal sub-sampling broke that otherwise-satisfied expectation;
+    //   since m_eff <= m_full it is structurally unreachable by sub-sampling alone, and is
+    //   retained as a defensive, self-documenting check.
+    if (n <= m_eff && n > m_full)
+      WARN("Temporal sub-sampling reduced the number of volumes to " + str(m_eff) +
+           ", which is no longer fewer than the fixed kernel voxel count (" + str(n) + "); "
+           "the Casorati matrix no longer has more columns than rows");
+  }
+}
+} // namespace
+
 std::shared_ptr<Base>
 make_kernel(const Header &H,
             const std::array<ssize_t, 3> &subsample_factors,
             const default_type size_multiplier,
-            const Image<float> &rank_per_mm) {
+            const Image<float> &rank_per_mm,
+            const ssize_t full_num_volumes) {
   auto opt = App::get_options("shape");
   const Kernel::shape_type shape = opt.empty() ? Kernel::shape_type::SPHERE : Kernel::shape_type((int)(opt[0][0]));
   std::shared_ptr<Kernel::Base> kernel;
+  // Whether the kernel size is derived from the volume count (true for the dynamic
+  //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / cuboid).
+  bool volume_derived = true;
 
   switch (shape) {
   case Kernel::shape_type::SPHERE: {
@@ -112,25 +155,32 @@ make_kernel(const Header &H,
     if (!get_options("extent").empty())
       throw Exception("-extent option does not apply to spherical kernel");
     opt = get_options("radius");
-    if (!opt.empty())
-      return std::make_shared<SphereFixedRadius>(
-          H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
+    if (!opt.empty()) {
+      kernel = std::make_shared<SphereFixedRadius>(H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
+      volume_derived = false;
+      break;
+    }
     opt = get_options("aspect_ratio");
-    if (!opt.empty())
-      return std::make_shared<SphereMinVoxels>(
+    if (!opt.empty()) {
+      kernel = std::make_shared<SphereMinVoxels>(
           H, subsample_factors, default_type(opt[0][0]) * Denoise::num_volumes(H) * size_multiplier);
+      break;
+    }
     opt = get_options("minvoxels");
-    if (!opt.empty())
-      return std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, ssize_t(opt[0][0]) * size_multiplier);
+    if (!opt.empty()) {
+      kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, ssize_t(opt[0][0]) * size_multiplier);
+      break;
+    }
     // If operating in iterative mode and past the first iteration and not obeying explicit user overload,
     //   use the rank-based kernel;
     //   otherwise, default to the aspect ratio
-    if (rank_per_mm.valid())
-      return std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm);
-    return std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, default_aspect_ratio * Denoise::num_volumes(H) * size_multiplier);
-  }
+    if (rank_per_mm.valid()) {
+      kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm);
+      break;
+    }
+    kernel = std::make_shared<SphereMinVoxels>(
+        H, subsample_factors, default_aspect_ratio * Denoise::num_volumes(H) * size_multiplier);
+  } break;
   case Kernel::shape_type::CUBOID: {
     auto check_invalid_option = [](const std::string &item) {
       if (!get_options(item).empty())
@@ -189,12 +239,16 @@ make_kernel(const Header &H,
            "and cause inconsistent denoising between adjacent voxels");
     }
 
-    return std::make_shared<Cuboid>(H, subsample_factors, extent);
+    kernel = std::make_shared<Cuboid>(H, subsample_factors, extent);
+    volume_derived = false;
   } break;
   default:
     assert(false);
   }
-  return nullptr;
+
+  if (kernel)
+    warn_casorati_shape(kernel->estimated_size(), Denoise::num_volumes(H), full_num_volumes, H, volume_derived);
+  return kernel;
 }
 
 } // namespace MR::Denoise::Kernel

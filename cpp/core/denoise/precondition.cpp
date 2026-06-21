@@ -18,8 +18,11 @@
 #include "denoise/precondition.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <memory>
+#include <random>
+#include <vector>
 
 #include "algo/copy.h"
 #include "app.h"
@@ -193,6 +196,15 @@ Demodulation select_demodulation(const Header &H) {
   return result;
 }
 
+// INVESTIGATION REQUIRED (ongoing need for explicit demeaning under BDCSVD):
+//   Demeaning prior to PCA was originally introduced to condition the self-adjoint
+//   (Gram-matrix) eigendecomposition at single precision, where a large common-mean /
+//   low inter-volume-variance series (e.g. fMRI) made rank estimation unstable. The
+//   default decomposition is now BDCSVD, which operates on the data matrix directly rather
+//   than its Gram matrix and is far better conditioned against a dominant mean (the mean
+//   appears as a single well-separated singular value). Whether explicit demeaning is still
+//   required at all under the default BDCSVD decomposition has not been re-evaluated and
+//   should be investigated; it may be reducible to optional / off-by-default.
 demean_type select_demean(const Header &H) {
   bool shells_available = false;
   try {
@@ -205,8 +217,14 @@ demean_type select_demean(const Header &H) {
   auto opt = get_options("demean");
   if (opt.empty()) {
     if (shells_available) {
-      INFO("Automatically demeaning across all volumes based on input gradient table");
-      return demean_type::ALL;
+      // Default reverted to per-b-value-shell demeaning when a gradient table is present.
+      //   VERIFICATION FROM REAL DATA REQUIRED: the prior default of whole-dataset demeaning
+      //   ('all') was adopted on the basis of subjective image assessment. Per-shell demeaning
+      //   is expected to be the better-justified default, particularly now that noise-floor
+      //   debiasing is anchored per-sample (debias_anchor == SAMPLE) and is therefore no longer
+      //   sensitive to the demeaning grouping; this should be confirmed empirically.
+      INFO("Automatically demeaning per b-value shell based on input gradient table");
+      return demean_type::SHELLS;
     }
     if (volume_groups_available) {
       INFO("Automatically demeaning by volume groups");
@@ -425,12 +443,81 @@ Precondition<T>::Precondition(Image<T> &image,
   } break;
   }
 
-  // Compute the initial stabilised-domain means.
-  // With no noise level map available at construction (the iteration-1 bootstrap),
-  //   the forward transform is the identity, so this reduces to the empirical means;
-  //   when a noise level map is supplied (e.g. -vst / -noise_in),
-  //   the means are formed in the stabilised domain (vst_plan.md section 3.2).
-  compute_means(image);
+  // The stabilised-domain mean *values* are intentionally not computed here, only their
+  //   storage allocated above. Every iteration selects its temporal subset and (re)computes
+  //   the means against the current noise level map via set_temporal_subsample() +
+  //   update_vst_parameters() before the preconditioner is applied (see the run() loops in
+  //   dwidenoise2 / dwi2noise). Computing them at construction would therefore always be
+  //   immediately overwritten before use; doing so previously manifested as two back-to-back
+  //   "Computing stabilised-domain mean intensities" passes. Callers must invoke
+  //   update_vst_parameters() to populate the means before applying the forward/inverse transform.
+}
+
+template <typename T>
+void Precondition<T>::set_temporal_subsample(default_type fraction, Math::RNG &rng, ssize_t min_per_group) {
+  temporal_subset.clear();
+  if (fraction >= 1.0)
+    return;
+  assert(fraction > 0.0);
+  assert(min_per_group >= 1);
+
+  const ssize_t num_vols = H_out.size(3);
+
+  // Partition volume indices into strata according to the active demeaning grouping,
+  //   so the random subset preserves the relative proportions of each group.
+  //   (-demean none / all: a single stratum spanning all volumes.)
+  std::vector<std::vector<ssize_t>> strata;
+  if (!index2shell.empty()) {
+    strata.resize(*std::max_element(index2shell.begin(), index2shell.end()) + 1);
+    for (ssize_t v = 0; v != num_vols; ++v)
+      strata[index2shell[v]].push_back(v);
+  } else if (!index2group.empty()) {
+    strata.resize(num_volume_groups);
+    for (ssize_t v = 0; v != num_vols; ++v)
+      strata[index2group[v]].push_back(v);
+  } else {
+    strata.resize(1);
+    strata[0].resize(num_vols);
+    for (ssize_t v = 0; v != num_vols; ++v)
+      strata[0][v] = v;
+  }
+
+  std::vector<ssize_t> per_stratum_counts(strata.size(), 0);
+  bool floor_raised = false;
+  for (size_t g = 0; g != strata.size(); ++g) {
+    std::vector<ssize_t> &stratum = strata[g];
+    const ssize_t s = stratum.size();
+    if (s == 0)
+      continue;
+    const ssize_t k_target = ssize_t(std::lround(fraction * default_type(s)));
+    ssize_t k = std::min(std::max(k_target, min_per_group), s);
+    if (k > k_target)
+      floor_raised = true;
+    // Partial Fisher-Yates: draw k distinct indices from this stratum without replacement.
+    for (ssize_t i = 0; i != k; ++i) {
+      std::uniform_int_distribution<ssize_t> dist(i, s - 1);
+      std::swap(stratum[i], stratum[dist(rng)]);
+      temporal_subset.push_back(stratum[i]);
+    }
+    per_stratum_counts[g] = k;
+  }
+
+  std::sort(temporal_subset.begin(), temporal_subset.end());
+  assert(ssize_t(temporal_subset.size()) <= num_vols);
+
+  H_out_subset = H_out;
+  H_out_subset.size(3) = ssize_t(temporal_subset.size());
+
+  std::string counts_str;
+  for (size_t g = 0; g != per_stratum_counts.size(); ++g)
+    counts_str += (g ? "," : "") + str(per_stratum_counts[g]);
+  INFO("Temporal sub-sampling: retaining " + str(temporal_subset.size()) + " of " + str(num_vols) +
+       " volumes (fraction " + str(fraction) + ") across " + str(strata.size()) +
+       " group(s); per-group counts: " + counts_str);
+  if (floor_raised)
+    WARN("Temporal sub-sampling floor of " + str(min_per_group) +
+         " volume(s) per group raised the effective subset above the requested fraction "
+         "for one or more groups");
 }
 
 // Serialise this voxel's volumes into "data", applying phase demodulation and,
@@ -498,19 +585,20 @@ template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
   if (vst_noise_image.valid())
     vst.reset(new Interp::Cubic<Image<float>>(vst_noise_image));
 
-  // Volume counts per group, required as divisors.
-  // - across all volumes: the total number of volumes;
-  // - per volume group: the number of volumes within each (equally-sized) group;
-  // - per shell: the per-shell volume count.
+  // When a temporal subset is active, the means are formed over only the subset volumes,
+  //   so that the stabilised Casorati matrix (which holds only those volumes) is exactly
+  //   zero-mean per group, keeping it rank-deficient by null_rank().
+  const bool subsampled = !temporal_subset.empty();
+  const ssize_t neff = subsampled ? ssize_t(temporal_subset.size()) : H_out.size(3);
+  auto eff_index = [&](const ssize_t idx) -> ssize_t { return subsampled ? temporal_subset[idx] : idx; };
+
+  // Volume counts per group, required as divisors: the number of (subset) volumes in each group.
   std::vector<ssize_t> group_counts;
   if (mean.ndim() > 3) {
     group_counts.assign(mean.size(3), 0);
-    if (!index2shell.empty()) {
-      for (const ssize_t shell_index : index2shell)
-        ++group_counts[shell_index];
-    } else {
-      assert(!index2group.empty());
-      std::fill(group_counts.begin(), group_counts.end(), H_in.size(3));
+    for (ssize_t idx = 0; idx != neff; ++idx) {
+      const ssize_t v = eff_index(idx);
+      ++group_counts[!index2shell.empty() ? index2shell[v] : index2group[v]];
     }
   }
 
@@ -522,13 +610,15 @@ template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
     assign_pos_of(input, 0, 3).to(mean);
     if (mean.ndim() == 3) {
       T sum(T(0));
-      for (ssize_t v = 0; v != H_out.size(3); ++v)
-        sum += data[v];
-      mean.value() = sum / T(H_out.size(3));
+      for (ssize_t idx = 0; idx != neff; ++idx)
+        sum += data[eff_index(idx)];
+      mean.value() = sum / T(neff);
     } else {
       std::fill(sums.begin(), sums.end(), T(0));
-      for (ssize_t v = 0; v != H_out.size(3); ++v)
+      for (ssize_t idx = 0; idx != neff; ++idx) {
+        const ssize_t v = eff_index(idx);
         sums[!index2shell.empty() ? index2shell[v] : index2group[v]] += data[v];
+      }
       for (ssize_t group = 0; group != mean.size(3); ++group) {
         mean.index(3) = group;
         mean.value() = group_counts[group] > 0 ? sums[group] / T(group_counts[group]) : T(0);
@@ -541,7 +631,8 @@ template <typename T>
 void Precondition<T>::operator()(Image<T> input,
                                  Image<T> output,
                                  const bool inverse,
-                                 const bias_handling_t bias_handling) const {
+                                 const bias_handling_t bias_handling,
+                                 const debias_anchor_t debias_anchor) const {
 
   // For thread-safety / const-ness
   const Transform transform(input);
@@ -560,27 +651,52 @@ void Precondition<T>::operator()(Image<T> input,
 
     // The forward order is: phase demodulation -> variance-stabilising transform -> demeaning.
     // Reversal therefore proceeds in the opposite order.
-    // Where a noise level map is available, the variance-stabilising transform and
-    //   demeaning are reversed jointly (vst_plan.md section 3.3): the per-group
-    //   operating point (DC term) is mapped through the nonlinear inverse, in one
-    //   of two modes selected by bias_handling, while the denoised residual is
-    //   mapped by a linear gain so that its Gaussian character is preserved.
+    // Where a noise level map is available, demeaning is treated purely as PCA conditioning:
+    //   the SAMPLE anchor (default) undoes the stored demean offset first to form each
+    //   volume's own denoised operating point (group mean + denoised residual), then applies
+    //   the chosen non-linear inverse pointwise at that operating point. This makes debiasing
+    //   independent of the demeaning grouping and restores the natural heteroscedasticity on
+    //   the output scale. The GROUP_MEAN anchor instead reproduces the prior behaviour for the
+    //   DEBIAS handling, linearising the unbiased inverse about the per-group mean.
+    //   The PRESERVE handling is always inverted pointwise (a faithful algebraic reversal).
     // Where no noise level map is available (the demean-only bootstrap),
     //   reversal reduces to re-addition of the stored (empirical) mean.
 
-    // Per-group operating point, its mapped DC value and the corresponding local
-    //   gain; sized once and reused across voxels to avoid repeated allocation.
+    // Per-group quantities, sized once and reused across voxels to avoid repeated allocation:
+    //   the stabilised-domain demean offset (SAMPLE), and the mapped DC value + local gain
+    //   (GROUP_MEAN legacy debiasing).
     const ssize_t num_groups = mean.valid() ? (mean.ndim() == 3 ? 1 : mean.size(3)) : 0;
+    std::vector<T> group_offset(std::max<ssize_t>(num_groups, ssize_t(1)), T(0));
     std::vector<T> group_dc(num_groups);
     std::vector<default_type> group_gain(num_groups);
 
     if (vst && !mean.valid()) {
       INFO("Reversing preconditioning without a demeaning reference: "
-           "using the per-voxel temporal mean of the denoised stabilised series "
-           "as the variance-stabilising-transform operating point");
+           "the non-linear inverse variance-stabilising transform is applied directly "
+           "to each denoised sample");
     }
 
-    for (auto l_voxel = Loop("Reversing data preconditioning", H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
+    // Describe in the progress message which corrections are being reversed: re-addition of
+    //   the demeaning offset, the noise model governing the inverse variance-stabilising
+    //   transform, and (only for a non-linear model, where the distinction has an effect)
+    //   whether the noise-floor bias is being removed (DEBIAS) or preserved (PRESERVE).
+    std::string reversal_message = "Reversing data preconditioning";
+    {
+      std::string detail;
+      const auto append = [&detail](const std::string &item) { detail += (detail.empty() ? "" : ", ") + item; };
+      if (mean.valid())
+        append("reverting demeaning");
+      if (vst) {
+        append(noise_model->description() + " noise model");
+        if (!noise_model->is_linear())
+          append(bias_handling == bias_handling_t::DEBIAS ? "removing noise-floor bias"
+                                                          : "preserving noise-floor bias");
+      }
+      if (!detail.empty())
+        reversal_message += " (" + detail + ")";
+    }
+
+    for (auto l_voxel = Loop(reversal_message, H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
 
       for (ssize_t v = 0; v != H_out.size(3); ++v) {
         input.index(3) = v;
@@ -595,17 +711,18 @@ void Precondition<T>::operator()(Image<T> input,
                                       default_type(input.index(2))})); //
         const default_type sigma = vst->value();
 
-        if (mean.valid()) {
-          // Operating point per group = stored stabilised-domain mean;
-          //   the loaded data are the (already demeaned) denoised residual.
+        if (bias_handling == bias_handling_t::DEBIAS && debias_anchor == debias_anchor_t::GROUP_MEAN &&
+            mean.valid()) {
+          // GROUP_MEAN (legacy) debiasing: linearise the unbiased inverse about the per-group
+          //   stabilised-domain mean (the demeaning offset), mapping the denoised residual
+          //   through the local Jacobian. Debiasing accuracy then depends on the proximity of
+          //   each volume to its group mean; see the SAMPLE default below and debias_anchor_t.
           assign_pos_of(input, 0, 3).to(mean);
           for (ssize_t group = 0; group != num_groups; ++group) {
             if (mean.ndim() > 3)
               mean.index(3) = group;
             const T op = mean.value();
-            group_dc[group] = (bias_handling == bias_handling_t::DEBIAS)        //
-                                  ? vst_inverse_unbiased<T>(*noise_model, op, sigma)  //
-                                  : vst_inverse<T>(*noise_model, op, sigma);          //
+            group_dc[group] = vst_inverse_unbiased<T>(*noise_model, op, sigma);
             group_gain[group] = vst_jacobian<T>(*noise_model, op, sigma);
           }
           for (ssize_t v = 0; v != H_out.size(3); ++v) {
@@ -616,19 +733,39 @@ void Precondition<T>::operator()(Image<T> input,
             data[v] = group_dc[group] + T(group_gain[group]) * data[v];
           }
         } else {
-          // No demeaning reference (-demean none): derive a per-voxel operating
-          //   point from the temporal mean of the denoised stabilised series
-          //   (vst_plan.md section 9), then debias the DC and map the residual linearly.
-          T sum(T(0));
-          for (ssize_t v = 0; v != H_out.size(3); ++v)
-            sum += data[v];
-          const T op = sum / T(H_out.size(3));
-          const T dc = (bias_handling == bias_handling_t::DEBIAS)         //
-                           ? vst_inverse_unbiased<T>(*noise_model, op, sigma)  //
-                           : vst_inverse<T>(*noise_model, op, sigma);          //
-          const default_type gain = vst_jacobian<T>(*noise_model, op, sigma);
-          for (ssize_t v = 0; v != H_out.size(3); ++v)
-            data[v] = dc + T(gain) * (data[v] - op);
+          // SAMPLE (default) reversal, and all PRESERVE reversal:
+          //   Undo the demeaning offset (it exists only to condition the PCA), forming each
+          //   volume's own denoised operating point u_recon = (group mean) + (denoised
+          //   residual), then apply the chosen non-linear inverse pointwise at u_recon. The
+          //   inverse is evaluated per volume (not linearised about a group mean), so debiasing
+          //   does not depend on the demeaning grouping and the natural signal-dependent
+          //   heteroscedasticity is restored. With -demean none there is no stored offset, so
+          //   u_recon == data[v] and the inverse is applied directly to each denoised sample.
+          if (mean.valid()) {
+            assign_pos_of(input, 0, 3).to(mean);
+            for (ssize_t group = 0; group != num_groups; ++group) {
+              if (mean.ndim() > 3)
+                mean.index(3) = group;
+              group_offset[group] = mean.value();
+            }
+          } else {
+            group_offset[0] = T(0);
+          }
+          for (ssize_t v = 0; v != H_out.size(3); ++v) {
+            const ssize_t group = num_groups <= 1                                //
+                                      ? 0                                        //
+                                      : (!index2shell.empty() ? index2shell[v]   //
+                                                              : index2group[v]); //
+            const T u_recon = data[v] + group_offset[group];
+            // DEBIAS: bias-free underlying level; PRESERVE: conventional biased-magnitude level.
+            //   (A Jensen second-moment correction for the post-denoising residual noise was
+            //   considered but deliberately omitted: its stabilised-domain variance is not
+            //   estimable from the data within this reversal, and a user-supplied value would
+            //   contradict the data-driven premise of the tool.)
+            data[v] = (bias_handling == bias_handling_t::DEBIAS)        //
+                          ? vst_inverse_unbiased<T>(*noise_model, u_recon, sigma)  //
+                          : vst_inverse<T>(*noise_model, u_recon, sigma);          //
+          }
         }
       } else if (mean.valid()) {
         // No variance-stabilising transform (demean-only bootstrap):
@@ -688,7 +825,9 @@ void Precondition<T>::operator()(Image<T> input,
   }
 
   assert(dimensions_match(H_in, input));
-  assert(dimensions_match(H_out, output));
+  // While a temporal subset is active the output holds only the m' selected volumes,
+  //   so it conforms to header() (size(3) == m'), not to the full H_out.
+  assert(dimensions_match(header(), output));
 
   // Applying forward preconditioning.
   // Order: phase demodulation -> variance-stabilising transform -> demeaning;
@@ -722,10 +861,20 @@ void Precondition<T>::operator()(Image<T> input,
       }
     }
 
-    // Write to output
-    for (ssize_t v = 0; v != H_out.size(3); ++v) {
-      output.index(3) = v;
-      output.value() = data[v];
+    // Write to output.
+    // Without temporal sub-sampling, emit every volume; with sub-sampling, emit only the
+    //   m' selected volumes (data was demeaned by the subset means, so the emitted columns
+    //   are exactly zero-mean per group).
+    if (temporal_subset.empty()) {
+      for (ssize_t v = 0; v != H_out.size(3); ++v) {
+        output.index(3) = v;
+        output.value() = data[v];
+      }
+    } else {
+      for (ssize_t k = 0; k != ssize_t(temporal_subset.size()); ++k) {
+        output.index(3) = k;
+        output.value() = data[temporal_subset[k]];
+      }
     }
   }
 }

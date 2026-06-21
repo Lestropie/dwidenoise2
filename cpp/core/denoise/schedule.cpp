@@ -19,15 +19,11 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
-
-#include <climits>
-#include <unistd.h>
 
 #include "denoise/denoise.h"
 #include "exception.h"
@@ -47,7 +43,8 @@ namespace {
 //   3. (optionally) add the column to the bundled schedule files.
 // Existing schedule files that omit the new column will continue to parse,
 //   taking the default; hence the format is forward-compatible.
-const std::vector<std::string> recognised_columns({"subsample", "kernel_size", "smooth"});
+const std::vector<std::string> recognised_columns(
+    {"spatial_subsample", "kernel_size", "smooth", "temporal_subsample", "update_noise"});
 
 // Whitespace-tokenise a line (collapsing runs of whitespace, dropping empties).
 std::vector<std::string> tokenise(const std::string &line) {
@@ -91,13 +88,13 @@ default_type parse_kernel_size(const std::string &value, const size_t lineno) {
   return result;
 }
 
-std::array<ssize_t, 3> parse_subsample(const std::string &value, const size_t lineno) {
+std::array<ssize_t, 3> parse_spatial_subsample(const std::string &value, const size_t lineno) {
   std::vector<ssize_t> factors;
   try {
     factors = parse_ints<ssize_t>(value);
   } catch (Exception &) {
     throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value \"" + value + "\" for column \"subsample\" must be an integer "
+                    "value \"" + value + "\" for column \"spatial_subsample\" must be an integer "
                     "or a comma-separated triplet of integers");
   }
   std::array<ssize_t, 3> result{};
@@ -107,34 +104,51 @@ std::array<ssize_t, 3> parse_subsample(const std::string &value, const size_t li
     result = {factors[0], factors[1], factors[2]};
   else
     throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value for column \"subsample\" must be a single integer "
+                    "value for column \"spatial_subsample\" must be a single integer "
                     "or a comma-separated triplet of integers (got " + str(factors.size()) + " values)");
   for (ssize_t axis = 0; axis != 3; ++axis) {
     if (result[axis] < 1)
       throw Exception("Schedule file line " + str(lineno) + ": "
-                      "subsampling factors must be positive integers");
+                      "spatial subsampling factors must be positive integers");
   }
   return result;
 }
 
-// Directory in which command-specific bundled schedules reside.
-// Resolution order:
-//   1. environment variable DWIDENOISE2_SCHEDULE_PATH (set by the container build);
-//   2. a location relative to the executable (<exe dir>/../share/dwidenoise2);
-//   3. a final relative-path fallback.
-// The command name is appended as a subdirectory in all cases.
-std::string bundled_directory(const std::string &command) {
-  if (const char *const env = std::getenv("DWIDENOISE2_SCHEDULE_PATH"))
-    return std::string(env) + "/" + command;
-  char buffer[PATH_MAX];
-  const ssize_t count = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-  if (count > 0) {
-    buffer[count] = '\0';
-    const std::string exe(buffer);
-    const auto slash = exe.find_last_of('/');
-    const std::string dir = (slash == std::string::npos) ? std::string(".") : exe.substr(0, slash);
-    return dir + "/../share/dwidenoise2/" + command;
+default_type parse_temporal_subsample(const std::string &value, const size_t lineno) {
+  default_type result = 0.0;
+  size_t consumed = 0;
+  try {
+    result = std::stod(value, &consumed);
+  } catch (std::exception &) {
+    consumed = 0;
   }
+  if (consumed != value.size())
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value \"" + value + "\" for column \"temporal_subsample\" is not a valid number");
+  if (!(result > 0.0 && result <= 1.0))
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value for column \"temporal_subsample\" must lie within (0.0, 1.0] (got \"" + value + "\")");
+  return result;
+}
+
+bool parse_update_noise(const std::string &value, const size_t lineno) {
+  if (value == "true" || value == "1")
+    return true;
+  if (value == "false" || value == "0")
+    return false;
+  throw Exception("Schedule file line " + str(lineno) + ": "
+                  "value for column \"update_noise\" must be one of \"true\" or \"false\" (got \"" + value + "\")");
+}
+
+// Directory in which command-specific bundled schedules reside, used to resolve a bundled
+//   name given to -schedule_file. The command name is appended as a subdirectory.
+// This is resolved relative to the working directory only: the robust mechanism for locating
+//   files installed alongside the executable is implemented in a separate MRtrix3 branch and
+//   will be adopted here in due course. Deliberately, no attempt is made to discover the
+//   running executable's location. The command's *default* schedule does not depend on this
+//   (it is embedded in the command), so an unresolved bundled directory only affects an
+//   explicit -schedule_file <name>.
+std::string bundled_directory(const std::string &command) {
   return "share/dwidenoise2/" + command;
 }
 
@@ -172,6 +186,12 @@ std::string resolve(const std::string &spec, const std::string &command) {
                   "nor the name of a bundled schedule" + available_bundled(command));
 }
 
+// Total volume count above which use of a command's embedded default schedule prompts a
+//   "this may be slow" warning. The default schedule's coarsest passes use large
+//   (kernel_size-multiplied) patches whose PCA cost grows with the volume count;
+//   beyond a few hundred volumes a lighter schedule is usually preferable.
+constexpr size_t default_schedule_slow_threshold = 255;
+
 std::vector<Iterative::Iteration> parse(const std::string &path) {
   std::ifstream in(path);
   if (!in)
@@ -208,19 +228,25 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
                       str(tokens.size()));
 
     // Defaults for any column not present in the header.
+    //   temporal_subsample (1.0) and update_noise (unset) take their in-struct defaults;
+    //   update_noise is resolved to a concrete value per command after loading.
     Iterative::Iteration iteration;
-    iteration.subsample_ratios = {default_subsample_ratio, default_subsample_ratio, default_subsample_ratio};
+    iteration.spatial_subsample_ratios = {default_spatial_subsample_ratio, default_spatial_subsample_ratio, default_spatial_subsample_ratio};
     iteration.kernel_size_multiplier = 1.0;
     iteration.smooth_noiseout = noise_smooth_type::NONE;
     for (size_t column = 0; column != header.size(); ++column) {
       const std::string &key = header[column];
       const std::string &value = tokens[column];
-      if (key == "subsample")
-        iteration.subsample_ratios = parse_subsample(value, lineno);
+      if (key == "spatial_subsample")
+        iteration.spatial_subsample_ratios = parse_spatial_subsample(value, lineno);
       else if (key == "kernel_size")
         iteration.kernel_size_multiplier = parse_kernel_size(value, lineno);
       else if (key == "smooth")
         iteration.smooth_noiseout = parse_smooth(value, lineno);
+      else if (key == "temporal_subsample")
+        iteration.temporal_subsample = parse_temporal_subsample(value, lineno);
+      else if (key == "update_noise")
+        iteration.update_noise = parse_update_noise(value, lineno);
     }
     result.push_back(iteration);
   }
@@ -230,6 +256,16 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
   if (result.empty())
     throw Exception("Schedule file \"" + path + "\" defines no iterations "
                     "(a column header but no data rows)");
+
+  // Any iteration that is not the last must (re)estimate the noise level: a non-final
+  //   iteration exists precisely to refine the estimate fed to the next iteration, so a
+  //   non-final "update_noise false" would make that iteration pointless.
+  for (size_t i = 0; i + 1 < result.size(); ++i) {
+    if (result[i].update_noise.has_value() && !result[i].update_noise.value())
+      throw Exception("Schedule file \"" + path + "\": "
+                      "column \"update_noise\" must be true for all but the final iteration "
+                      "(iteration " + str(i + 1) + " has update_noise false)");
+  }
   return result;
 }
 
@@ -263,6 +299,15 @@ std::vector<Iterative::Iteration> load(const std::string &command) {
   INFO("Using noise estimation schedule from \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
+}
+
+void warn_if_default_schedule_slow(const size_t num_volumes) {
+  if (num_volumes > default_schedule_slow_threshold)
+    WARN("Input data contain " + str(num_volumes) + " volumes; "
+         "the command's default noise estimation schedule performs full multi-resolution estimation "
+         "and may be slow for a dataset of this size. "
+         "Consider specifying a lighter schedule via -schedule_file "
+         "(e.g. the bundled \"fast\" schedule).");
 }
 
 } // namespace MR::Denoise::Schedule

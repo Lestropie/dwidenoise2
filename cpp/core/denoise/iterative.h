@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <vector>
 
 #include "algo/threaded_copy.h"
@@ -27,7 +28,7 @@
 #include "denoise/exports.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/precondition.h"
-#include "denoise/subsample.h"
+#include "denoise/spatial_subsample.h"
 #include "filter/smooth.h"
 #include "image.h"
 #include "interp/cubic.h"
@@ -36,9 +37,19 @@
 namespace MR::Denoise::Iterative {
 
 struct Iteration {
-  std::array<ssize_t, 3> subsample_ratios;
+  std::array<ssize_t, 3> spatial_subsample_ratios;
   default_type kernel_size_multiplier;
   noise_smooth_type smooth_noiseout;
+  // Fraction of volumes (along the supra-spatial axes) used for noise level estimation
+  //   in this iteration; 1.0 uses all volumes. Sub-sampling is stratified by demeaning
+  //   group and is owned entirely by the preconditioner (Precondition::set_temporal_subsample).
+  default_type temporal_subsample = 1.0;
+  // Whether the noise level estimate is (re)computed within this iteration.
+  //   Must be true for any non-final iteration. For the final iteration the default is
+  //   false (the dummy Estimator::Unity is used, carrying the prior estimate through);
+  //   a custom schedule may set it true to re-estimate in the final iteration.
+  //   Unset here; resolved to a concrete value per command after the schedule is loaded.
+  std::optional<bool> update_noise;
 };
 
 // Internal function covering as much as possible for iterative implementation
@@ -50,15 +61,21 @@ void estimate(Image<T> &input,
               Image<float> &rank_per_mm_image,
               const Iteration &config,
               const ssize_t iter,
-              std::shared_ptr<Subsample> subsample,
+              std::shared_ptr<SpatialSubsample> subsample,
               const decomp_type decomposition,
               std::shared_ptr<Estimator::Base> estimator,
               const Precondition<T> &preconditioner,
               Exports &exports) {
-  auto kernel = Kernel::make_kernel(input,
+  // Size the kernel from the preconditioned data, whose volume count is m' (reduced under
+  //   temporal sub-sampling); this keeps the Casorati matrix aspect ratio consistent with the
+  //   number of volumes actually decomposed. The full volume count is passed for the shape
+  //   warning only. make_kernel reads only the header, so it is valid to call before the
+  //   preconditioned data are filled below.
+  auto kernel = Kernel::make_kernel(input_preconditioned,
                                     subsample->get_factors(),
                                     config.kernel_size_multiplier,
-                                    rank_per_mm_image);
+                                    rank_per_mm_image,
+                                    Denoise::num_volumes(input));
   kernel->set_mask(mask);
   if (preconditioner.noop())
     threaded_copy(input, input_preconditioned);

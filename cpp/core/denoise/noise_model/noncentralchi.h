@@ -45,6 +45,9 @@ public:
   ssize_t num_channels() const final { return N; }
   ssize_t dof() const final { return 2 * N; }
   std::string description() const override;
+  // The magnitude (non-central chi / Rician) model is non-linear: its inverse debiases
+  //   the noise floor, so -preserve_noise_bias is meaningful.
+  bool is_linear() const final { return false; }
 
 protected:
   const ssize_t N;

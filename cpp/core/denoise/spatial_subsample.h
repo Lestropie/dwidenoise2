@@ -27,11 +27,9 @@
 
 namespace MR::Denoise {
 
-extern const App::Option subsample_option;
-
-class Subsample {
+class SpatialSubsample {
 public:
-  Subsample(const Header &in, const std::array<ssize_t, 3> &factors);
+  SpatialSubsample(const Header &in, const std::array<ssize_t, 3> &factors);
 
   const Header &header() const { return H_ss; }
 
@@ -40,9 +38,6 @@ public:
   std::array<ssize_t, 3> in2ss(const Kernel::Voxel::index_type &pos) const;
   std::array<ssize_t, 3> ss2in(const Kernel::Voxel::index_type &pos) const;
   const std::array<ssize_t, 3> &get_factors() const { return factors; }
-
-  static std::shared_ptr<Subsample> make(const Header &in, const ssize_t default_factor);
-  static std::shared_ptr<Subsample> make(const Header &in, std::array<ssize_t, 3> default_factors);
 
 protected:
   const Header H_in;

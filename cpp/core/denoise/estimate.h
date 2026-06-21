@@ -34,7 +34,7 @@
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/voxel.h"
-#include "denoise/subsample.h"
+#include "denoise/spatial_subsample.h"
 #include "header.h"
 #include "image.h"
 #include "transform.h"
@@ -47,7 +47,7 @@ public:
   using MatrixType = Eigen::Matrix<F, Eigen::Dynamic, Eigen::Dynamic>;
 
   Estimate(const Image<F> &image,
-           std::shared_ptr<Subsample> subsample,
+           std::shared_ptr<SpatialSubsample> subsample,
            std::shared_ptr<Kernel::Base> kernel,
            decomp_type decomp,
            std::shared_ptr<Estimator::Base> estimator,
@@ -65,7 +65,7 @@ protected:
   const ssize_t m;
 
   // Denoising configuration
-  std::shared_ptr<Subsample> subsample;
+  std::shared_ptr<SpatialSubsample> subsample;
   std::shared_ptr<Kernel::Base> kernel;
   decomp_type decomp;
   std::shared_ptr<Estimator::Base> estimator;

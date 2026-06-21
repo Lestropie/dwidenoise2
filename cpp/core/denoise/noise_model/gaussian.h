@@ -45,6 +45,7 @@ public:
   ssize_t num_channels() const final { return 1; }
   ssize_t dof() const final { return 2; }
   std::string description() const final { return "Gaussian"; }
+  bool is_linear() const final { return true; }
 };
 
 } // namespace MR::Denoise::NoiseModel

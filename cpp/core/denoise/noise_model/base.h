@@ -69,6 +69,15 @@ public:
   virtual ssize_t dof() const = 0;
 
   virtual std::string description() const = 0;
+
+  // Whether the variance-stabilising transform is linear: the stabilised data are mapped
+  //   back to the intensity scale by a pure (sigma-dependent) gain, with no noise-floor bias
+  //   (inverse_unbiased coincides with inverse_algebraic). True for the Gaussian and identity
+  //   models (complex data, or -vst_method none / linear); false for the magnitude
+  //   (Rician / non-central chi) models, whose inverse debiases the noise floor. When true the
+  //   -preserve_noise_bias distinction is a no-op: there is no estimated noise bias to
+  //   preserve or remove.
+  virtual bool is_linear() const = 0;
 };
 
 } // namespace MR::Denoise::NoiseModel
