@@ -31,14 +31,14 @@ using namespace App;
 // clang-format off
 const Option estimator_option =
     Option("estimator",
-           "Select the noise level estimator (default = " + estimators[size_t(default_estimator)] +
+           "Select the noise level estimator (default = " + Enum::lowercase_name(default_estimator) +
                "), either: \n"
                "* Exp1: the original estimator used in Veraart et al. (2016); \n"
                "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
                "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
                "* MRM2023: the alternative estimator introduced in Olesen et al. (2023); \n"
                "* TBME2022: the multiple-moment generalised-quarter-circle estimator of Zhu et al. (2022).")
-      + Argument("algorithm").type_choice(estimators);
+      + Argument("algorithm").type_choice<estimator_type>();
 
 const OptionGroup estimator_denoise_options =
     OptionGroup("Options relating to signal / noise level estimation for denoising")
@@ -63,8 +63,7 @@ std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool perm
     if (imposed)
       return imposed;
   }
-  const auto opt = get_options("estimator");
-  const estimator_type est = opt.empty() ? default_estimator : estimator_type((int)(opt[0][0]));
+  const estimator_type est = get_option_choice("estimator", default_estimator);
   switch (est) {
   case estimator_type::EXP1:
     return std::make_shared<Exp<1>>();

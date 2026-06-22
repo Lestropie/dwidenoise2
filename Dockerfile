@@ -7,8 +7,8 @@ FROM buildpack-deps:bookworm AS base-builder
 FROM base-builder AS mrtrix3-builder
 
 # Git commitish from which to build MRtrix3.
-# This is branch "dev" as at 2025-11-17
-ARG MRTRIX3_GIT_COMMITISH="fa6ee952913fbc1df79aeca745600852155f533f"
+# This is branch "dev" as at 2026-06-22
+ARG MRTRIX3_GIT_COMMITISH="b98b54e9ae8168eeb9af23322a07011d4754456d"
 
 RUN apt-get -qq update \
     && apt-get install -yq --no-install-recommends \
@@ -31,13 +31,16 @@ RUN git clone https://github.com/MRtrix3/mrtrix3.git . \
 COPY cpp/cmd/dwidenoise2.cpp /src/mrtrix3/cpp/cmd/dwidenoise2.cpp
 COPY cpp/cmd/dwi2noise.cpp /src/mrtrix3/cpp/cmd/dwi2noise.cpp
 COPY cpp/core/denoise /src/mrtrix3/cpp/core/denoise
+# Place the per-command noise estimation schedules alongside the other MRtrix3 shared data
+#   files (share/mrtrix3/<command>/), so the MRtrix3 cmake build copies them into the build
+#   tree (build/share/mrtrix3/) where the commands locate them relative to the executable.
+COPY share/dwidenoise2 /src/mrtrix3/share/mrtrix3
 
+# The "copy-share-data" target imports share/mrtrix3/ (including the bundled schedules) into
+#   the build tree (build/share/mrtrix3/); it must be named explicitly here because building
+#   named executable targets does not trigger MRtrix3's ALL custom targets.
 RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON --preset=release \
-    && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert
-
-# Bundle the example noise estimation schedules alongside the binaries,
-#   so that they can be referenced by name via the -schedule_file option.
-COPY share /src/mrtrix3/build/share
+    && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert copy-share-data
 
 # Build final image.
 FROM base AS final
@@ -59,8 +62,8 @@ ENV PATH="/opt/mrtrix3/bin:$PATH"
 
 ENV LD_LIBRARY_PATH="/opt/mrtrix3/cpp/core/"
 
-# The bundled noise estimation schedules (-schedule_file) are located relative to the
-#   executable (<exe dir>/../share/dwidenoise2), so no environment variable is required.
+# The bundled noise estimation schedules are located relative to the executable
+#   (<exe dir>/../share/mrtrix3/<command>), so no environment variable is required.
 
 # TODO Define an entrypoint for the container
 #ENTRYPOINT ["/opt/mrtrix3/bin/dwidenoise2"]

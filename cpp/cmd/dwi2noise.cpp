@@ -228,13 +228,6 @@ void usage() {
 }
 // clang-format on
 
-// The command's default multi-resolution noise estimation schedule, embedded in the command
-//   (used when the user does not override it via -schedule_file). The final row produces the
-//   estimated noise level map that is output.
-const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, noise_smooth_type::NONE},    //
-                                                            {{4, 4, 4}, 4.0, noise_smooth_type::NONE},     //
-                                                            {{2, 2, 2}, 1.0, noise_smooth_type::SMOOTH}}); //
-
 template <typename T>
 void run(Header &dwi,
          const Demodulation &demodulation,
@@ -343,19 +336,14 @@ void run() {
 
   const Demodulation demodulation = select_demodulation(dwi);
   const demean_type demean = select_demean(dwi);
-  decomp_type decomposition = default_decomposition;
-  auto opt = get_options("decomposition");
-  if (!opt.empty())
-    decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
+  const decomp_type decomposition = get_option_choice("decomposition", default_decomposition);
 
   // Resolve the requested variance-stabilising transform up-front:
   //   -vst_method none disables the transform entirely, which makes iterative
   //   refinement of the noise level pointless (handled below) and is incompatible
   //   with -noise_in (which exists only to parameterise the transform).
-  auto opt_vstmethod = get_options("vst_method");
   const NoiseModel::vst_method_t vst_method =
-      opt_vstmethod.empty() ? NoiseModel::vst_method_t::FOI
-                            : NoiseModel::vst_method_t(int(opt_vstmethod[0][0]));
+      get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
   const bool vst_none = (vst_method == NoiseModel::vst_method_t::NONE);
 
   // A pre-estimated noise level provided via -noise_in seeds the variance-stabilising
@@ -365,7 +353,7 @@ void run() {
   //   The forward transform is well-posed without a mean, so -demean none is permitted
   //   (see vst_plan.md sections 2.1 and 6.2).
   Image<float> user_vst_image;
-  opt = get_options("noise_in");
+  auto opt = get_options("noise_in");
   if (!opt.empty()) {
     if (vst_none)
       throw Exception("Options -noise_in and -vst_method none are incompatible: "
@@ -378,9 +366,9 @@ void run() {
 
   // Resolve the iteration schedule. When the user supplies -schedule_file it is the single
   //   source of truth for the spatial and temporal sub-sampling of each iteration; otherwise
-  //   the command's embedded default schedule (default_iterations) is used. "one-pass"
-  //   operation is simply a single-row schedule. -vst_method none removes the coupling between
-  //   iterations and so reduces to a single-iteration schedule.
+  //   the command's bundled default schedule is loaded from file (Schedule::load_default).
+  //   "one-pass" operation is simply a single-row schedule. -vst_method none removes the
+  //   coupling between iterations and so reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   if (Schedule::requested()) {
     if (vst_none)
@@ -402,7 +390,7 @@ void run() {
     config.update_noise = true;
     iterations.push_back(config);
   } else {
-    iterations = default_iterations;
+    iterations = Schedule::load_default("dwi2noise");
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
   std::shared_ptr<SpatialSubsample> final_subsample =
@@ -442,7 +430,7 @@ void run() {
   if (!opt.empty())
     final_exports.set_eigenspectra_path(opt[0][0]);
 
-  int prec = get_option_value("datatype", 0); // default: single precision
+  int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (complex)
     prec += 2; // support complex input data
   switch (prec) {

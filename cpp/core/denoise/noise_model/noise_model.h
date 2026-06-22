@@ -55,7 +55,6 @@ enum class distribution_t { GAUSSIAN, RICIAN, NONCENTRALCHI };
 // For these three the forward stabilising transform itself is shared;
 //   they differ only in how the stabilised domain is mapped back to a
 //   bias-free underlying level (the inverse / debias step).
-const std::vector<std::string> vst_methods = {"none", "linear", "foi", "koay", "mom"};
 enum class vst_method_t { NONE, LINEAR, FOI, KOAY, MOM };
 
 // Construct a noise model for the requested distribution.

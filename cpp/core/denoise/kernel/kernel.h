@@ -35,7 +35,6 @@ extern const char *const shape_description;
 extern const char *const default_size_description;
 extern const char *const cuboid_size_description;
 
-const std::vector<std::string> shapes = {"cuboid", "sphere"};
 enum class shape_type { CUBOID, SPHERE };
 extern const App::OptionGroup options;
 

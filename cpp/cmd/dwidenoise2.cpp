@@ -234,14 +234,14 @@ void usage() {
   + Option("filter",
            "Modulate how component contributions are filtered "
            "based on the cumulative eigenvalues relative to the noise level; "
-           "options are: " + join(filters, ",") + "; "
+           "options are: " + Enum::join<filter_type>(",") + "; "
            "default: optshrink (Optimal Shrinkage based on minimisation of the Frobenius norm)")
-    + Argument("choice").type_choice(filters)
+    + Argument("choice").type_choice<filter_type>()
   + Option("aggregator",
            "Select how the outcomes of multiple PCA outcomes centred at different voxels "
            "contribute to the reconstructed DWI signal in each voxel; "
-           "options are: " + join(aggregators, ",") + "; default: Gaussian")
-    + Argument("choice").type_choice(aggregators)
+           "options are: " + Enum::join<aggregator_type>(",") + "; default: Gaussian")
+    + Argument("choice").type_choice<aggregator_type>()
   // TODO For specifically the Gaussian aggregator,
   //   should ideally be possible to select the FWHM of the aggregator
   + Option("preserve_noise_bias",
@@ -249,14 +249,14 @@ void usage() {
            " (no effect for complex input data)")
   + Option("debias_anchor",
            "operating point at which the non-linear variance-stabilising transform is inverted"
-           " when removing the noise-floor bias; options are: " + join(debias_anchor_choices, ",") + " "
+           " when removing the noise-floor bias; options are: " + Enum::join<debias_anchor_t>(",") + " "
            "(default: sample)."
            " 'sample' inverts the transform at each volume's own denoised value, so debiasing is"
            " independent of the -demean grouping;"
            " 'group_mean' reproduces the prior behaviour, linearising the inverse about the"
            " per-group demeaning mean"
            " (no effect with -preserve_noise_bias or for complex input data)")
-    + Argument("mode").type_choice(debias_anchor_choices)
+    + Argument("mode").type_choice<debias_anchor_t>()
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
   + Option("noise_out",
@@ -320,14 +320,6 @@ void usage() {
 //   where the image type is cdouble, but aggregation weights are float
 // (operations combining complex & real types not allowed to be of different precision)
 std::complex<double> operator/(const std::complex<double> &c, const float n) { return c / double(n); }
-
-// The command's default multi-resolution noise estimation schedule, embedded in the command
-//   (used when the user does not override it via -schedule_file). The final row is the
-//   reconstruction (denoising) pass.
-const std::vector<Iterative::Iteration> default_iterations({{{8, 8, 8}, 16.0, noise_smooth_type::NONE},  //
-                                                            {{4, 4, 4}, 4.0, noise_smooth_type::NONE},   //
-                                                            {{2, 2, 2}, 1.0, noise_smooth_type::SMOOTH}, //
-                                                            {{2, 2, 2}, 1.0, noise_smooth_type::NONE}}); //
 
 // TODO Improve this
 template <typename T>
@@ -599,19 +591,14 @@ void run() {
 
   const Demodulation demodulation = select_demodulation(dwi);
   const demean_type demean = select_demean(dwi);
-  decomp_type decomposition = default_decomposition;
-  auto opt = get_options("decomposition");
-  if (!opt.empty())
-    decomposition = static_cast<decomp_type>(int64_t(opt[0][0]));
+  const decomp_type decomposition = get_option_choice("decomposition", default_decomposition);
 
   // Resolve the requested variance-stabilising transform up-front:
   //   -vst_method none disables the transform entirely, which makes iterative
   //   refinement of the noise level pointless (handled below) and is incompatible
   //   with -noise_in (which exists only to parameterise the transform).
-  auto opt_vstmethod = get_options("vst_method");
   const NoiseModel::vst_method_t vst_method =
-      opt_vstmethod.empty() ? NoiseModel::vst_method_t::FOI
-                            : NoiseModel::vst_method_t(int(opt_vstmethod[0][0]));
+      get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
   const bool vst_none = (vst_method == NoiseModel::vst_method_t::NONE);
 
   // A pre-estimated noise level provided via -noise_in is authoritative:
@@ -620,7 +607,7 @@ void run() {
   //   noise level estimation, yielding sigma^2 ~ 1 on the stabilised data
   //   (equivalent to -estimator unity); see vst_plan.md section 6.2.
   Image<float> user_vst_image;
-  opt = get_options("noise_in");
+  auto opt = get_options("noise_in");
   if (!opt.empty()) {
     if (vst_none)
       throw Exception("Options -noise_in and -vst_method none are incompatible: "
@@ -632,10 +619,7 @@ void run() {
     user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
   }
 
-  aggregator_type aggregator = aggregator_type::GAUSSIAN;
-  opt = get_options("aggregator");
-  if (!opt.empty())
-    aggregator = aggregator_type(int(opt[0][0]));
+  const aggregator_type aggregator = get_option_choice("aggregator", aggregator_type::GAUSSIAN);
 
   const bias_handling_t bias_handling =
       get_options("preserve_noise_bias").empty() ? bias_handling_t::DEBIAS : bias_handling_t::PRESERVE;
@@ -662,14 +646,11 @@ void run() {
   // Operating point for reversing the non-linear variance-stabilising transform when debiasing
   //   (see debias_anchor_t); the default inverts the transform at each volume's own denoised
   //   value, so debiasing no longer depends on the demeaning grouping.
-  debias_anchor_t debias_anchor = debias_anchor_t::SAMPLE;
-  opt = get_options("debias_anchor");
-  if (!opt.empty())
-    debias_anchor = debias_anchor_t(int(opt[0][0]));
+  const debias_anchor_t debias_anchor = get_option_choice("debias_anchor", debias_anchor_t::SAMPLE);
 
   // Resolve the iteration schedule. When the user supplies -schedule_file it is the single
   //   source of truth for both the spatial and temporal sub-sampling of each iteration;
-  //   otherwise the command's embedded default schedule (default_iterations) is used.
+  //   otherwise the command's bundled default schedule is loaded from file (Schedule::load_default).
   //   "one-pass" operation is simply a single-row schedule. -fixed_rank imposes the signal
   //   rank at a single kernel size, and -vst_method none removes the coupling between
   //   iterations; either reduces to a single-iteration schedule.
@@ -695,7 +676,7 @@ void run() {
     config.update_noise = true; // a single-pass schedule must estimate the noise level
     iterations.push_back(config);
   } else {
-    iterations = default_iterations;
+    iterations = Schedule::load_default("dwidenoise2");
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
   std::shared_ptr<SpatialSubsample> final_subsample =
@@ -746,10 +727,8 @@ void run() {
 
   auto estimator = Estimator::make_estimator(user_vst_image, true);
 
-  filter_type filter = get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE;
-  opt = get_options("filter");
-  if (!opt.empty())
-    filter = filter_type(int(opt[0][0]));
+  const filter_type filter = get_option_choice(
+      "filter", get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE);
 
   Exports final_exports(dwi, final_subsample->header());
   opt = get_options("noise_out");
@@ -808,7 +787,7 @@ void run() {
   if (!opt.empty())
     final_exports.set_eigenspectra_path(opt[0][0]);
 
-  int prec = get_option_value("datatype", 0); // default: single precision
+  int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (dwi.datatype().is_complex())
     prec += 2; // support complex input data
   switch (prec) {

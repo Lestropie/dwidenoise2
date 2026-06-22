@@ -23,6 +23,7 @@
 #include <string>
 
 #include "denoise/noise_model/noise_model.h"
+#include "enum.h"
 #include "exception.h"
 
 namespace MR::Denoise::NoiseModel {
@@ -351,7 +352,7 @@ default_type NonCentralChi::variance(const default_type nu, const default_type s
 
 std::string NonCentralChi::description() const {
   return "non-central chi (" + std::to_string(N) + " channels, " + std::to_string(2 * N) +
-         " DOF; VST: " + vst_methods[size_t(vst_method)] + ")";
+         " DOF; VST: " + Enum::lowercase_name(vst_method) + ")";
 }
 
 } // namespace MR::Denoise::NoiseModel

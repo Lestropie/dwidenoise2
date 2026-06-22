@@ -38,10 +38,8 @@ namespace MR::Denoise {
 
 extern const char *const demodulation_description;
 
-const std::vector<std::string> demodulation_choices({"none", "linear", "nonlinear"});
 enum class demodulation_t { NONE, LINEAR, NONLINEAR };
 
-const std::vector<std::string> demean_choices = {"none", "volume_groups", "shells", "all"};
 enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
 
 // Handling of the noise-distribution bias when reversing preconditioning
@@ -68,7 +66,6 @@ enum class bias_handling_t { DEBIAS, PRESERVE };
 //     its group mean. Applies only to the DEBIAS bias handling: the PRESERVE (algebraic)
 //     inverse is always evaluated pointwise (a faithful, grouping-independent reversal).
 enum class debias_anchor_t { SAMPLE, GROUP_MEAN };
-const std::vector<std::string> debias_anchor_choices = {"sample", "group_mean"};
 
 App::OptionGroup precondition_options(const bool include_output);
 

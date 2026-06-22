@@ -28,6 +28,7 @@
 #include "denoise/denoise.h"
 #include "exception.h"
 #include "mrtrix.h"
+#include "platform.h"
 
 namespace MR::Denoise::Schedule {
 
@@ -140,16 +141,18 @@ bool parse_update_noise(const std::string &value, const size_t lineno) {
                   "value for column \"update_noise\" must be one of \"true\" or \"false\" (got \"" + value + "\")");
 }
 
-// Directory in which command-specific bundled schedules reside, used to resolve a bundled
-//   name given to -schedule_file. The command name is appended as a subdirectory.
-// This is resolved relative to the working directory only: the robust mechanism for locating
-//   files installed alongside the executable is implemented in a separate MRtrix3 branch and
-//   will be adopted here in due course. Deliberately, no attempt is made to discover the
-//   running executable's location. The command's *default* schedule does not depend on this
-//   (it is embedded in the command), so an unresolved bundled directory only affects an
-//   explicit -schedule_file <name>.
+// Directory in which command-specific bundled schedules reside, holding both the command's
+//   "default" schedule and any other named schedules (e.g. "fast"). The schedule files are
+//   installed by the MRtrix3 cmake build alongside the other MRtrix3 shared data files, under
+//   "<datadir>/mrtrix3/<command>/". They are located here relative to the running executable:
+//   in the build tree the executables live in "<build>/bin/" and the shared data in
+//   "<build>/share/mrtrix3/", so the schedules reside at "<exe dir>/../share/mrtrix3/<command>/".
+// Platform::get_executable_path() throws if the executable location cannot be determined; that
+//   propagates as a clear error, as the command's default schedule is now loaded from this
+//   location rather than being hard-coded.
 std::string bundled_directory(const std::string &command) {
-  return "share/dwidenoise2/" + command;
+  const std::filesystem::path executable_path = Platform::get_executable_path();
+  return (executable_path.parent_path().parent_path() / "share" / "mrtrix3" / command).string();
 }
 
 // Human-readable list of the bundled schedules available for "command",
@@ -297,6 +300,17 @@ std::vector<Iterative::Iteration> load(const std::string &command) {
   const std::string path = resolve(spec, command);
   std::vector<Iterative::Iteration> schedule = parse(path);
   INFO("Using noise estimation schedule from \"" + path + "\" (" + str(schedule.size()) + " iteration" +
+       (schedule.size() == 1 ? "" : "s") + ")");
+  return schedule;
+}
+
+std::vector<Iterative::Iteration> load_default(const std::string &command) {
+  const std::string path = bundled_directory(command) + "/default.txt";
+  if (!std::ifstream(path).good())
+    throw Exception("Unable to locate the bundled default noise estimation schedule for command \"" + command +
+                    "\" (expected at \"" + path + "\"); the software installation may be incomplete");
+  std::vector<Iterative::Iteration> schedule = parse(path);
+  INFO("Using bundled default noise estimation schedule \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
 }

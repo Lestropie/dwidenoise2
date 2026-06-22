@@ -105,13 +105,13 @@ const Option datatype_option = Option("datatype",
                                       " (single or double precision). "
                                       "For complex input data,"
                                       " this will select complex float32 or complex float64 datatypes.")
-                               + Argument("float32/float64").type_choice(dtypes);
+                               + Argument("float32/float64").type_choice<dtype_t>();
 
 const Option decomposition_option = Option("decomposition",
                                            "Method used for the decomposition of the data in each patch;"
-                                           " options are: " + join(decompositions, ", ") +
+                                           " options are: " + Enum::join<decomp_type>(", ") +
                                            " (default: BDCSVD)")
-                                    + Argument("choice").type_choice(decompositions);
+                                    + Argument("choice").type_choice<decomp_type>();
 
 ssize_t dimlong_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp) { return std::max(m - rp, n); }
 ssize_t rank_nonzero(const ssize_t m, const ssize_t n, const ssize_t rp) { return std::min(m - rp, n); }

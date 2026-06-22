@@ -55,17 +55,17 @@ OptionGroup precondition_options(const bool include_output)
   result
   + Option("demodulate",
            "select form of phase demodulation; "
-           "options are: " + join(demodulation_choices, ",") + " "
+           "options are: " + Enum::join<demodulation_t>(",") + " "
            "(default: nonlinear)")
-    + Argument("mode").type_choice(demodulation_choices)
+    + Argument("mode").type_choice<demodulation_t>()
   + Option("demod_axes",
            "comma-separated list of axis indices along which FFT can be applied for phase demodulation")
     + Argument("axes").type_sequence_int()
   + Option("demean",
            "select method of demeaning prior to PCA; "
-           "options are: " + join(demean_choices, ",") + " "
+           "options are: " + Enum::join<demean_type>(",") + " "
            "(default: 'shells' if DWI gradient table available; 'volume_groups' if volume groups present; 'all' otherwise)")
-    + Argument("mode").type_choice(demean_choices)
+    + Argument("mode").type_choice<demean_type>()
   + Option("noise_dof",
            "the number of receive channels N combined by sum-of-squares reconstruction of magnitude data, "
            "such that the noise follows a non-central chi distribution with 2N degrees of freedom "
@@ -73,14 +73,14 @@ OptionGroup precondition_options(const bool include_output)
     + Argument("count").type_integer(1)
   + Option("vst_method",
            "the variance-stabilising transform to apply prior to PCA; "
-           "options are: " + join(NoiseModel::vst_methods, ",") + "; "
+           "options are: " + Enum::join<NoiseModel::vst_method_t>(",") + "; "
            "'none' applies no transform; "
            "'linear' divides by the noise level (the appropriate transform for Gaussian-distributed, "
            "e.g. complex or phase-demodulated, data); "
            "'foi', 'koay' and 'mom' construct a non-linear transform with bias-corrected inverse "
            "for magnitude data, differing only in the inverse / debias strategy "
            "(default: foi for magnitude data; complex data always use the linear transform)")
-    + Argument("method").type_choice(NoiseModel::vst_methods);
+    + Argument("method").type_choice<NoiseModel::vst_method_t>();
   if (include_output) {
     result
     + Option("preconditioned_input",
@@ -101,10 +101,8 @@ OptionGroup precondition_options(const bool include_output)
 
 std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
   auto opt_dof = get_options("noise_dof");
-  auto opt_method = get_options("vst_method");
-  const NoiseModel::vst_method_t vst_method = opt_method.empty()                                  //
-                                                  ? NoiseModel::vst_method_t::FOI                  //
-                                                  : NoiseModel::vst_method_t(int(opt_method[0][0])); //
+  const NoiseModel::vst_method_t vst_method =
+      get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
   // -vst_method none: no variance-stabilising transform (identity), for any data type.
   //   The noise distribution and -noise_dof are irrelevant, and the data reach PCA
   //   unmodified (save for any demeaning); see the single-pass fallback / warning in
@@ -155,7 +153,7 @@ Demodulation select_demodulation(const Header &H) {
       }
     }
   } else {
-    result.mode = demodulation_t(int(opt_mode[0][0]));
+    result.mode = Enum::from_name<demodulation_t>(std::string_view(opt_mode[0][0]));
     if (!complex) {
       switch (result.mode) {
       case demodulation_t::NONE:
@@ -233,7 +231,7 @@ demean_type select_demean(const Header &H) {
     INFO("Automatically demeaning across all volumes");
     return demean_type::ALL;
   }
-  const demean_type user_selection = demean_type(int(opt[0][0]));
+  const demean_type user_selection = Enum::from_name<demean_type>(std::string_view(opt[0][0]));
   if (user_selection == demean_type::SHELLS && !shells_available)
     throw Exception("Cannot demean by b-value shells as shell structure could not be inferred");
   if (user_selection == demean_type::VOLUME_GROUPS && !volume_groups_available)

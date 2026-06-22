@@ -78,8 +78,8 @@ const char *const cuboid_size_description =
 const OptionGroup options = OptionGroup("Options for controlling the sliding spatial window kernel")
 + Option("shape",
          "Set the shape of the sliding spatial window. "
-         "Options are: " + join(shapes, ",") + "; default: sphere")
-  + Argument("choice").type_choice(shapes)
+         "Options are: " + Enum::join<shape_type>(",") + "; default: sphere")
+  + Argument("choice").type_choice<shape_type>()
 + Option("radius", "Set an absolute spherical kernel radius in mm")
   + Argument("value").type_float(0.0)
 + Option("aspect_ratio",
@@ -142,8 +142,8 @@ make_kernel(const Header &H,
             const default_type size_multiplier,
             const Image<float> &rank_per_mm,
             const ssize_t full_num_volumes) {
-  auto opt = App::get_options("shape");
-  const Kernel::shape_type shape = opt.empty() ? Kernel::shape_type::SPHERE : Kernel::shape_type((int)(opt[0][0]));
+  const Kernel::shape_type shape = App::get_option_choice("shape", Kernel::shape_type::SPHERE);
+  std::vector<App::ParsedOption> opt;
   std::shared_ptr<Kernel::Base> kernel;
   // Whether the kernel size is derived from the volume count (true for the dynamic
   //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / cuboid).

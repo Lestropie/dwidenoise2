@@ -39,18 +39,17 @@ extern const char *decomposition_description;
 extern const char *filter_description;
 extern const char *aggregation_description;
 
-const std::vector<std::string> dtypes = {"float32", "float64"};
+// Eigenvalue-decomposition working precision selected by -datatype
+//   (the enumerator order maps to the float32/float64 processing path index).
+enum class dtype_t { FLOAT32, FLOAT64 };
 extern const App::Option datatype_option;
 
-const std::vector<std::string> decompositions = {"bdcsvd", "selfadjoint"};
 enum class decomp_type { BDCSVD, SELFADJOINT };
 extern const App::Option decomposition_option;
 constexpr decomp_type default_decomposition = decomp_type::BDCSVD;
 
-const std::vector<std::string> filters = {"optshrink", "optthresh", "truncate"};
 enum class filter_type { OPTSHRINK, OPTTHRESH, TRUNCATE };
 
-const std::vector<std::string> aggregators = {"exclusive", "gaussian", "invl0", "rank", "uniform"};
 enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
 
 // These functions resolve dimensions of the matrix decomposition

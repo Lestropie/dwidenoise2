@@ -21,6 +21,7 @@
 
 #include "denoise/noise_model/noise_model.h"
 #include "denoise/noise_model/noncentralchi.h"
+#include "enum.h"
 
 namespace MR::Denoise::NoiseModel {
 
@@ -30,7 +31,7 @@ class Rician : public NonCentralChi {
 public:
   explicit Rician(const vst_method_t vst_method) : NonCentralChi(1, vst_method) {}
   std::string description() const final {
-    return "Rician (2 DOF; VST: " + vst_methods[size_t(vst_method)] + ")";
+    return "Rician (2 DOF; VST: " + Enum::lowercase_name(vst_method) + ")";
   }
 };
 

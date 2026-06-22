@@ -30,7 +30,6 @@ class Base;
 
 extern const App::Option estimator_option;
 extern const App::OptionGroup estimator_denoise_options;
-const std::vector<std::string> estimators = {"exp1", "exp2", "med", "mrm2023", "tbme2022"};
 enum class estimator_type { EXP1, EXP2, MED, MRM2023, TBME2022 };
 // Default data-driven estimator, used both to populate the -estimator help text
 //   and as the fallback when the option is not specified.
