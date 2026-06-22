@@ -96,7 +96,7 @@ void usage() {
 
   + Kernel::cuboid_size_description
 
-  + Schedule::schedule_file_description;
+  + Schedule::schedule_description;
 
   EXAMPLES
   + Example("Estimate a noise map, filter it, then denoise using the filtered map",
@@ -169,7 +169,7 @@ void usage() {
            " image is only an initial seed, not the final estimated output)")
     + Argument("value/image").type_float(0.0).type_image_in()
   + Kernel::options
-  + Schedule::schedule_file_option
+  + Schedule::schedule_option
   + precondition_options(false)
 
   + DWI::GradImportOptions()
@@ -408,18 +408,23 @@ void run() {
 
   auto estimator = Estimator::make_estimator(user_vst_image, false);
 
-  // Resolve the iteration schedule. When the user supplies -schedule_file it is the single
+  // Resolve the iteration schedule. When the user supplies -schedule it is the single
   //   source of truth for the spatial and temporal sub-sampling of each iteration; otherwise
   //   the command's bundled default schedule is loaded from file (Schedule::load_default).
   //   "one-pass" operation is simply a single-row schedule. -vst_method none removes the
   //   coupling between iterations and so reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   if (Schedule::requested()) {
-    if (vst_none)
-      throw Exception("Option -schedule_file cannot be combined with -vst_method none: "
-                      "without a variance-stabilising transform there is no coupling "
-                      "between iterations for the schedule to control");
     iterations = Schedule::load("dwi2noise");
+    // Without a variance-stabilising transform there is no coupling between iterations, so the
+    //   per-iteration refinement of a multi-row schedule cannot propagate and is wasted
+    //   computation; a single-row schedule is, however, perfectly meaningful under
+    //   -vst_method none.
+    if (vst_none && iterations.size() > 1)
+      throw Exception("Option -vst_method none cannot be combined with a -schedule of more than "
+                      "one row: without a variance-stabilising transform there is no coupling "
+                      "between iterations for the additional schedule rows to control; "
+                      "use a single-row schedule");
   } else if (vst_none) {
     WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
          "refining the noise level estimate would have no effect on subsequent iterations "

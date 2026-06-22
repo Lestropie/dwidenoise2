@@ -119,7 +119,7 @@ void warn_casorati_shape(const ssize_t n,
     //   target patch exceeds the voxels available within the image field of view.
     const ssize_t image_voxels = H.size(0) * H.size(1) * H.size(2);
     if (n > image_voxels)
-      WARN("Temporal sub-sampling in conjunction with the kernel_size multiplier yields a "
+      WARN("Temporal sub-sampling in conjunction with the kernel_multiplier yields a "
            "target spherical kernel of " + str(n) + " voxels, which exceeds the available "
            "image voxel count (" + str(image_voxels) + "); "
            "the intended Casorati matrix aspect ratio cannot be achieved");

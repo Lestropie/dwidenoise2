@@ -47,19 +47,21 @@
 #                          ceil(num_volumes / max_partition_size) (after any temporal
 #                          sub-sampling). "none" disables it. Default: none. Mutually
 #                          exclusive with partitions.
-#  - kernel_size         : multiplier applied to the PCA patch size. Default: 1.
+#  - kernel_multiplier   : multiplier applied to the PCA patch size. Default: 1.
 #  - update_noise        : whether the noise level estimate is (re)computed in this
 #                          iteration ("true" or "false"). Must be true for any
 #                          non-final iteration. Default: true for non-final rows;
 #                          for the final row, false (carry the prior estimate
 #                          through the reconstruction).
-#  - smooth              : whether to smooth the estimated noise map before it is
-#                          passed to the next iteration ("none" or "smooth").
-#                          Default: none.
-#                          Must be "none" on the final row.
+#  - smooth_noise        : whether to smooth the estimated noise map before it is
+#                          passed to the next iteration ("true" or "false").
+#                          Default: false.
+#                          May be true only when update_noise is true in the same
+#                          iteration (an iteration that does not (re)estimate the
+#                          noise level has no freshly estimated map to smooth).
 #
-spatial_subsample   kernel_size   update_noise   smooth
-8                   16            true           none
-4                   4             true           none
-2                   1             true           smooth
-2                   1             false          none
+spatial_subsample   kernel_multiplier   update_noise   smooth_noise
+8                   16                  true           false
+4                   4                   true           false
+2                   1                   true           true
+2                   1                   false          false

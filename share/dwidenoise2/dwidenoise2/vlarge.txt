@@ -20,6 +20,6 @@
 #   it was derived based on a 13-minute three-echo fMRI paradigm
 #   consisting of a total of around 2,000 volumes.
 #
-spatial_subsample    temporal_subsample   max_partition_size     smooth    update_noise
-4                    3                    384                    smooth    true
-4                    1                    384                    none      false
+spatial_subsample    temporal_subsample   max_partition_size     smooth_noise    update_noise
+4                    3                    384                    true            true
+4                    1                    384                    false           false

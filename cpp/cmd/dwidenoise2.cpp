@@ -108,15 +108,20 @@ void usage() {
 
   + "For magnitude (or multi-channel sum-of-squares) input data,"
     " the output by default has the noise-floor bias removed:"
-    " the variance-stabilising transform is reversed in such a way that the per-volume-group mean"
-    " is returned at the bias-free underlying signal level,"
-    " which prevents the characteristic residual \"haze\" that otherwise appears"
+    " the non-linear variance-stabilising transform is reversed by inverting it,"
+    " for each individual sample, at that sample's own denoised value,"
+    " mapping it back to the bias-free underlying signal level."
+    " Because the inverse is evaluated per sample rather than being linearised about"
+    " a per-volume-group mean,"
+    " this debiasing is independent of the -demean grouping;"
+    " it prevents the characteristic residual \"haze\" that otherwise appears"
     " in data denoised close to the noise floor,"
     " while the denoised fluctuations are returned on the original intensity scale."
     " This behaviour can be disabled using the -preserve_noise_bias option,"
     " in which case conventional biased-magnitude-scale output is produced (the noise floor is retained)."
+    " The -debias_anchor option can instead select the legacy per-volume-group operating point."
     " For complex input data there is no such bias,"
-    " and the output is unaffected by this option."
+    " and the output is unaffected by these options."
 
   + demodulation_description
 
@@ -130,11 +135,11 @@ void usage() {
 
   + Denoise::aggregation_description
 
-  + Schedule::schedule_file_description;
+  + Schedule::schedule_description;
 
   EXAMPLES
   + Example("To approximately replicate the behaviour of the original dwidenoise command",
-            "dwidenoise2 DWI.mif out.mif -shape cuboid -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive -schedule_file legacy.txt",
+            "dwidenoise2 DWI.mif out.mif -shape cuboid -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive -schedule legacy",
             "While this is neither guaranteed to match exactly the output of the original dwidenoise command"
             " nor is it a recommended use case,"
             " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
@@ -153,7 +158,7 @@ void usage() {
             " and therefore the least risk of BOLD signal attenuation.")
 
   + Example("Denoising a very large image series",
-            "dwidenoise2 in.mif out.mif -schedule_file vlarge.txt -decomposition selfadjoint",
+            "dwidenoise2 in.mif out.mif -schedule vlarge -decomposition selfadjoint",
             "There are some tweaks that can be applied to make computation more feasible"
             " for data larger than the typical DWI acquisition"
             " (including functional MRI data that may be multi-echo and/or long in duration)."
@@ -227,7 +232,7 @@ void usage() {
   + decomposition_option
   + Estimator::estimator_denoise_options
   + Kernel::options
-  + Schedule::schedule_file_option
+  + Schedule::schedule_option
   + precondition_options(true)
 
   + OptionGroup("Options that affect reconstruction of the output image series")
@@ -709,7 +714,7 @@ void run() {
   //   value, so debiasing no longer depends on the demeaning grouping.
   const debias_anchor_t debias_anchor = get_option_choice("debias_anchor", debias_anchor_t::SAMPLE);
 
-  // Resolve the iteration schedule. When the user supplies -schedule_file it is the single
+  // Resolve the iteration schedule. When the user supplies -schedule it is the single
   //   source of truth for both the spatial and temporal sub-sampling of each iteration;
   //   otherwise the command's bundled default schedule is loaded from file (Schedule::load_default).
   //   "one-pass" operation is simply a single-row schedule. -fixed_rank imposes the signal
@@ -718,11 +723,16 @@ void run() {
   std::vector<Iterative::Iteration> iterations;
   const bool fixed_rank = !get_options("fixed_rank").empty();
   if (Schedule::requested()) {
-    if (vst_none)
-      throw Exception("Option -schedule_file cannot be combined with -vst_method none: "
-                      "without a variance-stabilising transform there is no coupling "
-                      "between iterations for the schedule to control");
     iterations = Schedule::load("dwidenoise2");
+    // Without a variance-stabilising transform there is no coupling between iterations, so the
+    //   per-iteration refinement of a multi-row schedule cannot propagate and is wasted
+    //   computation; a single-row schedule (e.g. the bundled "legacy" schedule) is, however,
+    //   perfectly meaningful under -vst_method none.
+    if (vst_none && iterations.size() > 1)
+      throw Exception("Option -vst_method none cannot be combined with a -schedule of more than "
+                      "one row: without a variance-stabilising transform there is no coupling "
+                      "between iterations for the additional schedule rows to control; "
+                      "use a single-row schedule");
   } else if (vst_none || fixed_rank) {
     if (vst_none)
       WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
@@ -751,6 +761,18 @@ void run() {
   if (!iterations.back().update_noise.has_value())
     iterations.back().update_noise = false;
 
+  // smooth_noise smooths an iteration's freshly estimated noise map before it is passed on; that
+  //   is only meaningful when the iteration (re)estimates the noise level. With update_noise now
+  //   resolved, reject any iteration that requests smoothing without estimating (the final
+  //   reconstruction row, whose update_noise defaults to false, is the only one that can reach
+  //   here, as non-final rows are already required to have update_noise true).
+  for (const auto &it : iterations)
+    if (it.smooth_noiseout == noise_smooth_type::SMOOTH && !it.update_noise.value())
+      throw Exception("A schedule iteration sets smooth_noise true but does not (re)estimate the "
+                      "noise level in that iteration (update_noise false), so there is no freshly "
+                      "estimated noise map to smooth; smooth_noise may be true only when "
+                      "update_noise is true in the same iteration");
+
   // dwidenoise2's final (reconstruction) pass must reconstruct every volume.
   if (iterations.back().temporal_subsample < 1.0)
     throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
@@ -760,8 +782,8 @@ void run() {
     for (const auto &it : iterations)
       if (it.kernel_size_multiplier != 1.0)
         throw Exception("Option -fixed_rank cannot be combined with a schedule that uses non-unity "
-                        "kernel_size multipliers, as the signal rank varies with kernel size; "
-                        "use a schedule whose kernel_size is 1 throughout");
+                        "kernel_multiplier values, as the signal rank varies with kernel size; "
+                        "use a schedule whose kernel_multiplier is 1 throughout");
   }
   // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.
   {
@@ -779,12 +801,17 @@ void run() {
          "the noise map used to denoise the data is re-estimated internally and differs from the "
          "supplied image");
 
+  // The exclusive aggregator assigns each voxel only the result of its own patch; if the final
+  //   (reconstruction) iteration sub-samples space, the majority of voxels are never the centre
+  //   of a patch and would be left empty in the output. Reject this combination outright rather
+  //   than producing a mostly-empty denoised series.
   if (aggregator == aggregator_type::EXCLUSIVE &&
-      *std::max_element(final_subsample->get_factors().begin(), final_subsample->get_factors().end()) > 1) {
-    WARN("Utilising subsampling in conjunction with -aggregator exclusive "
-         "will result in an output image with holes, "
-         "as not all input voxels will have their own patch");
-  }
+      *std::max_element(final_subsample->get_factors().begin(), final_subsample->get_factors().end()) > 1)
+    throw Exception("Option -aggregator exclusive cannot be combined with a schedule whose final "
+                    "(reconstruction) iteration performs non-unity spatial sub-sampling, as the "
+                    "majority of output voxels would be left empty (only voxels at the centre of a "
+                    "patch are reconstructed); use unity spatial sub-sampling on the final iteration "
+                    "(e.g. the bundled \"legacy\" schedule)");
 
   auto estimator = Estimator::make_estimator(user_vst_image, true);
 

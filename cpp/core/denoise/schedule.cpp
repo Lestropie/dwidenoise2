@@ -46,7 +46,7 @@ namespace {
 // Existing schedule files that omit the new column will continue to parse,
 //   taking the default; hence the format is forward-compatible.
 const std::vector<std::string> recognised_columns(
-    {"spatial_subsample", "kernel_size", "smooth", "temporal_subsample", "update_noise",
+    {"spatial_subsample", "kernel_multiplier", "smooth_noise", "temporal_subsample", "update_noise",
      "partitions", "max_partition_size"});
 
 // Whitespace-tokenise a line (collapsing runs of whitespace, dropping empties).
@@ -65,16 +65,21 @@ std::string strip_comment(const std::string &line) {
   return hash == std::string::npos ? line : line.substr(0, hash);
 }
 
-noise_smooth_type parse_smooth(const std::string &value, const size_t lineno) {
-  if (value == "smooth" || value == "1")
-    return noise_smooth_type::SMOOTH;
-  if (value == "none" || value == "0")
-    return noise_smooth_type::NONE;
-  throw Exception("Schedule file line " + str(lineno) + ": "
-                  "value for column \"smooth\" must be one of \"none\" or \"smooth\" (got \"" + value + "\")");
+// "smooth_noise" is a boolean: "true" smooths the iteration's noise map estimate before it is
+//   passed to the next iteration, "false" leaves it unsmoothed. Parsed via MR::to<bool>(), which
+//   also accepts "yes"/"no" and 0/1; a column-specific message is raised on anything else.
+noise_smooth_type parse_smooth_noise(const std::string &value, const size_t lineno) {
+  bool smooth = false;
+  try {
+    smooth = to<bool>(value);
+  } catch (Exception &) {
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value for column \"smooth_noise\" must be \"true\" or \"false\" (got \"" + value + "\")");
+  }
+  return smooth ? noise_smooth_type::SMOOTH : noise_smooth_type::NONE;
 }
 
-default_type parse_kernel_size(const std::string &value, const size_t lineno) {
+default_type parse_kernel_multiplier(const std::string &value, const size_t lineno) {
   default_type result = 0.0;
   size_t consumed = 0;
   try {
@@ -84,10 +89,10 @@ default_type parse_kernel_size(const std::string &value, const size_t lineno) {
   }
   if (consumed != value.size())
     throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value \"" + value + "\" for column \"kernel_size\" is not a valid number");
+                    "value \"" + value + "\" for column \"kernel_multiplier\" is not a valid number");
   if (result <= 0.0)
     throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value for column \"kernel_size\" must be greater than zero (got \"" + value + "\")");
+                    "value for column \"kernel_multiplier\" must be greater than zero (got \"" + value + "\")");
   return result;
 }
 
@@ -216,12 +221,21 @@ std::string available_bundled(const std::string &command) {
   return " (bundled schedules available for " + command + ": " + join(names, ", ") + ")";
 }
 
-// Resolve a -schedule_file argument to an on-disk path:
-//   an existing file is used verbatim; otherwise it is treated as a bundled name.
+// Resolve a -schedule argument to an on-disk path. The argument is interpreted, in order:
+//   1. as a filesystem path (absolute or relative to the working directory); if it names an
+//      existing file it is used verbatim;
+//   2. otherwise as the name of a schedule bundled with the software, residing in the same
+//      directory that supplies the command's default schedule (bundled_directory). The ".txt"
+//      extension is appended only when the supplied name carries no extension of its own, so
+//      that both "legacy" and "legacy.txt" resolve to the bundled "legacy.txt".
+// An Exception is thrown only when neither interpretation locates an existing file.
 std::string resolve(const std::string &spec, const std::string &command) {
   if (std::ifstream(spec).good())
     return spec;
-  const std::string candidate = bundled_directory(command) + "/" + spec + ".txt";
+  std::filesystem::path name(spec);
+  if (!name.has_extension())
+    name += ".txt";
+  const std::string candidate = (std::filesystem::path(bundled_directory(command)) / name).string();
   if (std::ifstream(candidate).good())
     return candidate;
   throw Exception("Noise estimation schedule \"" + spec + "\" "
@@ -231,11 +245,15 @@ std::string resolve(const std::string &spec, const std::string &command) {
 
 // Total volume count above which use of a command's embedded default schedule prompts a
 //   "this may be slow" warning. The default schedule's coarsest passes use large
-//   (kernel_size-multiplied) patches whose PCA cost grows with the volume count;
+//   (kernel_multiplier-scaled) patches whose PCA cost grows with the volume count;
 //   beyond a few hundred volumes a lighter schedule is usually preferable.
 constexpr size_t default_schedule_slow_threshold = 255;
 
-std::vector<Iterative::Iteration> parse(const std::string &path) {
+std::vector<Iterative::Iteration> parse(const std::string &path, const std::string &command) {
+  // dwi2noise (re)estimates the noise level in every iteration, so the "update_noise" column
+  //   carries no meaning for it and is rejected outright rather than silently ignored.
+  const bool permit_update_noise = (command != "dwi2noise");
+
   std::ifstream in(path);
   if (!in)
     throw Exception("Unable to open noise estimation schedule file \"" + path + "\"");
@@ -257,6 +275,10 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
           throw Exception("Schedule file \"" + path + "\" line " + str(lineno) + ": "
                           "unrecognised column \"" + column + "\"; "
                           "recognised columns are: " + join(recognised_columns, ", "));
+        if (column == "update_noise" && !permit_update_noise)
+          throw Exception("Schedule file \"" + path + "\" line " + str(lineno) + ": "
+                          "column \"update_noise\" is not permitted in a " + command + " schedule; "
+                          "the " + command + " command (re)estimates the noise level in every iteration");
         if (std::count(tokens.begin(), tokens.end(), column) > 1)
           throw Exception("Schedule file \"" + path + "\" line " + str(lineno) + ": "
                           "column \"" + column + "\" specified more than once");
@@ -282,10 +304,10 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
       const std::string &value = tokens[column];
       if (key == "spatial_subsample")
         iteration.spatial_subsample_ratios = parse_spatial_subsample(value, lineno);
-      else if (key == "kernel_size")
-        iteration.kernel_size_multiplier = parse_kernel_size(value, lineno);
-      else if (key == "smooth")
-        iteration.smooth_noiseout = parse_smooth(value, lineno);
+      else if (key == "kernel_multiplier")
+        iteration.kernel_size_multiplier = parse_kernel_multiplier(value, lineno);
+      else if (key == "smooth_noise")
+        iteration.smooth_noiseout = parse_smooth_noise(value, lineno);
       else if (key == "temporal_subsample")
         iteration.temporal_subsample = parse_temporal_subsample(value, lineno);
       else if (key == "update_noise")
@@ -303,6 +325,15 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
                       "columns \"partitions\" and \"max_partition_size\" are mutually exclusive; "
                       "specify at most one (set \"partitions\" to 1 or \"max_partition_size\" to "
                       "\"none\" to disable one of them on this row)");
+    // Smoothing the iteration's noise map estimate is only meaningful when that iteration
+    //   (re)estimates the noise level; a row that explicitly disables estimation cannot also
+    //   request smoothing. (The complementary case in which update_noise is left to its
+    //   per-command default is enforced by each command once that default is resolved.)
+    if (iteration.smooth_noiseout == noise_smooth_type::SMOOTH &&
+        iteration.update_noise.has_value() && !iteration.update_noise.value())
+      throw Exception("Schedule file \"" + path + "\" line " + str(lineno) + ": "
+                      "column \"smooth_noise\" may be true only when \"update_noise\" is also true "
+                      "in the same iteration");
     result.push_back(iteration);
   }
 
@@ -326,8 +357,8 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
 
 } // namespace
 
-const Option schedule_file_option =
-    Option("schedule_file",
+const Option schedule_option =
+    Option("schedule",
            "manually specify the multi-resolution iteration schedule"
            " used for noise level estimation,"
            " in place of the command's default schedule;"
@@ -335,22 +366,24 @@ const Option schedule_file_option =
            " or the path to a schedule file (see Description for the file format)")
     + Argument("name/file").type_text();
 
-const char *schedule_file_description =
+const char *schedule_description =
     "By default the noise level is estimated via an a priori multi-resolution iteration"
-    " schedule. Option -schedule_file instead reads the schedule from a text file,"
+    " schedule. Option -schedule instead reads the schedule from a text file,"
     " which is useful for reproducibly applying a bespoke schedule across a cohort"
-    " with minimal command-line entry. The argument may be either the path to such a"
-    " file, or the name of one of the schedules bundled with the software"
+    " with minimal command-line entry. The argument is first interpreted as the path to such a"
+    " file (absolute or relative to the working directory); if no file is found there it is"
+    " instead interpreted as the name of one of the schedules bundled with the software,"
+    " appending a \".txt\" extension if the name does not already carry one"
     " (the bundled \"default\" schedule reproduces the command's built-in default).";
 
-bool requested() { return !get_options("schedule_file").empty(); }
+bool requested() { return !get_options("schedule").empty(); }
 
 std::vector<Iterative::Iteration> load(const std::string &command) {
-  auto opt = get_options("schedule_file");
+  auto opt = get_options("schedule");
   assert(!opt.empty());
   const std::string spec(opt[0][0]);
   const std::string path = resolve(spec, command);
-  std::vector<Iterative::Iteration> schedule = parse(path);
+  std::vector<Iterative::Iteration> schedule = parse(path, command);
   INFO("Using noise estimation schedule from \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
@@ -361,7 +394,7 @@ std::vector<Iterative::Iteration> load_default(const std::string &command) {
   if (!std::ifstream(path).good())
     throw Exception("Unable to locate the bundled default noise estimation schedule for command \"" + command +
                     "\" (expected at \"" + path + "\"); the software installation may be incomplete");
-  std::vector<Iterative::Iteration> schedule = parse(path);
+  std::vector<Iterative::Iteration> schedule = parse(path, command);
   INFO("Using bundled default noise estimation schedule \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
@@ -372,8 +405,8 @@ void warn_if_default_schedule_slow(const size_t num_volumes) {
     WARN("Input data contain " + str(num_volumes) + " volumes; "
          "the command's default noise estimation schedule performs full multi-resolution estimation "
          "and may be slow for a dataset of this size. "
-         "Consider specifying a lighter schedule via -schedule_file "
-         "(e.g. the bundled \"fast\" schedule).");
+         "Consider specifying a lighter schedule via -schedule "
+         "(e.g. the bundled \"vlarge\" schedule).");
 }
 
 } // namespace MR::Denoise::Schedule

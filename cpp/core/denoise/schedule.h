@@ -28,36 +28,38 @@ namespace MR::Denoise::Schedule {
 // Command-line option through which a user may take manual control of the
 //   multi-resolution iteration schedule used for noise level estimation,
 //   in place of the command's a priori default schedule.
-// The single argument is resolved as either:
+// The single argument is resolved (see schedule.cpp resolve()) as either:
+// - the filesystem path to a user-authored schedule file (tried first); or, failing that,
 // - the name of a schedule bundled with the software
-//   (resolved to "<bundled directory>/<command>/<name>.txt"); or
-// - the filesystem path to a user-authored schedule file.
-extern const App::Option schedule_file_option;
+//   (resolved to "<bundled directory>/<command>/<name>.txt", a ".txt" extension being
+//   appended only when the supplied name carries none of its own).
+extern const App::Option schedule_option;
 
 // Multi-paragraph DESCRIPTION text documenting the schedule file format;
 //   attached to each command's DESCRIPTION in the manner of the various
 //   Denoise::*_description / Kernel::*_description constants.
-extern const char *schedule_file_description;
+extern const char *schedule_description;
 
-// Whether the user has requested a manual schedule via -schedule_file.
+// Whether the user has requested a manual schedule via -schedule.
 bool requested();
 
-// Resolve, read, parse and validate the schedule requested via -schedule_file.
+// Resolve, read, parse and validate the schedule requested via -schedule.
 // "command" is the name of the invoking command (e.g. "dwidenoise2"),
-//   used both to locate command-specific bundled schedules and in messages.
+//   used to locate command-specific bundled schedules, to police command-specific column
+//   rules (e.g. "update_noise" is rejected for dwi2noise), and in messages.
 // Precondition: requested() is true.
 std::vector<Iterative::Iteration> load(const std::string &command);
 
 // Load the command's bundled "default" schedule, used when the user does not supply
-//   -schedule_file. The schedule files are installed alongside the other MRtrix3 shared
+//   -schedule. The schedule files are installed alongside the other MRtrix3 shared
 //   data files and are located relative to the running executable (see schedule.cpp);
 //   this replaces the schedule that was previously hard-coded into each command.
 std::vector<Iterative::Iteration> load_default(const std::string &command);
 
 // Issue a warning when a command's bundled default noise estimation schedule is used on a
 //   dataset large enough that the full multi-resolution default may be slow, suggesting a
-//   lighter -schedule_file. "num_volumes" is the total number of volumes implied by the input
-//   (the product of all non-spatial dimensions). Called by the commands when no -schedule_file
+//   lighter -schedule. "num_volumes" is the total number of volumes implied by the input
+//   (the product of all non-spatial dimensions). Called by the commands when no -schedule
 //   was supplied and the bundled default schedule is therefore in effect.
 void warn_if_default_schedule_slow(size_t num_volumes);
 
