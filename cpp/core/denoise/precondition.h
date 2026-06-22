@@ -174,14 +174,27 @@ public:
   //   temporal subset is active, the subset header (size(3) == m').
   const Header &header() const { return temporal_subset.empty() ? H_out : H_out_subset; }
 
-  ssize_t null_rank() const {
-    // When partitioning is active the preconditioner performs no demeaning (it is done per
-    //   partition inside Estimate/Recon), so no rank is globally regressed out here.
-    if (partitioning_active || !vst_mean_image.valid())
+  // Rank removed by group-mean demeaning: the number of demeaning groups (1 for -demean all;
+  //   shell/volume-group count otherwise; 0 for -demean none). This is reported irrespective of
+  //   whether the demeaning is applied here (no partitioning) or per partition within
+  //   Estimate/Recon (partitioning) — the degrees of freedom regressed out are the same group
+  //   count either way (per the partitioned-model expectation that the demean-induced rank change
+  //   matches the non-partitioned case). Used to add the regressed-mean components back to the
+  //   final exported rank maps.
+  ssize_t demean_rank() const {
+    if (!vst_mean_image.valid())
       return 0;
     if (vst_mean_image.ndim() == 3)
       return 1;
     return vst_mean_image.size(3);
+  }
+
+  ssize_t null_rank() const {
+    // The rank that *this* (preconditioner-side) demeaning regresses out of the Casorati matrix.
+    //   When partitioning is active the preconditioner performs no demeaning (it is done per
+    //   partition inside Estimate/Recon, which account for it via their own per-partition rank),
+    //   so it is 0; otherwise it equals demean_rank().
+    return partitioning_active ? 0 : demean_rank();
   }
 
   bool noop() const {

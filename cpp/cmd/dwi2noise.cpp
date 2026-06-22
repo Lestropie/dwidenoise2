@@ -186,7 +186,10 @@ void usage() {
            "The estimated rank of the input data for each denoising patch")
     + Argument("image").type_image_out()
   + Option("eigenspectra",
-           "Output a matrix containing the spectra of eigenvalues across patches")
+           "Output a matrix containing the spectra of eigenvalues across patches"
+           " (one row per patch). Where volume partitioning is in effect, each row is the"
+           " per-partition eigenspectra concatenated and sorted, normalised by partition size,"
+           " rather than a single decomposition's spectrum.")
     + Argument("file").type_file_out()
 
   + OptionGroup("Options for debugging the operation of sliding window kernels")
@@ -309,9 +312,14 @@ void run(Header &dwi,
                                              noise_pad_type::PAD,
                                              iterations[iteration].smooth_noiseout);
 
+    // Per-partition signal-rank density: rank_input is summed over the iteration's num_partitions
+    //   partitions, while the next iteration's rank-based kernel is sized from the smallest
+    //   partition (m'/P), so divide by the partition count (which may differ between iterations).
     rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
+    const default_type partition_scale = default_type(num_partitions);
     for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
-      rank_per_mm.value() = iteration_exports.rank_input.value() / iteration_exports.max_dist.value();
+      rank_per_mm.value() =
+          iteration_exports.rank_input.value() / (partition_scale * iteration_exports.max_dist.value());
   }
 
   // Last iteration. Unlike dwidenoise2, dwi2noise may sub-sample the volumes of its final
@@ -349,12 +357,16 @@ void run(Header &dwi,
                       num_partitions,
                       partitioning,
                       volume_group);
-  const uint16_t null_rank = uint16_t(preconditioner.null_rank());
+  // Add the regressed group-mean components back to the reported (signal-only) input rank, on the
+  //   final output map only. demean_rank() yields the group count whether the demeaning was applied
+  //   by the preconditioner or per partition within Estimate, so the contribution matches the
+  //   non-partitioned case. Clamp to the available rank (max_rank).
+  const uint16_t null_rank = uint16_t(preconditioner.demean_rank());
   const uint16_t max_rank = Denoise::num_volumes(dwi);
   if (null_rank > 0 && final_exports.rank_input.valid()) {
     for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l)
       final_exports.rank_input.value() =
-          std::max<uint16_t>(uint16_t(final_exports.rank_input.value()) + null_rank, max_rank);
+          std::min<uint16_t>(uint16_t(final_exports.rank_input.value()) + null_rank, max_rank);
   }
 }
 

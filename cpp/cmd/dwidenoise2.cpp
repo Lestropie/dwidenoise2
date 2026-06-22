@@ -284,7 +284,10 @@ void usage() {
            "(note that this applies strictly to the PCA and omits effects of preconditioning)")
     + Argument("image").type_image_out()
   + Option("eigenspectra",
-           "Output a matrix containing the spectra of eigenvalues across patches")
+           "Output a matrix containing the spectra of eigenvalues across patches"
+           " (one row per patch). Where volume partitioning is in effect, each row is the"
+           " per-partition eigenspectra concatenated and sorted, normalised by partition size,"
+           " rather than a single decomposition's spectrum.")
     + Argument("file").type_file_out()
   + Option("residual_statistics",
            "export images containing statistics of the residuals between input and denoised data,"
@@ -424,9 +427,16 @@ void run(Header &dwi,
                                              noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
                                              iterations[iteration].smooth_noiseout);
+    // Signal-rank density (per mm of kernel radius) used to size the next iteration's rank-based
+    //   kernel. Under partitioning the rank-based kernel is sized from the smallest partition
+    //   (m'/P), so the density must be *per partition*: rank_input is the signal rank summed over
+    //   the iteration's num_partitions partitions, so divide by that count. num_partitions is the
+    //   count for the iteration that produced rank_input (it may differ between iterations).
     rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
+    const default_type partition_scale = default_type(num_partitions);
     for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
-      rank_per_mm.value() = iteration_exports.rank_input.value() / iteration_exports.max_dist.value();
+      rank_per_mm.value() =
+          iteration_exports.rank_input.value() / (partition_scale * iteration_exports.max_dist.value());
   }
 
   // Final (reconstruction) pass: the schedule's final row is validated to have
@@ -557,8 +567,13 @@ void run(Header &dwi,
   // reverse effects of preconditioning
   preconditioner(output_preconditioned, output, true, bias_handling, debias_anchor);
 
-  // Modify some optional outputs to better reflect utilisation of preconditioning
-  const ssize_t preconditioner_null_rank = preconditioner.null_rank();
+  // Modify some optional outputs to better reflect utilisation of preconditioning. The
+  //   group-mean components regressed out by demeaning are added back to the reported ranks here,
+  //   on the final maps only (the per-iteration rank_input fed to the kernel sizing is kept
+  //   mean-free). demean_rank() gives the group count whether the demeaning was applied by the
+  //   preconditioner (no partitioning) or per partition within Estimate/Recon (partitioning), so
+  //   the demean-induced rank contribution is identical in both regimes.
+  const ssize_t preconditioner_null_rank = preconditioner.demean_rank();
   if (preconditioner_null_rank > 0) {
     if (final_exports.rank_input.valid()) {
       for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l) {

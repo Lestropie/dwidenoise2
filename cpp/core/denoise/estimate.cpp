@@ -258,17 +258,16 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     if (!successful_decomposition)
       exports.rank_input.value() = 0;
     else if (partitioned()) {
-      // Total signal rank across partitions = pooled total rank - pooled noise count, plus the
-      //   per-partition regressed-mean components (sum_p rp_p), matching the single-PCA
-      //   convention where the preconditioner null rank is added back downstream (here the
-      //   preconditioner null rank is 0, the demeaning being per partition).
+      // Total *signal* rank across partitions = pooled total rank - pooled noise count. The
+      //   regressed group-mean components are deliberately excluded here (mirroring the single-PCA
+      //   path, whose per-iteration value is also signal-only): they are added back, as a constant
+      //   group count, only to the final exported maps (see the reconciliation in the commands).
+      //   Keeping this value mean-free also makes it the correct per-partition signal density once
+      //   divided by the partition count when forming rank_per_mm for the next iteration's kernel.
       ssize_t total_r = 0;
-      ssize_t total_rp = 0;
-      for (ssize_t p = 0; p != active_part->num_partitions(); ++p) {
+      for (ssize_t p = 0; p != active_part->num_partitions(); ++p)
         total_r += std::min(part_m[p], part_n[p]);
-        total_rp += part_rp[p];
-      }
-      exports.rank_input.value() = bool(threshold) ? (total_r - threshold.cutoff_p + total_rp) : total_r;
+      exports.rank_input.value() = bool(threshold) ? (total_r - threshold.cutoff_p) : total_r;
     } else if (bool(threshold))
       exports.rank_input.value() = r - threshold.cutoff_p;
     else
