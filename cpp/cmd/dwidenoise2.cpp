@@ -134,7 +134,7 @@ void usage() {
 
   EXAMPLES
   + Example("To approximately replicate the behaviour of the original dwidenoise command",
-            "dwidenoise2 DWI.mif out.mif -shape cuboid -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive",
+            "dwidenoise2 DWI.mif out.mif -shape cuboid -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive -schedule_file legacy.txt",
             "While this is neither guaranteed to match exactly the output of the original dwidenoise command"
             " nor is it a recommended use case,"
             " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
@@ -153,23 +153,22 @@ void usage() {
             " and therefore the least risk of BOLD signal attenuation.")
 
   + Example("Denoising a very large image series",
-            "dwidenoise2 in.mif out.mif -schedule_file onepass.txt -decomposition selfadjoint -aspect_ratio 1.0",
-            "Pending future software updates aimed at improving computational tractability for very large series,"
-            " there are some tweaks that can be applied to make computation more feasible for data larger than"
-            " the typical DWI acquisition."
-            " A single-row schedule file (here \"onepass.txt\", e.g. a header line \"spatial_subsample kernel_size"
-            " update_noise\" followed by \"6 1 true\") performs a single noise level estimation and denoising step,"
-            " rather than the default iterative multi-resolution approach;"
-            " a larger spatial_subsample reduces the number of PCA kernels evaluated."
+            "dwidenoise2 in.mif out.mif -schedule_file vlarge.txt -decomposition selfadjoint",
+            "There are some tweaks that can be applied to make computation more feasible"
+            " for data larger than the typical DWI acquisition"
+            " (including functional MRI data that may be multi-echo and/or long in duration)."
+            " Provided schedule file \"vlarge.txt\" performs only a single noise level estimation step"
+            " prior to the denoising step,"
+            " rather than the default iterative multi-resolution approach."
+            " In addition, more aggressive spatial subsampling is performed,"
+            " only a fraction of the input series is used for initial noise level estimation,"
+            " and the volumes within each PCA patch are broken into smaller partitions"
+            " for which decompositions are performed independently,"
+            " but across which a single noise level estimate applies. "
             " The self-adjoint decomposition is not as numerically precise as the newer BDCSVD decomposition"
             " but is typically around twice as fast."
-            " A spherical kernel with an aspect ratio of 1.0 is as small as one should go"
-            " before endangering erroneous noise level estimation and potentially biological signal removal."
-            " For large image series the sliding kernels become very large,"
-            " and so the ratio of number of voxels to number of kernels can be quite large"
-            " while still having the reconstructed data for each image voxel"
-            " come from a large number of denoised patches;"
-            " for ~ 1000 volumes a spatial subsampling ratio of 6 works fine.");
+            " Reducing the kernel size below the default aspect ratio is not recommended"
+            " as it endangers erroneous noise level estimation and potentially biological signal removal.");
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"

@@ -14,10 +14,11 @@
 # See the License of the specific language
 # governing permissions and limitations under the License.
 #
-# dwidenoise2 noise level estimation schedule: "default"
+# dwidenoise2 noise level estimation and denoising schedule: "default"
 #
-# This file reproduces the built-in default schedule of the dwidenoise2 command.
-# It is provided as a starting point for authoring bespoke schedules.
+# This file reproduces the default schedule of the dwidenoise2 command
+# that was originally hard-coded into the source code.
+# It additionally provides a starting point for authoring bespoke schedules.
 #
 # Format:
 #  - One row per iteration of the multi-resolution noise level estimation.
@@ -29,20 +30,11 @@
 #  - spatial_subsample   : per-axis spatial subsampling factor; a single integer
 #                          (isotropic) or a comma-separated triplet "x,y,z". Larger
 #                          values perform fewer PCAs (coarser, faster). Default: 2.
-#  - kernel_size         : multiplier applied to the PCA patch size. Default: 1.
-#  - smooth              : whether to smooth the estimated noise map before it is
-#                          passed to the next iteration ("none" or "smooth").
-#                          Default: none. (No effect on the final row.)
 #  - temporal_subsample  : fraction of volumes (along the supra-spatial axes) used
 #                          for noise level estimation in this iteration, within
 #                          (0.0, 1.0]; the subset is drawn stratified by demeaning
 #                          group. Default: 1.0 (all volumes). For dwidenoise2 the
 #                          final (reconstruction) row must be 1.0.
-#  - update_noise        : whether the noise level estimate is (re)computed in this
-#                          iteration ("true" or "false"). Must be true for any
-#                          non-final iteration. Default: true for non-final rows;
-#                          for the final row, false (carry the prior estimate
-#                          through the reconstruction, as the built-in default does).
 #  - partitions          : split each PCA patch's volumes into this many partitions,
 #                          performing an independent decomposition per partition and
 #                          pooling the eigenspectra; this reduces PCA cost by ~partitions^2
@@ -55,9 +47,19 @@
 #                          ceil(num_volumes / max_partition_size) (after any temporal
 #                          sub-sampling). "none" disables it. Default: none. Mutually
 #                          exclusive with partitions.
+#  - kernel_size         : multiplier applied to the PCA patch size. Default: 1.
+#  - update_noise        : whether the noise level estimate is (re)computed in this
+#                          iteration ("true" or "false"). Must be true for any
+#                          non-final iteration. Default: true for non-final rows;
+#                          for the final row, false (carry the prior estimate
+#                          through the reconstruction).
+#  - smooth              : whether to smooth the estimated noise map before it is
+#                          passed to the next iteration ("none" or "smooth").
+#                          Default: none.
+#                          Must be "none" on the final row.
 #
-spatial_subsample   kernel_size   smooth
-8,8,8       16            none
-4,4,4       4             none
-2,2,2       1             smooth
-2,2,2       1             none
+spatial_subsample   kernel_size   update_noise   smooth
+8                   16            true           none
+4                   4             true           none
+2                   1             true           smooth
+2                   1             false          none

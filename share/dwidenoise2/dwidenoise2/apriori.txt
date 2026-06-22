@@ -1,0 +1,25 @@
+# Required Notice: Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;
+# Required Notice: The Florey Institute of Neuroscience and Mental Health.
+#
+# Licensed under the PolyForm Noncommercial License 1.0.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
+#
+#     https://polyformproject.org/licenses/noncommercial/1.0.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied.
+# See the License of the specific language
+# governing permissions and limitations under the License.
+#
+# dwidenoise2 denoising schedule: "apriori"
+#
+# This file contains just the final line of the "default" schedule;
+# it can be used in conjunction with the default schedule for the dwi2noise command
+# and providing that noise map estimate to dwidenoise2 via the -noise_in option
+# to reproduce the same result.
+#
+spatial_subsample   kernel_size   update_noise   smooth
+2                   1             false          none

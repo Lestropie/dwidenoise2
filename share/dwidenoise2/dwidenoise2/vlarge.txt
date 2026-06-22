@@ -14,14 +14,12 @@
 # See the License of the specific language
 # governing permissions and limitations under the License.
 #
-# dwidenoise2 noise level estimation schedule: "fast"
+# dwidenoise2 noise level estimation and denoising schedule: "vlarge"
 #
-# A reduced schedule that omits the coarsest pyramid level of the default
-# schedule, trading some accuracy of the noise level estimate for speed.
-# The final row is the reconstruction (denoising) pass.
-# See "default" for documentation of the file format and columns.
+# This file provides a suggested schedule for processing very large datasets;
+#   it was derived based on a 13-minute three-echo fMRI paradigm
+#   consisting of a total of around 2,000 volumes.
 #
-spatial_subsample   kernel_size   smooth
-4,4,4       4             none
-2,2,2       1             smooth
-2,2,2       1             none
+spatial_subsample    temporal_subsample   max_partition_size     smooth    update_noise
+4                    3                    384                    smooth    true
+4                    1                    384                    none      false
