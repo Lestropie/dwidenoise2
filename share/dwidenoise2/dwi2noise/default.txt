@@ -42,6 +42,18 @@
 #                          iteration ("true" or "false"). Must be true for every
 #                          dwi2noise iteration (its final iteration produces the
 #                          output map). Default: true.
+#  - partitions          : split each PCA patch's volumes into this many partitions,
+#                          performing an independent decomposition per partition and
+#                          pooling the eigenspectra; this reduces PCA cost by ~partitions^2
+#                          on large series. The patch voxel count is sized from the
+#                          smallest partition so each partition keeps the target Casorati
+#                          aspect ratio. Default: 1 (no partitioning). Mutually exclusive
+#                          with max_partition_size.
+#  - max_partition_size  : an alternative to "partitions": the maximum number of volumes
+#                          per partition, from which the partition count is derived as
+#                          ceil(num_volumes / max_partition_size) (after any temporal
+#                          sub-sampling). "none" disables it. Default: none. Mutually
+#                          exclusive with partitions.
 #
 spatial_subsample   kernel_size   smooth
 8,8,8       16            none

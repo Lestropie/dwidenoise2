@@ -18,6 +18,7 @@
 #pragma once
 
 #include <limits>
+#include <vector>
 
 namespace MR::Denoise::Estimator {
 
@@ -30,10 +31,20 @@ public:
   operator bool() const { return cutoff_p >= 0 && std::isfinite(sigma2) && std::isfinite(lamplus); }
   bool operator!() const { return !bool(*this); }
   // From dwidenoise code / estimator::Exp :
-  //   cutoff_p is the *number of noise components considered to be part of the MP distribution*
+  //   cutoff_p is the *number of noise components considered to be part of the MP distribution*.
+  // For the partitioned path cutoff_p carries the pooled total noise count across partitions;
+  //   sigma2 is the single noise level shared by the patch; and lamplus is a representative
+  //   (normalised) signal/noise boundary.
   ssize_t cutoff_p;
   double sigma2;
   double lamplus;
+  // Partitioned results (empty for the single-PCA path; otherwise length P). With the patch
+  //   split into P partitions, a single sigma2 applies but the signal rank may differ per
+  //   partition: cutoff_p_partition[p] is the number of noise components in partition p (its
+  //   smallest cutoff_p_partition[p] eigenvalues, ascending, are noise; a partition may be all
+  //   noise, i.e. rank 0), and lamplus_partition[p] is that partition's (normalised) boundary.
+  std::vector<ssize_t> cutoff_p_partition;
+  std::vector<double> lamplus_partition;
 };
 
 } // namespace MR::Denoise::Estimator

@@ -17,11 +17,14 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
+#include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
 #include "math/math.h"
 
@@ -155,6 +158,96 @@ public:
     result.lamplus = Math::pow2(1.0 + sqrtbeta) * result.sigma2;
     return result;
   }
+
+  // Partitioned form: the multi-moment scan runs on the pooled (normalised) singular values of
+  //   all partitions, using the rnz-weighted mean aspect ratio for the quarter-circle constants
+  //   (valid because the partitions are sized to share a common beta). The pooled signal/noise
+  //   boundary is then applied to each partition to obtain its own rank.
+  Result operator()(const std::vector<eigenvalues_type> &s, //
+                    const std::vector<ssize_t> &m,           //
+                    const std::vector<ssize_t> &n,           //
+                    const std::vector<ssize_t> &rp,          //
+                    const Eigen::Vector3d & /*unused*/) const final {
+    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
+    Result result;
+    // Pooled, sorted-ascending normalised singular values sv = sqrt(s_p[i]/qnz_p).
+    std::vector<double> sv;
+    {
+      const std::vector<double> pooled_lam = pool_normalized(s, d); // normalised eigenvalues
+      sv.reserve(pooled_lam.size());
+      for (const double lam : pooled_lam)
+        sv.push_back(std::sqrt(lam));
+    }
+    const ssize_t Ntot = ssize_t(sv.size());
+    if (Ntot < 2)
+      return result;
+
+    const double beta = mean_beta(d);
+    const double sqrtbeta = std::sqrt(beta);
+    std::vector<double> C;
+    quarter_circle_moments(beta, K, C);
+    std::vector<double> edge_denom(K + 1, 0.0);
+    for (ssize_t k = 1; k <= K; ++k)
+      edge_denom[k] = std::pow(1.0 + sqrtbeta, double(k)) - std::pow(1.0 - sqrtbeta, double(k));
+
+    const double sv_min = sv.front();
+    std::vector<double> svmin_pow(K + 1, 1.0);
+    for (ssize_t k = 1; k <= K; ++k)
+      svmin_pow[k] = svmin_pow[k - 1] * sv_min;
+
+    std::vector<ssize_t> cutoff_k(K + 1, -1);
+    std::vector<double> P(K + 1, 0.0);
+    for (ssize_t i = 0; i != Ntot; ++i) {
+      const double sv_max = sv[i];
+      double svk = 1.0;
+      for (ssize_t k = 0; k <= K; ++k) {
+        P[k] += svk;
+        svk *= sv_max;
+      }
+      const ssize_t N = i + 1;
+      double svmaxk = sv_max;
+      for (ssize_t k = 1; k <= K; ++k) {
+        const double sigma1pow = P[k] / (C[k] * double(N));
+        const double sigma2pow = (svmaxk - svmin_pow[k]) / edge_denom[k];
+        if (sigma1pow >= sigma2pow)
+          cutoff_k[k] = i + 1;
+        svmaxk *= sv_max;
+      }
+    }
+    ssize_t cutoff_pooled = std::numeric_limits<ssize_t>::max();
+    for (ssize_t k = 1; k <= K; ++k) {
+      if (cutoff_k[k] >= 0)
+        cutoff_pooled = std::min(cutoff_pooled, cutoff_k[k]);
+    }
+    if (cutoff_pooled == std::numeric_limits<ssize_t>::max())
+      return result;
+
+    const ssize_t Nnoise = cutoff_pooled;
+    std::vector<double> Pn(K + 1, 0.0);
+    for (ssize_t j = 0; j != cutoff_pooled; ++j) {
+      const double svj = sv[j];
+      double svk = 1.0;
+      for (ssize_t k = 0; k <= K; ++k) {
+        Pn[k] += svk;
+        svk *= svj;
+      }
+    }
+    double sigma = 0.0;
+    for (ssize_t k = 1; k <= K; ++k)
+      sigma = std::max(sigma, std::pow(Pn[k] / (C[k] * double(Nnoise)), 1.0 / double(k)));
+
+    // Boundary in normalised eigenvalue units = (largest noise singular value)^2; classify each
+    //   partition against it to reproduce the pooled rank with monotone per-partition cutoffs.
+    const double tstar = Math::pow2(sv[cutoff_pooled - 1]);
+    double noise_sum = 0.0;
+    ssize_t noise_count = 0;
+    apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+    result.sigma2 = Math::pow2(sigma);
+    result.lamplus = tstar;
+    return result;
+  }
+
+  bool supports_partitioning() const final { return true; }
 
 protected:
   const ssize_t K;

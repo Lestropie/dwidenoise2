@@ -28,6 +28,7 @@
 #include "denoise/kernel/kernel.h"
 #include "denoise/mask.h"
 #include "denoise/noise_model/noise_model.h"
+#include "denoise/partition.h"
 #include "denoise/precondition.h"
 #include "denoise/schedule.h"
 #include "denoise/spatial_subsample.h"
@@ -261,10 +262,24 @@ void run(Header &dwi,
     //   the stabilised-domain per-group means over that subset, under the current noise level
     //   map; the preconditioned data then hold only the m' subset volumes.
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
+    const ssize_t mprime = preconditioner.header().size(3);
+    const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
+    if (num_partitions > 1 && !estimator->supports_partitioning())
+      throw Exception("The selected noise level estimator does not support volume partitioning "
+                      "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
+                      " partitions); choose a different -estimator or remove partitioning from the schedule");
+    preconditioner.set_partitioning_active(num_partitions > 1);
     preconditioner.update_vst_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
         Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+    // Per-kernel partitioning: pass demeaning-group labels + partition count; the per-patch
+    //   assignment is drawn inside Estimate from a voxel-seeded RNG.
+    std::vector<ssize_t> volume_group;
+    std::shared_ptr<const Partitioning> partitioning; // null ⇒ per-kernel
+    if (num_partitions > 1)
+      volume_group = preconditioner.output_volume_to_group();
 
     std::shared_ptr<SpatialSubsample> subsample =
         std::make_shared<SpatialSubsample>(dwi, iterations[iteration].spatial_subsample_ratios);
@@ -284,7 +299,10 @@ void run(Header &dwi,
                         decomposition,
                         estimator,
                         preconditioner,
-                        iteration_exports);
+                        iteration_exports,
+                        num_partitions,
+                        partitioning,
+                        volume_group);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
@@ -300,10 +318,21 @@ void run(Header &dwi,
   //   (output) iteration: it produces a noise level map, which is volume-count-independent
   //   in expectation. The spatial subsampling follows the final entry of the schedule.
   preconditioner.set_temporal_subsample(iterations.back().temporal_subsample, rng, temporal_min_per_group);
+  const ssize_t mprime_final = preconditioner.header().size(3);
+  const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
+  if (num_partitions > 1 && !estimator->supports_partitioning())
+    throw Exception("The selected noise level estimator does not support volume partitioning "
+                    "(final schedule row requests " + str(num_partitions) +
+                    " partitions); choose a different -estimator or remove partitioning from the schedule");
+  preconditioner.set_partitioning_active(num_partitions > 1);
   preconditioner.update_vst_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
   input_preconditioned =
       Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+  std::vector<ssize_t> volume_group;
+  std::shared_ptr<const Partitioning> partitioning; // null ⇒ per-kernel in Estimate
+  if (num_partitions > 1)
+    volume_group = preconditioner.output_volume_to_group();
   auto subsample = std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);
   Iterative::estimate(input,
                       input_preconditioned,
@@ -316,7 +345,10 @@ void run(Header &dwi,
                       decomposition,
                       estimator,
                       preconditioner,
-                      final_exports);
+                      final_exports,
+                      num_partitions,
+                      partitioning,
+                      volume_group);
   const uint16_t null_rank = uint16_t(preconditioner.null_rank());
   const uint16_t max_rank = Denoise::num_volumes(dwi);
   if (null_rank > 0 && final_exports.rank_input.valid()) {
@@ -407,28 +439,28 @@ void run() {
                     "level (update_noise = true), as that iteration produces the output map");
 
   Exports final_exports(dwi, final_subsample->header());
-  final_exports.set_noise_out(argument[1]);
+  final_exports.set_noise_out(argument[1].as_text());
   opt = get_options("lamplus");
   if (!opt.empty())
-    final_exports.set_lamplus(opt[0][0]);
+    final_exports.set_lamplus(opt[0][0].as_text());
   opt = get_options("rank_pcanonzero");
   if (!opt.empty())
-    final_exports.set_rank_pcanonzero(opt[0][0]);
+    final_exports.set_rank_pcanonzero(opt[0][0].as_text());
   opt = get_options("rank_input");
   if (!opt.empty())
-    final_exports.set_rank_input(opt[0][0]);
+    final_exports.set_rank_input(opt[0][0].as_text());
   opt = get_options("max_dist");
   if (!opt.empty())
-    final_exports.set_max_dist(opt[0][0]);
+    final_exports.set_max_dist(opt[0][0].as_text());
   opt = get_options("voxelcount");
   if (!opt.empty())
-    final_exports.set_voxelcount(opt[0][0]);
+    final_exports.set_voxelcount(opt[0][0].as_text());
   opt = get_options("patchcount");
   if (!opt.empty())
-    final_exports.set_patchcount(opt[0][0]);
+    final_exports.set_patchcount(opt[0][0].as_text());
   opt = get_options("eigenspectra");
   if (!opt.empty())
-    final_exports.set_eigenspectra_path(opt[0][0]);
+    final_exports.set_eigenspectra_path(opt[0][0].as_text());
 
   int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (complex)

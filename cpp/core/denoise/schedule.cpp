@@ -21,6 +21,7 @@
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -45,7 +46,8 @@ namespace {
 // Existing schedule files that omit the new column will continue to parse,
 //   taking the default; hence the format is forward-compatible.
 const std::vector<std::string> recognised_columns(
-    {"spatial_subsample", "kernel_size", "smooth", "temporal_subsample", "update_noise"});
+    {"spatial_subsample", "kernel_size", "smooth", "temporal_subsample", "update_noise",
+     "partitions", "max_partition_size"});
 
 // Whitespace-tokenise a line (collapsing runs of whitespace, dropping empties).
 std::vector<std::string> tokenise(const std::string &line) {
@@ -139,6 +141,44 @@ bool parse_update_noise(const std::string &value, const size_t lineno) {
     return false;
   throw Exception("Schedule file line " + str(lineno) + ": "
                   "value for column \"update_noise\" must be one of \"true\" or \"false\" (got \"" + value + "\")");
+}
+
+// Parse a non-negative integer column value, throwing a column-specific message on failure.
+ssize_t parse_nonneg_int(const std::string &value, const std::string &column, const size_t lineno) {
+  ssize_t result = 0;
+  size_t consumed = 0;
+  try {
+    result = ssize_t(std::stoll(value, &consumed));
+  } catch (std::exception &) {
+    consumed = 0;
+  }
+  if (consumed != value.size())
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value \"" + value + "\" for column \"" + column + "\" is not a valid integer");
+  return result;
+}
+
+// Explicit partition count P; must be >= 1 (1 ⇒ no partitioning).
+ssize_t parse_partitions(const std::string &value, const size_t lineno) {
+  const ssize_t result = parse_nonneg_int(value, "partitions", lineno);
+  if (result < 1)
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value for column \"partitions\" must be a positive integer (got \"" + value + "\")");
+  return result;
+}
+
+// Maximum volumes per partition; "none" / "0" ⇒ no limit (unset). Otherwise must be >= 1.
+std::optional<ssize_t> parse_max_partition_size(const std::string &value, const size_t lineno) {
+  if (value == "none")
+    return std::nullopt;
+  const ssize_t result = parse_nonneg_int(value, "max_partition_size", lineno);
+  if (result == 0)
+    return std::nullopt;
+  if (result < 1)
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value for column \"max_partition_size\" must be a positive integer or \"none\" "
+                    "(got \"" + value + "\")");
+  return result;
 }
 
 // Directory in which command-specific bundled schedules reside, holding both the command's
@@ -250,7 +290,19 @@ std::vector<Iterative::Iteration> parse(const std::string &path) {
         iteration.temporal_subsample = parse_temporal_subsample(value, lineno);
       else if (key == "update_noise")
         iteration.update_noise = parse_update_noise(value, lineno);
+      else if (key == "partitions")
+        iteration.num_partitions = parse_partitions(value, lineno);
+      else if (key == "max_partition_size")
+        iteration.max_partition_size = parse_max_partition_size(value, lineno);
     }
+    // The two partition controls are mutually exclusive ways of specifying the partition
+    //   count: a row may give an explicit count (partitions > 1) or a maximum partition
+    //   size, but not both at once.
+    if (iteration.num_partitions > 1 && iteration.max_partition_size.has_value())
+      throw Exception("Schedule file \"" + path + "\" line " + str(lineno) + ": "
+                      "columns \"partitions\" and \"max_partition_size\" are mutually exclusive; "
+                      "specify at most one (set \"partitions\" to 1 or \"max_partition_size\" to "
+                      "\"none\" to disable one of them on this row)");
     result.push_back(iteration);
   }
 

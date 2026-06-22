@@ -31,8 +31,21 @@ Recon<F>::Recon(const Image<F> &image,
                 filter_type filter,
                 aggregator_type aggregator,
                 Exports &exports,
-                const ssize_t preconditioner_rank)
-    : Estimate<F>(image, subsample, kernel, decomposition, estimator, exports, preconditioner_rank, true),
+                const ssize_t preconditioner_rank,
+                std::shared_ptr<const Partitioning> level_partitioning,
+                std::vector<ssize_t> volume_group,
+                const ssize_t kernel_num_partitions)
+    : Estimate<F>(image,
+                  subsample,
+                  kernel,
+                  decomposition,
+                  estimator,
+                  exports,
+                  preconditioner_rank,
+                  true,
+                  level_partitioning,
+                  std::move(volume_group),
+                  kernel_num_partitions),
       filter(filter),
       aggregator(aggregator),
       // FWHM = 2 x cube root of spacings between kernels
@@ -49,6 +62,11 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     return;
 
   Estimate<F>::operator()(dwi);
+
+  if (Estimate<F>::partitioned()) {
+    recon_partitioned(dwi, out);
+    return;
+  }
 
   const ssize_t n = Estimate<F>::patch.voxels.size();
   const ssize_t r = std::min(Estimate<F>::m, n);
@@ -265,6 +283,234 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       }
     }
   } break;
+  }
+
+  auto ss_index = Estimate<F>::subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
+  if (Estimate<F>::exports.sum_optshrink.valid()) {
+    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.sum_optshrink);
+    Estimate<F>::exports.sum_optshrink.value() = sum_weights;
+  }
+  if (Estimate<F>::exports.variance_removed.valid()) {
+    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.variance_removed);
+    Estimate<F>::exports.variance_removed.value() = variance_removed;
+  }
+}
+
+template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &out) {
+  using MatrixType = typename Estimate<F>::MatrixType;
+  const ssize_t P = Estimate<F>::active_partitioning().num_partitions();
+  const ssize_t n = Estimate<F>::patch.voxels.size();
+  const ssize_t centre = Estimate<F>::patch.centre_index;
+  const bool valid = bool(Estimate<F>::threshold);
+  const double sigma2 = Estimate<F>::threshold.sigma2;
+  const std::vector<ssize_t> &cutoff_part = Estimate<F>::threshold.cutoff_p_partition;
+  const bool exclusive = (aggregator == aggregator_type::EXCLUSIVE);
+  const ssize_t n_eff = exclusive ? 1 : n;
+
+  if (Xr.rows() != Estimate<F>::m || Xr.cols() < n_eff)
+    Xr.resize(Estimate<F>::m, n_eff);
+
+  double sum_weights = 0.0;
+  double sum_variance = 0.0;
+  double total_s = 0.0;
+  ssize_t out_rank = 0;
+
+  for (ssize_t p = 0; p != P; ++p) {
+    const std::vector<ssize_t> &rows = Estimate<F>::active_partitioning().volumes(p);
+    const ssize_t m_p = Estimate<F>::part_m[p];
+    const ssize_t rp_p = Estimate<F>::part_rp[p];
+    const ssize_t r_p = std::min(m_p, n);
+    const ssize_t rz = rank_zero(m_p, n, rp_p);
+    const ssize_t rnz = rank_nonzero(m_p, n, rp_p);
+    const ssize_t qnz = dimlong_nonzero(m_p, n, rp_p);
+    const double beta = double(rnz) / double(qnz);
+    const eigenvalues_type &sp = Estimate<F>::s_partition[p];
+    total_s += sp.head(r_p).sum();
+
+    Xr_partition.resize(m_p, n_eff);
+
+    // Threshold invalid for this patch: copy the (un-denoised) input rows through unchanged.
+    if (!valid) {
+      for (ssize_t li = 0; li != m_p; ++li) {
+        if (exclusive)
+          Xr(rows[li], 0) = Estimate<F>::X(rows[li], centre);
+        else
+          Xr.row(rows[li]).head(n) = Estimate<F>::X.row(rows[li]).head(n);
+      }
+      out_rank += r_p;
+      sum_weights += double(r_p);
+      sum_variance += sp.head(r_p).sum();
+      continue;
+    }
+
+    // Per-partition filter weights from the single pooled noise level and this partition's beta.
+    if (w.size() < r_p)
+      w.resize(r_p);
+    double sw_p = 0.0;
+    double sv_p = 0.0;
+    ssize_t orank_p = 0;
+    switch (filter) {
+    case filter_type::OPTSHRINK: {
+      w.head(rz).setZero();
+      const double transition = 1.0 + std::sqrt(beta);
+      for (ssize_t i = rz; i != r_p; ++i) {
+        const double lam = sp[i] / qnz;
+        const double y = std::sqrt(lam / sigma2);
+        double nu = 0.0;
+        if (y > transition) {
+          nu = std::min(y, std::sqrt(Math::pow2(Math::pow2(y) - beta - 1.0) - (4.0 * beta)) / y);
+          ++orank_p;
+        }
+        w[i] = lam > 0.0 ? (nu / y) : 0.0;
+        sw_p += w[i];
+        sv_p += w[i] * sp[i];
+      }
+    } break;
+    case filter_type::OPTTHRESH: {
+      const std::map<double, double>::const_iterator it = beta2lambdastar.find(beta);
+      double lambda_star = 0.0;
+      if (it == beta2lambdastar.end()) {
+        lambda_star =
+            sqrt(2.0 * (beta + 1.0) + ((8.0 * beta) / (beta + 1.0 + std::sqrt(Math::pow2(beta) + 14.0 * beta + 1.0))));
+        beta2lambdastar[beta] = lambda_star;
+      } else {
+        lambda_star = it->second;
+      }
+      const double tau_star = lambda_star * std::sqrt(double(qnz)) * std::sqrt(sigma2);
+      const double thresh = tau_star * Math::pow2(double(qnz));
+      w.head(rz).setZero();
+      for (ssize_t i = rz; i != r_p; ++i) {
+        if (sp[i] >= thresh) {
+          w[i] = 1.0;
+          ++orank_p;
+          sv_p += sp[i];
+        } else {
+          w[i] = 0.0;
+        }
+      }
+      sw_p = double(orank_p);
+    } break;
+    case filter_type::TRUNCATE: {
+      const ssize_t cp = cutoff_part[p];
+      orank_p = r_p - cp;
+      w.head(cp).setZero();
+      w.segment(cp, orank_p).setOnes();
+      sw_p = double(orank_p);
+      sv_p = w.head(r_p).matrix().dot(sp.head(r_p).matrix());
+    } break;
+    default:
+      assert(false);
+    }
+    out_rank += orank_p;
+    sum_weights += sw_p;
+    sum_variance += sv_p;
+
+    // Forward-project this partition's filtered spectrum (in the demeaned domain). The diagonal
+    //   weight expressions are written inline (not stored) to avoid dangling references to the
+    //   temporary coefficient-wise array, matching the non-partitioned reconstruction.
+    switch (Estimate<F>::decomp) {
+    case decomp_type::BDCSVD: {
+      const MatrixType &U = Estimate<F>::U_partition[p];
+      const MatrixType &V = Estimate<F>::V_partition[p];
+      if (exclusive)
+        Xr_partition.noalias() =
+            U *
+            (w.head(r_p).reverse().template cast<F>().array() * Estimate<F>::sv_partition[p].array())
+                .matrix()
+                .asDiagonal() *
+            V.row(centre).adjoint();
+      else
+        Xr_partition.noalias() =
+            U *
+            (w.head(r_p).reverse().template cast<F>().array() * Estimate<F>::sv_partition[p].array())
+                .matrix()
+                .asDiagonal() *
+            V.adjoint();
+    } break;
+    case decomp_type::SELFADJOINT: {
+      const MatrixType &evec = Estimate<F>::evec_partition[p];
+      const MatrixType &Xp = Estimate<F>::Xsub_partition[p];
+      if (m_p <= n) {
+        if (exclusive)
+          Xr_partition.noalias() =
+              evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * (evec.adjoint() * Xp.col(centre)));
+        else
+          Xr_partition.noalias() =
+              evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * (evec.adjoint() * Xp));
+      } else {
+        if (exclusive)
+          Xr_partition.noalias() =
+              Xp * (evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * evec.adjoint().col(centre)));
+        else
+          Xr_partition.noalias() = Xp * (evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * evec.adjoint()));
+      }
+    } break;
+    }
+
+    // Re-add the per-(group) stabilised-domain means subtracted prior to decomposition.
+    if (!Estimate<F>::volume_group.empty()) {
+      const MatrixType &means = Estimate<F>::means_partition[p];
+      for (ssize_t li = 0; li != m_p; ++li) {
+        const ssize_t g = Estimate<F>::volume_group[rows[li]];
+        if (exclusive)
+          Xr_partition(li, 0) += means(g, centre);
+        else
+          Xr_partition.row(li).head(n) += means.row(g);
+      }
+    }
+
+    // Scatter this partition's reconstructed rows into the full set of volumes.
+    for (ssize_t li = 0; li != m_p; ++li) {
+      if (exclusive)
+        Xr(rows[li], 0) = Xr_partition(li, 0);
+      else
+        Xr.row(rows[li]).head(n) = Xr_partition.row(li).head(n);
+    }
+  }
+  const double variance_removed = 1.0 - sum_variance / total_s;
+
+  // Spatial aggregation over the patch (mirrors the non-partitioned path, operating on Xr).
+  if (exclusive) {
+    assign_pos_of(dwi).to(out);
+    out.row(3) = Xr.col(0);
+    if (Estimate<F>::exports.sum_aggregation.valid()) {
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.sum_aggregation);
+      Estimate<F>::exports.sum_aggregation.value() = 1.0;
+    }
+    if (Estimate<F>::exports.rank_output.valid()) {
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.rank_output);
+      Estimate<F>::exports.rank_output.value() = out_rank;
+    }
+  } else {
+    std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
+    for (size_t voxel_index = 0; voxel_index != Estimate<F>::patch.voxels.size(); ++voxel_index) {
+      assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(out);
+      assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index).to(Estimate<F>::exports.sum_aggregation);
+      double weight = std::numeric_limits<double>::signaling_NaN();
+      switch (aggregator) {
+      case aggregator_type::EXCLUSIVE:
+        assert(false);
+        break;
+      case aggregator_type::GAUSSIAN:
+        weight = std::exp(gaussian_multiplier * Estimate<F>::patch.voxels[voxel_index].sq_distance);
+        break;
+      case aggregator_type::INVL0:
+        weight = 1.0 / (1 + out_rank);
+        break;
+      case aggregator_type::RANK:
+        weight = out_rank;
+        break;
+      case aggregator_type::UNIFORM:
+        weight = 1.0;
+        break;
+      }
+      out.row(3) += weight * Xr.col(voxel_index);
+      Estimate<F>::exports.sum_aggregation.value() += weight;
+      if (Estimate<F>::exports.rank_output.valid()) {
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
+        Estimate<F>::exports.rank_output.value() += weight * out_rank;
+      }
+    }
   }
 
   auto ss_index = Estimate<F>::subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});

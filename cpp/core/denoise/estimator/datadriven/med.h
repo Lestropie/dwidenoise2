@@ -18,9 +18,11 @@
 #pragma once
 
 #include <limits>
+#include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
+#include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
 #include "math/math.h"
 #include "math/median.h"
@@ -63,6 +65,34 @@ public:
     result.sigma2 = 2.0 * s.segment(rz, result.cutoff_p - rz).sum() / (qnz * (result.cutoff_p + 1 - rz));
     return result;
   }
+
+  // Partitioned form: the median is taken across the pooled (normalised) noise eigenvalues,
+  //   giving a single, lower-variance noise level; the resulting threshold is applied to each
+  //   partition to obtain its own signal rank.
+  Result operator()(const std::vector<eigenvalues_type> &s, //
+                    const std::vector<ssize_t> &m,           //
+                    const std::vector<ssize_t> &n,           //
+                    const std::vector<ssize_t> &rp,          //
+                    const Eigen::Vector3d & /*unused*/) const final {
+    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
+    const std::vector<double> pooled = pool_normalized(s, d); // ascending
+    Result result;
+    if (pooled.empty())
+      return result;
+    const size_t np = pooled.size();
+    const double ymed = (np & 1) ? pooled[np / 2] : (0.5 * (pooled[np / 2 - 1] + pooled[np / 2]));
+    const double beta = mean_beta(d);
+    // Threshold (normalised eigenvalue units), mirroring the single-PCA lamplus = ymed/mu(beta).
+    const double t = ymed / mu(beta);
+    double noise_sum = 0.0;
+    ssize_t noise_count = 0;
+    apply_threshold(s, d, t, result, noise_sum, noise_count);
+    result.lamplus = t;
+    result.sigma2 = 2.0 * noise_sum / double(noise_count + 1);
+    return result;
+  }
+
+  bool supports_partitioning() const final { return true; }
 
 protected:
   // Coefficients as provided in Gavish and Donohue 2014

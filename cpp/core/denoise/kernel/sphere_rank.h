@@ -34,14 +34,18 @@ class SphereRank : public SphereBase {
 //   if the kernel size changes between iterations
 
 public:
+  // effective_num_volumes is the per-partition volume count (m'/P) from which the kernel is
+  //   sized; with no partitioning it equals the full volume count Denoise::num_volumes(voxel_grid).
+  //   Sizing to the smallest partition leaves that partition's noise block ~square.
   SphereRank(const Header &voxel_grid,
              const std::array<ssize_t, 3> &subsample_factors,
-             const Image<float> &rank_per_mm)
+             const Image<float> &rank_per_mm,
+             const ssize_t effective_num_volumes)
       : SphereBase(voxel_grid,
                    subsample_factors,
-                   SphereBase::compute_max_radius(voxel_grid, 2 * Denoise::num_volumes(voxel_grid))),
+                   SphereBase::compute_max_radius(voxel_grid, 2 * effective_num_volumes)),
         rank_per_mm (rank_per_mm),
-        num_volumes (Denoise::num_volumes(voxel_grid)) {}
+        num_volumes (effective_num_volumes) {}
 
   SphereRank(const SphereRank &) = default;
 

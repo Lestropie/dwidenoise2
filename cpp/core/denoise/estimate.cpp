@@ -17,6 +17,9 @@
 
 #include "denoise/estimate.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <functional>
 #include <limits>
 
 #include "interp/cubic.h"
@@ -32,7 +35,10 @@ Estimate<F>::Estimate(const Image<F> &image,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports,
                       const ssize_t preconditioner_rank,
-                      const bool enable_recon)
+                      const bool enable_recon,
+                      std::shared_ptr<const Partitioning> level_partitioning,
+                      std::vector<ssize_t> volume_group,
+                      const ssize_t kernel_num_partitions)
     : m(Denoise::num_volumes(image)),
       subsample(subsample),
       kernel(kernel),
@@ -48,10 +54,18 @@ Estimate<F>::Estimate(const Image<F> &image,
           decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
       eig(decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
       s(std::min(m, kernel->estimated_size())),
+      level_partitioning(level_partitioning),
+      kernel_num_partitions(kernel_num_partitions),
+      active_part(nullptr),
+      volume_group(std::move(volume_group)),
+      num_demean_groups(this->volume_group.empty()
+                            ? 0
+                            : (*std::max_element(this->volume_group.begin(), this->volume_group.end()) + 1)),
       exports(exports) {
   // If input image is > 4D, should have been preconditioned into 4D
   assert(image.ndim() == 4);
   pca_failure_counter.store(0, std::memory_order_release);
+  allocate_partition_storage();
 }
 
 template <typename F>
@@ -71,7 +85,51 @@ Estimate<F>::Estimate(const Estimate<F> &that)
           decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
       eig(decomp == decomp_type::SELFADJOINT ? std::min(m, kernel->estimated_size()) : 0),
       s(std::min(m, kernel->estimated_size())),
+      level_partitioning(that.level_partitioning),
+      kernel_num_partitions(that.kernel_num_partitions),
+      active_part(nullptr),
+      volume_group(that.volume_group),
+      num_demean_groups(that.num_demean_groups),
       exports(that.exports) {
+  allocate_partition_storage();
+}
+
+// Choose the partitioning for the patch centred at "voxel": the shared per-level assignment, a
+//   freshly drawn per-kernel assignment (seeded deterministically by the voxel so it is identical
+//   between the Estimate and Recon evaluations and reproducible across runs/threads), or none.
+template <typename F> void Estimate<F>::select_partitioning(const Kernel::Voxel::index_type &voxel) {
+  if (level_partitioning && level_partitioning->num_partitions() > 1) {
+    active_part = level_partitioning.get();
+  } else if (kernel_num_partitions > 1) {
+    // Spatial hash of the patch centre (Teschner et al.) → reproducible per-voxel seed.
+    const uint32_t seed = uint32_t((uint32_t(voxel[0]) * 73856093u) ^ (uint32_t(voxel[1]) * 19349663u) ^
+                                   (uint32_t(voxel[2]) * 83492791u));
+    Math::RNG rng(seed);
+    patch_partition = partition_volumes(m, volume_group, kernel_num_partitions, rng);
+    active_part = (patch_partition.num_partitions() > 1) ? &patch_partition : nullptr;
+  } else {
+    active_part = nullptr;
+  }
+}
+
+template <typename F> void Estimate<F>::allocate_partition_storage() {
+  if (!partitioning_enabled())
+    return;
+  const ssize_t P = configured_partitions();
+  Xsub_partition.resize(P);
+  s_partition.resize(P);
+  part_m.assign(P, 0);
+  part_n.assign(P, 0);
+  part_rp.assign(P, 0);
+  // means_partition is used as demean scratch in both the estimation and reconstruction passes
+  //   (and read back by Recon to re-add the per-group means), so allocate it unconditionally.
+  means_partition.resize(P);
+  if (enable_recon) {
+    U_partition.resize(P);
+    V_partition.resize(P);
+    evec_partition.resize(P);
+    sv_partition.resize(P);
+  }
 }
 
 template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
@@ -87,6 +145,10 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   Kernel::Voxel::index_type voxel({dwi.index(0), dwi.index(1), dwi.index(2)});
   if (!subsample->process(voxel))
     return;
+
+  // Select this patch's partitioning (shared per-level, or a per-kernel assignment drawn from a
+  //   voxel-seeded RNG, or none). active_part is then used throughout this evaluation.
+  select_partitioning(voxel);
 
   // Load list of voxels from which to import data
   patch = (*kernel)(voxel);
@@ -120,39 +182,51 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   load_data(dwi);
   assert(X.leftCols(n).allFinite());
 
-  // Compute Eigendecomposition
+  // Compute the eigendecomposition(s) and estimate the signal/noise threshold.
   bool successful_decomposition = false;
-  switch (decomp) {
-  case decomp_type::BDCSVD: {
-    SVD.compute(X.leftCols(n), enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
-    successful_decomposition = SVD.info() == Eigen::Success;
-    if (successful_decomposition) {
-      // eigenvalues sorted in increasing order:
-      s.head(r) = SVD.singularValues().array().reverse().square().template cast<double>();
+  if (partitioned()) {
+    // Split the volumes into partitions, decompose each independently, and estimate a single
+    //   noise level (with a per-partition rank) from the pooled spectrum.
+    successful_decomposition = compute_partitions(n);
+    if (successful_decomposition)
+      threshold = (*estimator)(s_partition, part_m, part_n, part_rp, patch.centre_realspace);
+    else {
+      threshold = Estimator::Result();
+      pca_failure_counter.fetch_add(1, std::memory_order_relaxed);
     }
-  } break;
-  case decomp_type::SELFADJOINT: {
-    if (m <= n)
-      XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n) * X.leftCols(n).adjoint();
-    else
-      XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n).adjoint() * X.leftCols(n);
-    eig.compute(XtX.topLeftCorner(r, r), enable_recon ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
-    successful_decomposition = eig.info() == Eigen::Success;
-    if (successful_decomposition) {
-      // eigenvalues sorted in increasing order,
-      //   additionally clamping any negtive values to zero:
-      s.head(r) = eig.eigenvalues().template cast<double>().cwiseMax(0.0);
-    }
-  } break;
-  }
-
-  if (successful_decomposition) {
-    // Threshold determination, possibly via Marchenko-Pastur
-    threshold = (*estimator)(s.head(r), m, n, preconditioner_rank, patch.centre_realspace);
   } else {
-    s.head(r).fill(std::numeric_limits<double>::signaling_NaN());
-    threshold = Estimator::Result();
-    pca_failure_counter.fetch_add(1, std::memory_order_relaxed);
+    switch (decomp) {
+    case decomp_type::BDCSVD: {
+      SVD.compute(X.leftCols(n), enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
+      successful_decomposition = SVD.info() == Eigen::Success;
+      if (successful_decomposition) {
+        // eigenvalues sorted in increasing order:
+        s.head(r) = SVD.singularValues().array().reverse().square().template cast<double>();
+      }
+    } break;
+    case decomp_type::SELFADJOINT: {
+      if (m <= n)
+        XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n) * X.leftCols(n).adjoint();
+      else
+        XtX.topLeftCorner(r, r).template triangularView<Eigen::Lower>() = X.leftCols(n).adjoint() * X.leftCols(n);
+      eig.compute(XtX.topLeftCorner(r, r), enable_recon ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
+      successful_decomposition = eig.info() == Eigen::Success;
+      if (successful_decomposition) {
+        // eigenvalues sorted in increasing order,
+        //   additionally clamping any negtive values to zero:
+        s.head(r) = eig.eigenvalues().template cast<double>().cwiseMax(0.0);
+      }
+    } break;
+    }
+
+    if (successful_decomposition) {
+      // Threshold determination, possibly via Marchenko-Pastur
+      threshold = (*estimator)(s.head(r), m, n, preconditioner_rank, patch.centre_realspace);
+    } else {
+      s.head(r).fill(std::numeric_limits<double>::signaling_NaN());
+      threshold = Estimator::Result();
+      pca_failure_counter.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
   // Store additional output maps if requested
@@ -169,13 +243,33 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   }
   if (exports.rank_pcanonzero.valid()) {
     assign_pos_of(ss_index).to(exports.rank_pcanonzero);
-    exports.rank_pcanonzero.value() = rank_nonzero(m, n, preconditioner_rank);
+    if (partitioned()) {
+      // Pooled count of nonzero components across partitions (sum_p rank_nonzero(m_p,n,rp_p)).
+      ssize_t total = 0;
+      for (ssize_t p = 0; p != active_part->num_partitions(); ++p)
+        total += rank_nonzero(part_m[p], part_n[p], part_rp[p]);
+      exports.rank_pcanonzero.value() = total;
+    } else {
+      exports.rank_pcanonzero.value() = rank_nonzero(m, n, preconditioner_rank);
+    }
   }
   if (exports.rank_input.valid()) {
     assign_pos_of(ss_index).to(exports.rank_input);
     if (!successful_decomposition)
       exports.rank_input.value() = 0;
-    else if (bool(threshold))
+    else if (partitioned()) {
+      // Total signal rank across partitions = pooled total rank - pooled noise count, plus the
+      //   per-partition regressed-mean components (sum_p rp_p), matching the single-PCA
+      //   convention where the preconditioner null rank is added back downstream (here the
+      //   preconditioner null rank is 0, the demeaning being per partition).
+      ssize_t total_r = 0;
+      ssize_t total_rp = 0;
+      for (ssize_t p = 0; p != active_part->num_partitions(); ++p) {
+        total_r += std::min(part_m[p], part_n[p]);
+        total_rp += part_rp[p];
+      }
+      exports.rank_input.value() = bool(threshold) ? (total_r - threshold.cutoff_p + total_rp) : total_r;
+    } else if (bool(threshold))
       exports.rank_input.value() = r - threshold.cutoff_p;
     else
       exports.rank_input.value() = r;
@@ -196,8 +290,27 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
         exports.patchcount.value() = exports.patchcount.value() + 1;
       }
     }
-    if (exports.saving_eigenspectra())
-      exports.add_eigenspectrum(s);
+    if (exports.saving_eigenspectra()) {
+      if (partitioned()) {
+        // Export the pooled, descending, qnz-normalised spectrum across partitions (raw
+        //   per-partition eigenvalues are on incommensurable scales).
+        ssize_t total = 0;
+        for (ssize_t p = 0; p != active_part->num_partitions(); ++p)
+          total += std::min(part_m[p], part_n[p]);
+        eigenvalues_type pooled(total);
+        ssize_t idx = 0;
+        for (ssize_t p = 0; p != active_part->num_partitions(); ++p) {
+          const ssize_t qnz = dimlong_nonzero(part_m[p], part_n[p], part_rp[p]);
+          const ssize_t rp_r = std::min(part_m[p], part_n[p]);
+          for (ssize_t i = 0; i != rp_r; ++i)
+            pooled[idx++] = s_partition[p][i] / double(qnz);
+        }
+        std::sort(pooled.data(), pooled.data() + pooled.size(), std::greater<double>());
+        exports.add_eigenspectrum(pooled);
+      } else {
+        exports.add_eigenspectrum(s);
+      }
+    }
   }
 }
 
@@ -206,6 +319,89 @@ template <typename F> void Estimate<F>::report_warnings() const {
   if (count > 0) {
     WARN("A total of " + str(count) + " PCA kernels failed to converge");
   }
+}
+
+template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
+  assert(active_part->num_volumes() == m);
+  const ssize_t P = active_part->num_partitions();
+  bool all_ok = true;
+  for (ssize_t p = 0; p != P; ++p) {
+    const std::vector<ssize_t> &rows = active_part->volumes(p);
+    const ssize_t m_p = ssize_t(rows.size());
+    part_m[p] = m_p;
+    part_n[p] = n;
+
+    // Extract this partition's sub-block: its m_p volume rows, all n patch-voxel columns.
+    MatrixType &Xp = Xsub_partition[p];
+    Xp.resize(m_p, n);
+    for (ssize_t li = 0; li != m_p; ++li)
+      Xp.row(li) = X.row(rows[li]).head(n);
+
+    // Per-(group) per-column demeaning within the partition, keeping the subtracted mean
+    //   orthogonal to this partition's PCA; rp_p counts the demeaning groups present (each
+    //   contributes one regressed-out / assumed-zero component). The means are retained for
+    //   Recon to re-add to the reconstructed data.
+    ssize_t rp_p = 0;
+    if (!volume_group.empty()) {
+      MatrixType &means = means_partition[p];
+      means.setZero(num_demean_groups, n);
+      std::vector<ssize_t> counts(num_demean_groups, 0);
+      for (ssize_t li = 0; li != m_p; ++li) {
+        const ssize_t g = volume_group[rows[li]];
+        means.row(g) += Xp.row(li);
+        ++counts[g];
+      }
+      for (ssize_t g = 0; g != num_demean_groups; ++g) {
+        if (counts[g] > 0) {
+          means.row(g) /= F(double(counts[g]));
+          ++rp_p;
+        }
+      }
+      for (ssize_t li = 0; li != m_p; ++li)
+        Xp.row(li) -= means.row(volume_group[rows[li]]);
+    }
+    part_rp[p] = rp_p;
+
+    const ssize_t r_p = std::min(m_p, n);
+    if (s_partition[p].size() < r_p)
+      s_partition[p].resize(r_p);
+
+    bool ok = false;
+    switch (decomp) {
+    case decomp_type::BDCSVD: {
+      SVD.compute(Xp, enable_recon ? (Eigen::ComputeThinU | Eigen::ComputeThinV) : Eigen::EigenvaluesOnly);
+      ok = SVD.info() == Eigen::Success;
+      if (ok) {
+        s_partition[p].head(r_p) = SVD.singularValues().array().reverse().square().template cast<double>();
+        if (enable_recon) {
+          U_partition[p] = SVD.matrixU();
+          V_partition[p] = SVD.matrixV();
+          sv_partition[p] = SVD.singularValues();
+        }
+      }
+    } break;
+    case decomp_type::SELFADJOINT: {
+      if (r_p > XtX.cols())
+        XtX.resize(r_p, r_p);
+      if (m_p <= n)
+        XtX.topLeftCorner(r_p, r_p).template triangularView<Eigen::Lower>() = Xp * Xp.adjoint();
+      else
+        XtX.topLeftCorner(r_p, r_p).template triangularView<Eigen::Lower>() = Xp.adjoint() * Xp;
+      eig.compute(XtX.topLeftCorner(r_p, r_p), enable_recon ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
+      ok = eig.info() == Eigen::Success;
+      if (ok) {
+        s_partition[p].head(r_p) = eig.eigenvalues().template cast<double>().cwiseMax(0.0);
+        if (enable_recon)
+          evec_partition[p] = eig.eigenvectors();
+      }
+    } break;
+    }
+    if (!ok) {
+      all_ok = false;
+      s_partition[p].head(r_p).fill(std::numeric_limits<double>::signaling_NaN());
+    }
+  }
+  return all_ok;
 }
 
 template <typename F> void Estimate<F>::load_data(Image<F> &image) {

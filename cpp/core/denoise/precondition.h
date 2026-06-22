@@ -137,6 +137,25 @@ public:
                   const bias_handling_t bias_handling = bias_handling_t::DEBIAS,
                   const debias_anchor_t debias_anchor = debias_anchor_t::SAMPLE) const;
 
+  // Enable/disable preconditioner-side demeaning for the current iteration. When volume
+  //   partitioning is in effect (P > 1), demeaning is instead performed per partition by the
+  //   Estimate/Recon classes (per-partition per-group means keep the mean subtraction orthogonal
+  //   to each partition's PCA); the preconditioner then applies only phase demodulation and the
+  //   (non-linear) variance-stabilising transform, and its inverse reduces to the pointwise
+  //   inverse VST (the demean offset re-added by Recon already lives in the stabilised domain).
+  //   While active, null_rank() reports 0 (no globally-regressed mean) and the forward/inverse
+  //   transforms skip the demean step. The GROUP_MEAN inverse anchor is unavailable in this mode.
+  void set_partitioning_active(const bool active) { partitioning_active = active; }
+  bool demean_active() const { return vst_mean_image.valid() && !partitioning_active; }
+
+  // Per-(preconditioned/output) row demeaning-group labels for the current data layout (length
+  //   header().size(3) == m', accounting for any active temporal subset): the b-value shell or
+  //   5th-dimension volume-group index of each output volume. Returns an empty vector when no
+  //   grouped demeaning applies (-demean none), and an all-zero vector for -demean all (a single
+  //   group). Used to (a) stratify the volume partitioning so each group is balanced across
+  //   partitions, and (b) drive the per-partition per-group demeaning within Estimate/Recon.
+  std::vector<ssize_t> output_volume_to_group() const;
+
   // Select a stratified random subset of "fraction" of the volumes (along the
   //   supra-spatial axes) for the next forward preconditioning + mean computation.
   //   The subset is stratified by the active demeaning grouping (b-value shells or
@@ -156,7 +175,9 @@ public:
   const Header &header() const { return temporal_subset.empty() ? H_out : H_out_subset; }
 
   ssize_t null_rank() const {
-    if (!vst_mean_image.valid())
+    // When partitioning is active the preconditioner performs no demeaning (it is done per
+    //   partition inside Estimate/Recon), so no rank is globally regressed out here.
+    if (partitioning_active || !vst_mean_image.valid())
       return 0;
     if (vst_mean_image.ndim() == 3)
       return 1;
@@ -177,6 +198,9 @@ private:
   // Current temporal subset: sorted original (serialised) volume indices used for noise
   //   level estimation in this iteration; empty ⇒ all volumes (no temporal sub-sampling).
   std::vector<ssize_t> temporal_subset;
+  // When true, demeaning is delegated to the per-partition Estimate/Recon path and the
+  //   preconditioner applies only phase demodulation and the variance-stabilising transform.
+  bool partitioning_active = false;
   // For serialisation of >4D images
   ssize_t num_volume_groups;
   Image<uint32_t> serialise_image;

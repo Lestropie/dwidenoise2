@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/result.h"
 
@@ -31,6 +33,12 @@ public:
                     const ssize_t n,                                 //
                     const ssize_t rp,                                //
                     const Eigen::Vector3d & /*unused*/) const final; //
+  Result operator()(const std::vector<eigenvalues_type> &s,          //
+                    const std::vector<ssize_t> &m,                   //
+                    const std::vector<ssize_t> &n,                   //
+                    const std::vector<ssize_t> &rp,                  //
+                    const Eigen::Vector3d & /*unused*/) const final; //
+  bool supports_partitioning() const final { return true; }
 };
 
 } // namespace MR::Denoise::Estimator

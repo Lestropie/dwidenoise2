@@ -518,6 +518,28 @@ void Precondition<T>::set_temporal_subsample(default_type fraction, Math::RNG &r
          "for one or more groups");
 }
 
+template <typename T> std::vector<ssize_t> Precondition<T>::output_volume_to_group() const {
+  const ssize_t mprime = header().size(3);
+  std::vector<ssize_t> result;
+  // Output row k corresponds to the original (serialised) volume orig(k); under a temporal
+  //   subset only the selected volumes are emitted, in sorted order.
+  const auto orig = [&](const ssize_t k) -> ssize_t { return temporal_subset.empty() ? k : temporal_subset[k]; };
+  if (!index2shell.empty()) {
+    result.resize(mprime);
+    for (ssize_t k = 0; k != mprime; ++k)
+      result[k] = index2shell[orig(k)];
+  } else if (!index2group.empty()) {
+    result.resize(mprime);
+    for (ssize_t k = 0; k != mprime; ++k)
+      result[k] = index2group[orig(k)];
+  } else if (vst_mean_image.valid()) {
+    // -demean all: a single demeaning group spanning every volume.
+    result.assign(mprime, 0);
+  }
+  // else -demean none: leave empty (no grouped demeaning).
+  return result;
+}
+
 // Serialise this voxel's volumes into "data", applying phase demodulation and,
 //   where a noise level map is available, the forward variance-stabilising transform.
 template <typename T>
@@ -572,6 +594,10 @@ void Precondition<T>::serialise_and_stabilise(Image<T> &input,
 
 template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
   if (!vst_mean_image.valid())
+    return;
+  // When partitioning is active, demeaning is performed per partition inside Estimate/Recon, so
+  //   no preconditioner-side means are needed (and the stored values are left unused).
+  if (partitioning_active)
     return;
 
   const Transform transform(input_arg);
@@ -660,10 +686,15 @@ void Precondition<T>::operator()(Image<T> input,
     // Where no noise level map is available (the demean-only bootstrap),
     //   reversal reduces to re-addition of the stored (empirical) mean.
 
+    // When partitioning is active the demean offset was applied (and is reversed) per partition
+    //   inside Estimate/Recon; the preconditioner therefore reverses only the VST (pointwise),
+    //   exactly as for -demean none. Treat the stored mean as absent in that case.
+    const bool use_mean = mean.valid() && !partitioning_active;
+
     // Per-group quantities, sized once and reused across voxels to avoid repeated allocation:
     //   the stabilised-domain demean offset (SAMPLE), and the mapped DC value + local gain
     //   (GROUP_MEAN legacy debiasing).
-    const ssize_t num_groups = mean.valid() ? (mean.ndim() == 3 ? 1 : mean.size(3)) : 0;
+    const ssize_t num_groups = use_mean ? (mean.ndim() == 3 ? 1 : mean.size(3)) : 0;
     std::vector<T> group_offset(std::max<ssize_t>(num_groups, ssize_t(1)), T(0));
     std::vector<T> group_dc(num_groups);
     std::vector<default_type> group_gain(num_groups);
@@ -682,7 +713,7 @@ void Precondition<T>::operator()(Image<T> input,
     {
       std::string detail;
       const auto append = [&detail](const std::string &item) { detail += (detail.empty() ? "" : ", ") + item; };
-      if (mean.valid())
+      if (use_mean)
         append("reverting demeaning");
       if (vst) {
         append(noise_model->description() + " noise model");
@@ -710,7 +741,7 @@ void Precondition<T>::operator()(Image<T> input,
         const default_type sigma = vst->value();
 
         if (bias_handling == bias_handling_t::DEBIAS && debias_anchor == debias_anchor_t::GROUP_MEAN &&
-            mean.valid()) {
+            use_mean) {
           // GROUP_MEAN (legacy) debiasing: linearise the unbiased inverse about the per-group
           //   stabilised-domain mean (the demeaning offset), mapping the denoised residual
           //   through the local Jacobian. Debiasing accuracy then depends on the proximity of
@@ -739,7 +770,7 @@ void Precondition<T>::operator()(Image<T> input,
           //   does not depend on the demeaning grouping and the natural signal-dependent
           //   heteroscedasticity is restored. With -demean none there is no stored offset, so
           //   u_recon == data[v] and the inverse is applied directly to each denoised sample.
-          if (mean.valid()) {
+          if (use_mean) {
             assign_pos_of(input, 0, 3).to(mean);
             for (ssize_t group = 0; group != num_groups; ++group) {
               if (mean.ndim() > 3)
@@ -765,7 +796,7 @@ void Precondition<T>::operator()(Image<T> input,
                           : vst_inverse<T>(*noise_model, u_recon, sigma);          //
           }
         }
-      } else if (mean.valid()) {
+      } else if (use_mean) {
         // No variance-stabilising transform (demean-only bootstrap):
         //   reversal is simply re-addition of the stored mean.
         assign_pos_of(input, 0, 3).to(mean);
@@ -836,8 +867,10 @@ void Precondition<T>::operator()(Image<T> input,
     // Steps 1 & 2: serialise, phase demodulation, variance-stabilising transform
     serialise_and_stabilise(input, phase, serialise, transform, vst.get(), data);
 
-    // Step 3: demeaning (in the stabilised domain)
-    if (mean.valid()) {
+    // Step 3: demeaning (in the stabilised domain).
+    //   Skipped when partitioning is active: the per-partition per-group demeaning is then
+    //   performed within Estimate/Recon, keeping the mean orthogonal to each partition's PCA.
+    if (mean.valid() && !partitioning_active) {
       assign_pos_of(input, 0, 3).to(mean);
       if (mean.ndim() == 3) {
         const T mean_value = mean.value();

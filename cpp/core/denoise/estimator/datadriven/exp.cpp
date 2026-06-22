@@ -17,8 +17,13 @@
 
 #include "denoise/estimator/datadriven/exp.h"
 
+#include <cmath>
+#include <limits>
+#include <vector>
+
 // Necessary for precompiler flags
 #include "denoise/denoise.h"
+#include "denoise/estimator/pooling.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -61,6 +66,64 @@ Result Exp<version>::operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
       result.lamplus = lam;
     }
   }
+  return result;
+}
+
+template <ssize_t version>
+Result Exp<version>::operator()(const std::vector<eigenvalues_type> &s, //
+                                const std::vector<ssize_t> &m,          //
+                                const std::vector<ssize_t> &n,          //
+                                const std::vector<ssize_t> &rp,         //
+                                const Eigen::Vector3d & /*unused*/) const {
+  const std::vector<PartitionDims> d = partition_dims(m, n, rp);
+  // Pooled, sorted-ascending normalised noise eigenvalues across partitions.
+  const std::vector<double> pooled = pool_normalized(s, d);
+  Result result;
+  if (pooled.empty())
+    return result;
+  const double lam_r = pooled.front(); // smallest normalised nonzero eigenvalue
+  // Version 1 normalises gamma by the aggregate long dimension sum_p qnz_p; version 2 applies
+  //   each partition's finite-size correction, which (summed) is sum_p (qnz_p - rnz_p) plus the
+  //   running noise count -- the exact generalisation of the single-PCA "qnz - (size-p-1)".
+  const double Q = double(total_qnz(d));
+  ssize_t denom_const = 0;
+  for (const auto &x : d)
+    denom_const += (x.qnz - x.rnz);
+  double clam = 0.0;
+  double best_sigma2 = std::numeric_limits<double>::signaling_NaN();
+  double tstar = std::numeric_limits<double>::signaling_NaN();
+  bool found = false;
+  for (ssize_t i = 0; i != ssize_t(pooled.size()); ++i) {
+    const double lam = pooled[i];
+    clam += lam;
+    const ssize_t count = i + 1; // number of pooled noise components considered
+    double denominator = std::numeric_limits<double>::signaling_NaN();
+    switch (version) {
+    case 1:
+      denominator = Q;
+      break;
+    case 2:
+      denominator = double(denom_const + count);
+      break;
+    default:
+      assert(false);
+    }
+    const double gam = double(count) / denominator;
+    const double sigsq1 = clam / double(count);
+    const double sigsq2 = (lam - lam_r) / (4.0 * std::sqrt(gam));
+    if (sigsq2 < sigsq1) {
+      best_sigma2 = sigsq1;
+      tstar = lam;
+      found = true;
+    }
+  }
+  if (!found)
+    return result;
+  double noise_sum = 0.0;
+  ssize_t noise_count = 0;
+  apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+  result.sigma2 = best_sigma2;
+  result.lamplus = tstar;
   return result;
 }
 

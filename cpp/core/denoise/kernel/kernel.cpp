@@ -17,6 +17,8 @@
 
 #include "denoise/kernel/kernel.h"
 
+#include <algorithm>
+
 #include "denoise/denoise.h"
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/cuboid.h"
@@ -141,13 +143,19 @@ make_kernel(const Header &H,
             const std::array<ssize_t, 3> &subsample_factors,
             const default_type size_multiplier,
             const Image<float> &rank_per_mm,
-            const ssize_t full_num_volumes) {
+            const ssize_t full_num_volumes,
+            const ssize_t num_partitions) {
   const Kernel::shape_type shape = App::get_option_choice("shape", Kernel::shape_type::SPHERE);
   std::vector<App::ParsedOption> opt;
   std::shared_ptr<Kernel::Base> kernel;
   // Whether the kernel size is derived from the volume count (true for the dynamic
   //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / cuboid).
   bool volume_derived = true;
+  // Volume count from which the dynamic (volume-derived) kernels are sized. With P partitions
+  //   the patch is sized from the smallest partition (m'/P) so each partition's Casorati matrix
+  //   preserves the target aspect ratio; the SVD then operates on m'/P x ~aspect*(m'/P) blocks.
+  assert(num_partitions >= 1);
+  const ssize_t volumes_for_sizing = std::max<ssize_t>(1, Denoise::num_volumes(H) / num_partitions);
 
   switch (shape) {
   case Kernel::shape_type::SPHERE: {
@@ -163,7 +171,7 @@ make_kernel(const Header &H,
     opt = get_options("aspect_ratio");
     if (!opt.empty()) {
       kernel = std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, default_type(opt[0][0]) * Denoise::num_volumes(H) * size_multiplier);
+          H, subsample_factors, default_type(opt[0][0]) * volumes_for_sizing * size_multiplier);
       break;
     }
     opt = get_options("minvoxels");
@@ -175,11 +183,11 @@ make_kernel(const Header &H,
     //   use the rank-based kernel;
     //   otherwise, default to the aspect ratio
     if (rank_per_mm.valid()) {
-      kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm);
+      kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing);
       break;
     }
     kernel = std::make_shared<SphereMinVoxels>(
-        H, subsample_factors, default_aspect_ratio * Denoise::num_volumes(H) * size_multiplier);
+        H, subsample_factors, default_aspect_ratio * volumes_for_sizing * size_multiplier);
   } break;
   case Kernel::shape_type::CUBOID: {
     auto check_invalid_option = [](const std::string &item) {

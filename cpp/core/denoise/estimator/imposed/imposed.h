@@ -24,6 +24,7 @@
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
+#include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
 #include "image.h"
 #include "math/math.h"
@@ -71,6 +72,33 @@ public:
     }
     return result;
   }
+
+  // Partitioned form: a single externally-provided sigma^2 applies to the whole patch; each
+  //   partition's signal/noise boundary is the Marchenko-Pastur edge for that partition's own
+  //   aspect ratio beta_p (which may differ slightly between partitions).
+  Result operator()(const std::vector<eigenvalues_type> &s, //
+                    const std::vector<ssize_t> &m,           //
+                    const std::vector<ssize_t> &n,           //
+                    const std::vector<ssize_t> &rp,          //
+                    const Eigen::Vector3d &pos) const final {
+    Result result;
+    double sigma_sq;
+    if (!get_sigma_sq(pos, sigma_sq))
+      return result;
+    result.sigma2 = sigma_sq;
+    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
+    std::vector<double> lamplus_p(d.size());
+    for (size_t p = 0; p != d.size(); ++p)
+      lamplus_p[p] = Math::pow2(1.0 + std::sqrt(d[p].beta)) * sigma_sq;
+    double noise_sum = 0.0;
+    ssize_t noise_count = 0;
+    apply_threshold_per_partition(s, d, lamplus_p, result, noise_sum, noise_count);
+    // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
+    result.lamplus = Math::pow2(1.0 + std::sqrt(mean_beta(d))) * sigma_sq;
+    return result;
+  }
+
+  bool supports_partitioning() const final { return true; }
 
 protected:
   // Provide sigma^2 at the patch centre `pos`; return false if it cannot be

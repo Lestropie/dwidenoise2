@@ -42,10 +42,16 @@ extern const App::OptionGroup options;
 //   in the Casorati matrix for this iteration (m', which is reduced under temporal
 //   sub-sampling). full_num_volumes is the number of volumes in the absence of temporal
 //   sub-sampling; it is used only to decide whether the Casorati shape warning applies.
+// num_partitions is the number of volume partitions for this iteration (>= 1). When > 1 the
+//   volume-derived kernel size is based on the smallest partition's volume count (m'/P), so
+//   that each partition's Casorati sub-matrix preserves the target aspect ratio; fixed-geometry
+//   kernels (-radius / -minvoxels / cuboid -extent) are unaffected (the user has pinned the
+//   patch size explicitly).
 std::shared_ptr<Base> make_kernel(const Header &H,                                 //
                                   const std::array<ssize_t, 3> &subsample_factors, //
                                   const default_type size_multiplier,              //
                                   const Image<float> &rank_per_mm_image,           //
-                                  const ssize_t full_num_volumes);                 //
+                                  const ssize_t full_num_volumes,                  //
+                                  const ssize_t num_partitions = 1);               //
 
 } // namespace MR::Denoise::Kernel

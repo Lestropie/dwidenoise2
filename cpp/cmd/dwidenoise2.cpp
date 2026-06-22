@@ -40,6 +40,7 @@
 #include "denoise/kernel/sphere_minvoxels.h"
 #include "denoise/mask.h"
 #include "denoise/noise_model/noise_model.h"
+#include "denoise/partition.h"
 #include "denoise/precondition.h"
 #include "denoise/recon.h"
 #include "denoise/schedule.h"
@@ -373,10 +374,28 @@ void run(Header &dwi,
     //   level map. The preconditioned data then hold only the m' subset volumes, so the
     //   downstream Estimate / kernel sizing see m' volumes without any knowledge of sub-sampling.
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
+    // Resolve the partition count for this iteration from the (post-subsampling) volume count m'.
+    //   When partitioning, the preconditioner performs no demeaning (done per partition within
+    //   Estimate); set this before update_vst_parameters so it skips the now-unused mean pass.
+    const ssize_t mprime = preconditioner.header().size(3);
+    const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
+    if (num_partitions > 1 && !estimator->supports_partitioning())
+      throw Exception("The selected noise level estimator does not support volume partitioning "
+                      "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
+                      " partitions); choose a different -estimator or remove partitioning from the schedule");
+    preconditioner.set_partitioning_active(num_partitions > 1);
     preconditioner.update_vst_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
         Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+    // Per-kernel partitioning: each PCA patch draws its own balanced assignment (in Estimate,
+    //   from a voxel-seeded RNG), so only the per-volume demeaning-group labels and the partition
+    //   count are passed; no single shared (per-level) assignment is built.
+    std::vector<ssize_t> volume_group;
+    std::shared_ptr<const Partitioning> partitioning; // null ⇒ per-kernel in Estimate
+    if (num_partitions > 1)
+      volume_group = preconditioner.output_volume_to_group();
 
     std::shared_ptr<SpatialSubsample> subsample =
         std::make_shared<SpatialSubsample>(dwi, iterations[iteration].spatial_subsample_ratios);
@@ -396,7 +415,10 @@ void run(Header &dwi,
                         decomposition,
                         estimator,
                         preconditioner,
-                        iteration_exports);
+                        iteration_exports,
+                        num_partitions,
+                        partitioning,
+                        volume_group);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
@@ -411,6 +433,12 @@ void run(Header &dwi,
   //   temporal_subsample == 1, so all volumes are reconstructed. Clear any subset and
   //   recompute the full-data means under the final noise level map.
   preconditioner.set_temporal_subsample(1.0, rng, temporal_min_per_group);
+  // Resolve partitioning for the reconstruction pass (sized from the full volume count, as the
+  //   final row's temporal_subsample is validated to be 1.0). Set before update_vst_parameters
+  //   so the (unused) preconditioner-side demeaning pass is skipped when partitioning.
+  const ssize_t mprime_final = preconditioner.header().size(3);
+  const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
+  preconditioner.set_partitioning_active(num_partitions > 1);
   preconditioner.update_vst_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
 
@@ -428,7 +456,8 @@ void run(Header &dwi,
                                     subsample->get_factors(),
                                     iterations.back().kernel_size_multiplier,
                                     rank_per_mm,
-                                    Denoise::num_volumes(input));
+                                    Denoise::num_volumes(input),
+                                    num_partitions);
   kernel->set_mask(mask);
 
   // Unless the final schedule row is configured to (re)estimate the noise level, assume the
@@ -436,6 +465,21 @@ void run(Header &dwi,
   //   estimator), carrying through the estimate refined by the preceding iterations.
   if (!iterations.back().update_noise.value())
     estimator.reset(new Estimator::Unity());
+
+  if (num_partitions > 1 && !estimator->supports_partitioning())
+    throw Exception("The selected noise level estimator does not support volume partitioning "
+                    "(final schedule row requests " + str(num_partitions) +
+                    " partitions); choose a different -estimator or remove partitioning from the schedule");
+  if (num_partitions > 1 && debias_anchor == debias_anchor_t::GROUP_MEAN)
+    throw Exception("The GROUP_MEAN debias anchor is incompatible with volume partitioning; "
+                    "use -debias_anchor sample (the default) when partitioning is enabled");
+
+  // Per-kernel partitioning (see the estimation loop above): pass only the demeaning-group
+  //   labels and the partition count; Recon's Estimate base draws a per-patch assignment.
+  std::vector<ssize_t> volume_group;
+  std::shared_ptr<const Partitioning> partitioning; // null ⇒ per-kernel in Estimate/Recon
+  if (num_partitions > 1)
+    volume_group = preconditioner.output_volume_to_group();
 
   preconditioner(input, input_preconditioned, false);
   Recon<T> func(input_preconditioned,
@@ -446,7 +490,10 @@ void run(Header &dwi,
                 filter,
                 aggregator,
                 final_exports,
-                preconditioner.null_rank());
+                preconditioner.null_rank(),
+                partitioning,
+                volume_group,
+                num_partitions);
 
   Header H_out (dwi);
   H_out.datatype() = DataType::from<T>();
@@ -733,16 +780,16 @@ void run() {
   Exports final_exports(dwi, final_subsample->header());
   opt = get_options("noise_out");
   if (!opt.empty())
-    final_exports.set_noise_out(opt[0][0]);
+    final_exports.set_noise_out(opt[0][0].as_text());
   opt = get_options("lamplus");
   if (!opt.empty())
-    final_exports.set_lamplus(opt[0][0]);
+    final_exports.set_lamplus(opt[0][0].as_text());
   opt = get_options("rank_pcanonzero");
   if (!opt.empty())
-    final_exports.set_rank_pcanonzero(opt[0][0]);
+    final_exports.set_rank_pcanonzero(opt[0][0].as_text());
   opt = get_options("rank_input");
   if (!opt.empty())
-    final_exports.set_rank_input(opt[0][0]);
+    final_exports.set_rank_input(opt[0][0].as_text());
   opt = get_options("rank_output");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE && filter == filter_type::TRUNCATE) {
@@ -751,7 +798,7 @@ void run() {
            "as there is no aggregation of multiple patches per output voxel "
            "and no optimal shrinkage to reduce output rank relative to estimated input rank");
     }
-    final_exports.set_rank_output(opt[0][0]);
+    final_exports.set_rank_output(opt[0][0].as_text());
   }
   opt = get_options("sum_optshrink");
   if (!opt.empty()) {
@@ -759,33 +806,33 @@ void run() {
       WARN("Note that with a truncation filter, "
            "output image from -sumweights option will be equivalent to rank_input");
     }
-    final_exports.set_sum_optshrink(opt[0][0]);
+    final_exports.set_sum_optshrink(opt[0][0].as_text());
   }
   opt = get_options("max_dist");
   if (!opt.empty())
-    final_exports.set_max_dist(opt[0][0]);
+    final_exports.set_max_dist(opt[0][0].as_text());
   opt = get_options("voxelcount");
   if (!opt.empty())
-    final_exports.set_voxelcount(opt[0][0]);
+    final_exports.set_voxelcount(opt[0][0].as_text());
   opt = get_options("patchcount");
   if (!opt.empty())
-    final_exports.set_patchcount(opt[0][0]);
+    final_exports.set_patchcount(opt[0][0].as_text());
   opt = get_options("sum_aggregation");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE) {
       WARN("Output from -sum_aggregation will just contain 1 for every voxel processed: "
            "no patch aggregation takes place when output series comes exclusively from central patch");
     }
-    final_exports.set_sum_aggregation(opt[0][0]);
+    final_exports.set_sum_aggregation(opt[0][0].as_text());
   } else if (aggregator != aggregator_type::EXCLUSIVE) {
     final_exports.set_sum_aggregation();
   }
   opt = get_options("variance_removed");
   if (!opt.empty())
-    final_exports.set_variance_removed(opt[0][0]);
+    final_exports.set_variance_removed(opt[0][0].as_text());
   opt = get_options("eigenspectra");
   if (!opt.empty())
-    final_exports.set_eigenspectra_path(opt[0][0]);
+    final_exports.set_eigenspectra_path(opt[0][0].as_text());
 
   int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (dwi.datatype().is_complex())
@@ -806,7 +853,7 @@ void run() {
         aggregator,     //
         bias_handling,  //
         debias_anchor,  //
-        argument[1],    //
+        argument[1].as_text(), //
         final_exports); //
     break;
   case 1:
@@ -824,7 +871,7 @@ void run() {
         aggregator,     //
         bias_handling,  //
         debias_anchor,  //
-        argument[1],    //
+        argument[1].as_text(), //
         final_exports); //
     break;
   case 2:
@@ -841,7 +888,7 @@ void run() {
         aggregator,     //
         bias_handling,  //
         debias_anchor,  //
-        argument[1],    //
+        argument[1].as_text(), //
         final_exports); //
     break;
   case 3:
@@ -858,7 +905,7 @@ void run() {
         aggregator,     //
         bias_handling,  //
         debias_anchor,  //
-        argument[1],    //
+        argument[1].as_text(), //
         final_exports); //
     break;
   }
