@@ -39,7 +39,7 @@ COPY share/dwidenoise2 /src/mrtrix3/share/mrtrix3
 # The "copy-share-data" target imports share/mrtrix3/ (including the bundled schedules) into
 #   the build tree (build/share/mrtrix3/); it must be named explicitly here because building
 #   named executable targets does not trigger MRtrix3's ALL custom targets.
-RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON --preset=release \
+RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DMRTRIX_ENABLE_GPU=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON --preset=release \
     && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert copy-share-data
 
 # Build final image.
