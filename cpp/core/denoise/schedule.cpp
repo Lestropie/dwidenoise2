@@ -352,6 +352,17 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
                       "column \"update_noise\" must be true for all but the final iteration "
                       "(iteration " + str(i + 1) + " has update_noise false)");
   }
+
+  // dwidenoise2's final row is the reconstruction pass: its noise map is what is actually applied to
+  //   the data (for the variance-stabilising transform and the denoising threshold), and is also what
+  //   -noise_out exports. Smoothing it would make the exported / applied map deviate from the map the
+  //   PCA actually used, so it is rejected here. (dwi2noise, by contrast, *does* smooth its final row
+  //   when requested: that row produces the command's exported estimate, not a reconstruction.)
+  if (command == "dwidenoise2" && result.back().smooth_noiseout == noise_smooth_type::SMOOTH)
+    throw Exception("Schedule file \"" + path + "\": the final (reconstruction) row of a dwidenoise2 "
+                    "schedule must not set smooth_noise true; smoothing the reconstruction noise map "
+                    "would make the exported map deviate from the one actually applied to the data");
+
   return result;
 }
 

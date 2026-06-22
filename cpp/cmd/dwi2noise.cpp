@@ -185,6 +185,12 @@ void usage() {
   + Option("rank_input",
            "The estimated rank of the input data for each denoising patch")
     + Argument("image").type_image_out()
+  + Option("rankpermm_out",
+           "Export the per-voxel signal-rank density (estimated signal rank per mm of kernel radius)."
+           " This is the quantity dwidenoise2 uses to size its rank-adaptive reconstruction kernel;"
+           " exporting it here and importing it into dwidenoise2 via -rankpermm_in allows a"
+           " single-row (e.g. \"apriori\") dwidenoise2 schedule to reproduce that kernel.")
+    + Argument("image").type_image_out()
   + Option("eigenspectra",
            "Output a matrix containing the spectra of eigenvalues across patches"
            " (one row per patch). Where volume partitioning is in effect, each row is the"
@@ -315,11 +321,7 @@ void run(Header &dwi,
     // Per-partition signal-rank density: rank_input is summed over the iteration's num_partitions
     //   partitions, while the next iteration's rank-based kernel is sized from the smallest
     //   partition (m'/P), so divide by the partition count (which may differ between iterations).
-    rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
-    const default_type partition_scale = default_type(num_partitions);
-    for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
-      rank_per_mm.value() =
-          iteration_exports.rank_input.value() / (partition_scale * iteration_exports.max_dist.value());
+    rank_per_mm = Denoise::compute_rank_per_mm(iteration_exports.rank_input, iteration_exports.max_dist, num_partitions);
   }
 
   // Last iteration. Unlike dwidenoise2, dwi2noise may sub-sample the volumes of its final
@@ -357,6 +359,43 @@ void run(Header &dwi,
                       num_partitions,
                       partitioning,
                       volume_group);
+
+  // Smooth the exported noise map if (and only if) the final schedule row requests it. The non-final
+  //   iterations have their smoothing applied by condition_noise_map when propagating the estimate to
+  //   the next iteration; the final iteration's map is the command output, so its smoothing must be
+  //   applied here, before it reaches the filesystem. This mirrors the smoothing dwidenoise2 applies
+  //   internally to its penultimate map, so the two-phase route (dwi2noise, then
+  //   dwidenoise2 -noise_in -schedule apriori) denoises with the same map a single dwidenoise2 run
+  //   would. pad=NONE keeps the result on the (unpadded) output grid.
+  if (iterations.back().smooth_noiseout == noise_smooth_type::SMOOTH) {
+    Image<float> smoothed = Denoise::condition_noise_map(final_exports.noise_out,
+                                                         noise_impute_type::NAN_TO_ZERO,
+                                                         noise_pad_type::NONE,
+                                                         noise_smooth_type::SMOOTH);
+    for (auto l = Loop(final_exports.noise_out)(smoothed, final_exports.noise_out); l; ++l)
+      final_exports.noise_out.value() = smoothed.value();
+  }
+
+  // Optionally export the per-voxel signal-rank density (rank per mm of kernel radius) of this final
+  //   iteration. This is the same quantity dwidenoise2 accumulates across its iterations to size its
+  //   rank-adaptive reconstruction kernel; exporting it lets a single-row dwidenoise2 schedule
+  //   (-rankpermm_in) reproduce that kernel. It is derived from the raw signal rank, so it must be
+  //   computed before the demean null-rank addback below (which adjusts only the reported rank_input
+  //   export). final_exports.rank_input / .max_dist are forced valid in run() when -rankpermm_out is
+  //   requested.
+  {
+    auto opt_rpm = get_options("rankpermm_out");
+    if (!opt_rpm.empty()) {
+      assert(final_exports.rank_input.valid() && final_exports.max_dist.valid());
+      Image<float> rpm =
+          Denoise::compute_rank_per_mm(final_exports.rank_input, final_exports.max_dist, num_partitions);
+      Header H_rpm(final_exports.max_dist);
+      Image<float> out = Image<float>::create(opt_rpm[0][0].as_text(), H_rpm);
+      for (auto l = Loop(out)(rpm, out); l; ++l)
+        out.value() = rpm.value();
+    }
+  }
+
   // Add the regressed group-mean components back to the reported (signal-only) input rank, on the
   //   final output map only. demean_rank() yields the group count whether the demeaning was applied
   //   by the preconditioner or per partition within Estimate, so the contribution matches the
@@ -478,6 +517,15 @@ void run() {
   opt = get_options("eigenspectra");
   if (!opt.empty())
     final_exports.set_eigenspectra_path(opt[0][0].as_text());
+  // Exporting the rank-per-mm map requires the per-patch signal rank and patch radius of the final
+  //   iteration; ensure both are populated (as scratch if the user did not request them as outputs).
+  //   The map itself is computed and written in run<T>() once those values exist.
+  if (!get_options("rankpermm_out").empty()) {
+    if (!final_exports.rank_input.valid())
+      final_exports.set_rank_input();
+    if (!final_exports.max_dist.valid())
+      final_exports.set_max_dist();
+  }
 
   int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (complex)

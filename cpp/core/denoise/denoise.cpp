@@ -196,4 +196,42 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
   return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, noise_smooth_type::NONE);
 }
 
+Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_dist, const ssize_t num_partitions) {
+  assert(num_partitions >= 1);
+  Image<float> result = Image<float>::scratch(max_dist, "Scratch image for rank per mm kernel radius");
+  const default_type partition_scale = default_type(num_partitions);
+  for (auto l = Loop(result)(rank_input, max_dist, result); l; ++l) {
+    const float radius = max_dist.value();
+    result.value() = radius > 0.0F ? float(rank_input.value() / (partition_scale * radius)) : 0.0F;
+  }
+  return result;
+}
+
+Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial) {
+  // Detect whether a scalar value or an image path was provided, matching import_vst_noise_map().
+  std::optional<default_type> scalar_value;
+  try {
+    scalar_value = default_type(arg);
+  } catch (Exception &) {
+  }
+  Image<float> in;
+  if (scalar_value.has_value()) {
+    if (scalar_value.value() < 0.0)
+      throw Exception("Rank-per-mm value provided via -rankpermm_in must not be negative");
+    Header H(H_spatial);
+    H.ndim() = 3;
+    H.reset_intensity_scaling();
+    H.datatype() = DataType::Float32;
+    H.datatype().set_byte_order_native();
+    in = Image<float>::scratch(H, "Spatially-constant rank-per-mm map");
+    for (auto l = Loop(in)(in); l; ++l)
+      in.value() = float(scalar_value.value());
+  } else {
+    in = Image<float>::open(std::string(arg));
+    if (in.ndim() != 3)
+      throw Exception("Rank-per-mm image provided via -rankpermm_in must be 3-dimensional");
+  }
+  return condition_noise_map(in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, noise_smooth_type::NONE);
+}
+
 } // namespace MR::Denoise

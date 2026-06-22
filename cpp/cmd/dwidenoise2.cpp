@@ -173,7 +173,21 @@ void usage() {
             " The self-adjoint decomposition is not as numerically precise as the newer BDCSVD decomposition"
             " but is typically around twice as fast."
             " Reducing the kernel size below the default aspect ratio is not recommended"
-            " as it endangers erroneous noise level estimation and potentially biological signal removal.");
+            " as it endangers erroneous noise level estimation and potentially biological signal removal.")
+
+  + Example("Precompute noise estimation with dwi2noise, then denoise in a separate step",
+            "dwi2noise DWI.mif noise.mif -rankpermm_out rpm.mif;"
+            " dwidenoise2 DWI.mif out.mif -noise_in noise.mif -rankpermm_in rpm.mif -schedule apriori",
+            "This splits the default single-command operation into the two phases of a typical"
+            " image-correction pipeline: dwi2noise performs the iterative noise level estimation and"
+            " exports both the noise level map (-noise_out / its primary output) and the per-voxel"
+            " signal-rank density used to size the denoising kernel (-rankpermm_out); dwidenoise2 then"
+            " consumes both via -noise_in and -rankpermm_in under the single-row \"apriori\" schedule"
+            " (just the reconstruction pass), reproducing the result of a single default dwidenoise2 run."
+            " Passing both maps is required for equivalence:"
+            " -noise_in fixes the variance-stabilising transform and noise level,"
+            " while -rankpermm_in reproduces the rank-adaptive kernel"
+            " (omitting it falls back to a fixed aspect-ratio kernel).");
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"
@@ -232,6 +246,14 @@ void usage() {
   + decomposition_option
   + Estimator::estimator_denoise_options
   + Kernel::options
+  + Option("rankpermm_in",
+           "Import a precomputed signal-rank density (signal rank per mm of kernel radius),"
+           " either as a scalar value or as a 3D image (e.g. exported by dwi2noise -rankpermm_out),"
+           " to size the rank-adaptive reconstruction kernel."
+           " This lets a single-row (e.g. \"apriori\") schedule reproduce the rank-adaptive kernel"
+           " that the default multi-resolution schedule derives internally;"
+           " it is rejected with a multi-row schedule, which builds the rank density itself.")
+    + Argument("value/image").type_float(0.0).type_image_in()
   + Schedule::schedule_option
   + precondition_options(true)
 
@@ -282,6 +304,13 @@ void usage() {
     + Argument("image").type_image_out()
   + Option("rank_output",
            "An estimated rank for the output image data, accounting for multi-patch aggregation")
+    + Argument("image").type_image_out()
+  + Option("rankpermm_out",
+           "Export the per-voxel signal-rank density (signal rank per mm of kernel radius) that was"
+           " used to size the rank-adaptive reconstruction kernel."
+           " For a multi-resolution schedule this is the density derived from the penultimate"
+           " iteration; for a single-row schedule it is whatever was supplied via -rankpermm_in"
+           " (nothing is written if no such density is available).")
     + Argument("image").type_image_out()
   + Option("variance_removed",
            "the fraction of variance removed in producing the output denoised data "
@@ -368,7 +397,17 @@ void run(Header &dwi,
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
   Image<T> input_preconditioned;
 
+  // Per-voxel signal-rank density used to size the rank-adaptive reconstruction kernel. Normally
+  //   accumulated across the noise-estimation iterations below; for a single-row schedule there are
+  //   no such iterations, so an externally-supplied map (-rankpermm_in, e.g. exported by dwi2noise)
+  //   may seed it. run() rejects -rankpermm_in with a multi-row schedule, so when the iteration loop
+  //   runs it overwrites this seed (as intended) rather than mixing the two.
   Image<float> rank_per_mm;
+  {
+    auto opt_rpm_in = get_options("rankpermm_in");
+    if (!opt_rpm_in.empty())
+      rank_per_mm = Denoise::import_rank_per_mm_map(opt_rpm_in[0][0], dwi);
+  }
 
   // Random number generator for drawing temporal sub-sampling subsets.
   Math::RNG rng;
@@ -436,11 +475,7 @@ void run(Header &dwi,
     //   (m'/P), so the density must be *per partition*: rank_input is the signal rank summed over
     //   the iteration's num_partitions partitions, so divide by that count. num_partitions is the
     //   count for the iteration that produced rank_input (it may differ between iterations).
-    rank_per_mm = Image<float>::scratch(iteration_exports.max_dist, "Scratch image for rank per mm kernel radius");
-    const default_type partition_scale = default_type(num_partitions);
-    for (auto l = Loop(rank_per_mm)(iteration_exports.rank_input, iteration_exports.max_dist, rank_per_mm); l; ++l)
-      rank_per_mm.value() =
-          iteration_exports.rank_input.value() / (partition_scale * iteration_exports.max_dist.value());
+    rank_per_mm = Denoise::compute_rank_per_mm(iteration_exports.rank_input, iteration_exports.max_dist, num_partitions);
   }
 
   // Final (reconstruction) pass: the schedule's final row is validated to have
@@ -465,6 +500,23 @@ void run(Header &dwi,
   else
     input_preconditioned =
         Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+
+  // Optionally export the signal-rank density that sizes the reconstruction kernel (the same quantity
+  //   dwi2noise -rankpermm_out exports). Available only when a noise-estimation iteration derived it
+  //   or it was supplied via -rankpermm_in; a bare single-row schedule has none.
+  opt = get_options("rankpermm_out");
+  if (!opt.empty()) {
+    if (rank_per_mm.valid()) {
+      Header H_rpm(rank_per_mm);
+      Image<float> rpm_out = Image<float>::create(opt[0][0].as_text(), H_rpm);
+      for (auto l = Loop(rpm_out)(rank_per_mm, rpm_out); l; ++l)
+        rpm_out.value() = rank_per_mm.value();
+    } else {
+      WARN("-rankpermm_out: no signal-rank density is available to export "
+           "(the schedule performed no noise-estimation iteration and none was supplied via "
+           "-rankpermm_in); nothing written");
+    }
+  }
 
   auto kernel = Kernel::make_kernel(input_preconditioned,
                                     subsample->get_factors(),
@@ -800,6 +852,16 @@ void run() {
     WARN("Option -noise_in provides only an initial noise level seed for the iterative schedule; "
          "the noise map used to denoise the data is re-estimated internally and differs from the "
          "supplied image");
+
+  // -rankpermm_in seeds the reconstruction kernel's signal-rank density. A multi-resolution schedule
+  //   derives that density itself from its noise-estimation iterations, so a supplied map would only
+  //   affect the first iteration's kernel and then be discarded; reject the combination outright. The
+  //   option is meaningful with a single-row (e.g. "apriori") schedule, which has no such iteration.
+  if (!get_options("rankpermm_in").empty() && iterations.size() > 1)
+    throw Exception("Option -rankpermm_in provides a precomputed signal-rank density to size the "
+                    "reconstruction kernel and is only meaningful with a single-row schedule (e.g. "
+                    "the bundled \"apriori\" schedule); a multi-row schedule derives that density "
+                    "internally from its noise-estimation iterations");
 
   // The exclusive aggregator assigns each voxel only the result of its own patch; if the final
   //   (reconstruction) iteration sub-samples space, the majority of voxels are never the centre

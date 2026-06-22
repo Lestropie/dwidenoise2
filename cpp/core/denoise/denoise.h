@@ -89,4 +89,17 @@ Image<float> condition_noise_map(Image<float> &in,
 // The returned map is conditioned (padded) for safe cubic interpolation.
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
+// Per-voxel signal-rank density (estimated signal rank per mm of kernel radius), used to size the
+//   rank-adaptive spherical kernel (Kernel::SphereRank). Computed as
+//   rank_input / (num_partitions * max_dist), the scalar quantity accumulated across iterations in
+//   the dwidenoise2 / dwi2noise run() loops and (optionally) exported via -rankpermm_out. The
+//   returned scratch image shares the grid of max_dist (the subsample grid); voxels with a
+//   non-positive patch radius yield zero density.
+Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_dist, const ssize_t num_partitions);
+
+// Construct an externally-provided rank-per-mm map from a -rankpermm_in command-line argument
+//   (scalar value or 3D image path), mirroring import_vst_noise_map(). The map is conditioned
+//   (NaN->0 and padded) so it can be safely interpolated to size the reconstruction kernel.
+Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial);
+
 } // namespace MR::Denoise

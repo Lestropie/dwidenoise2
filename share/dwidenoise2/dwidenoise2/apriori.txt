@@ -16,10 +16,18 @@
 #
 # dwidenoise2 denoising schedule: "apriori"
 #
-# This file contains just the final line of the "default" schedule;
-# it can be used in conjunction with the default schedule for the dwi2noise command
-# and providing that noise map estimate to dwidenoise2 via the -noise_in option
-# to reproduce the same result.
+# This file contains just the final (reconstruction) line of the "default" schedule.
+# Used in conjunction with the dwi2noise command running its own default schedule, it
+# reproduces the result of a single default-schedule dwidenoise2 run. Two precomputed
+# maps must be passed from dwi2noise to dwidenoise2 for full equivalence:
+#   - the estimated noise level map, via dwidenoise2 -noise_in (this parameterises the
+#     variance-stabilising transform and fixes the noise level for denoising); and
+#   - the signal-rank density map (dwi2noise -rankpermm_out), via dwidenoise2 -rankpermm_in
+#     (this sizes the rank-adaptive reconstruction kernel; without it dwidenoise2 falls
+#     back to a fixed aspect-ratio kernel and the result will differ slightly).
+# e.g.:
+#   dwi2noise DWI.mif noise.mif -rankpermm_out rpm.mif
+#   dwidenoise2 DWI.mif out.mif -noise_in noise.mif -rankpermm_in rpm.mif -schedule apriori
 #
 spatial_subsample   kernel_multiplier   update_noise   smooth_noise
 2                   1                   false          false

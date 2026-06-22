@@ -59,6 +59,10 @@
 #                          May be true only when update_noise is true in the same
 #                          iteration (an iteration that does not (re)estimate the
 #                          noise level has no freshly estimated map to smooth).
+#                          Must be false on the final (reconstruction) row: that row's
+#                          noise map is the one applied to the data (and exported via
+#                          -noise_out), so smoothing it would make the exported / applied
+#                          map deviate from the map the PCA actually used.
 #
 spatial_subsample   kernel_multiplier   update_noise   smooth_noise
 8                   16                  true           false
