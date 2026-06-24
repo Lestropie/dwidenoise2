@@ -245,10 +245,22 @@ L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.
 Complex diffusion-weighted image estimation via matrix recovery under general noise models.
 NeuroImage 2019:200;391-404.
 
-For patches near the edge of the image FoV,
-the patch under default behaviour is dynamically increased in radius
-in order to have approximately the same number of voxels within that patch
-as a patch in the middle of the image.
+### Sliding window dynamic sizing
+
+The spatial size of the PCA kernel patch can be dynamically altered,
+driven by the following two mechanisms:
+
+1.  For patches near the edge of the image FoV,
+    the patch under default behaviour is dynamically increased in radius
+    in order to have approximately the same number of voxels within that patch
+    as would a patch in the middle of the image.
+
+2.  The kernel is resized in such a way
+    that the number of voxels in the patch
+    should be approximately the number of volumes plus the signal rank;
+    in this way the Casorati matrix should consist of a concatenation
+    of an approximately square noise block
+    and those columns constituting the signal of interest.
 
 ### Demeaning
 
