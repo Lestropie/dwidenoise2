@@ -21,4 +21,4 @@
 #   consisting of a total of around 2,000 volumes.
 #
 spatial_subsample    temporal_subsample   max_partition_size     smooth_noise
-4                    3                    384                    true
+4                    0.333333             384                    true
