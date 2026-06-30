@@ -26,6 +26,7 @@
 #include "algo/threaded_copy.h"
 #include "algo/threaded_loop.h"
 #include "denoise/estimate.h"
+#include "denoise/estimator/base.h"
 #include "denoise/estimator/estimator.h"
 #include "denoise/exports.h"
 #include "denoise/kernel/kernel.h"
@@ -41,7 +42,8 @@ namespace MR::Denoise::Iterative {
 
 struct Iteration {
   std::array<ssize_t, 3> spatial_subsample_ratios;
-  default_type kernel_size_multiplier;
+  // Per-iteration kernel sizing (type + free parameter); replaces the former kernel_size_multiplier.
+  Kernel::KernelSpec kernel;
   noise_smooth_type smooth_noiseout;
   // Fraction of volumes (along the supra-spatial axes) used for noise level estimation
   //   in this iteration; 1.0 uses all volumes. Sub-sampling is stratified by demeaning
@@ -105,12 +107,20 @@ void estimate(Image<T> &input,
   //   smallest partition (m'/P). The full volume count is passed for the shape warning only.
   //   make_kernel reads only the header, so it is valid to call before the preconditioned data
   //   are filled below.
+  // The per-iteration kernel type and free parameter come from this schedule row (config.kernel):
+  //   typically an aspect-ratio kernel for the first iteration (no rank map yet) and an RMSE-
+  //   tolerance kernel thereafter. An RMSE kernel is supplied the active estimator's predicted-RMSE
+  //   model so it can grow the patch until the noise level is estimated precisely enough.
+  Kernel::predicted_rmse_func prmse;
+  if (config.kernel.type == Kernel::kernel_spec_type::RMSE)
+    prmse = [estimator](ssize_t mm, ssize_t nn, double rr) { return estimator->predicted_rmse(mm, nn, rr); };
   auto kernel = Kernel::make_kernel(input_preconditioned,
                                     subsample->get_factors(),
-                                    config.kernel_size_multiplier,
+                                    config.kernel,
                                     rank_per_mm_image,
                                     Denoise::num_volumes(input),
-                                    num_partitions);
+                                    num_partitions,
+                                    prmse);
   kernel->set_mask(mask);
   if (preconditioner.noop())
     threaded_copy(input, input_preconditioned);

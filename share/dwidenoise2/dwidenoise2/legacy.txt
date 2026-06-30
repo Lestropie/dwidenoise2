@@ -22,5 +22,5 @@
 # to achieve that replication
 # (see example usage in dwidenoise2 command)
 #
-spatial_subsample    temporal_subsample   partitions     smooth_noise    update_noise
-1                    1                    1              false           true
+spatial_subsample    temporal_subsample   partitions     smooth_noise    update_noise    kernel
+1                    1                    1              false           true            aspect=2.0

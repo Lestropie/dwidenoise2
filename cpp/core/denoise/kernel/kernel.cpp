@@ -18,6 +18,7 @@
 #include "denoise/kernel/kernel.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "denoise/denoise.h"
 #include "denoise/kernel/base.h"
@@ -25,6 +26,7 @@
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_rank.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/kernel/sphere_rmse.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Kernel {
@@ -119,7 +121,7 @@ void warn_casorati_shape(const ssize_t n,
     //   target patch exceeds the voxels available within the image field of view.
     const ssize_t image_voxels = H.size(0) * H.size(1) * H.size(2);
     if (n > image_voxels)
-      WARN("Temporal sub-sampling in conjunction with the kernel_multiplier yields a "
+      WARN("Temporal sub-sampling yields a "
            "target spherical kernel of " + str(n) + " voxels, which exceeds the available "
            "image voxel count (" + str(image_voxels) + "); "
            "the intended Casorati matrix aspect ratio cannot be achieved");
@@ -141,10 +143,11 @@ void warn_casorati_shape(const ssize_t n,
 std::shared_ptr<Base>
 make_kernel(const Header &H,
             const std::array<ssize_t, 3> &subsample_factors,
-            const default_type size_multiplier,
+            const KernelSpec &kernel_spec,
             const Image<float> &rank_per_mm,
             const ssize_t full_num_volumes,
-            const ssize_t num_partitions) {
+            const ssize_t num_partitions,
+            const predicted_rmse_func &predicted_rmse) {
   const Kernel::shape_type shape = App::get_option_choice("shape", Kernel::shape_type::SPHERE);
   std::vector<App::ParsedOption> opt;
   std::shared_ptr<Kernel::Base> kernel;
@@ -162,32 +165,51 @@ make_kernel(const Header &H,
     // TODO Could infer that user wants a cuboid kernel if -extent is used, even if -shape is not
     if (!get_options("extent").empty())
       throw Exception("-extent option does not apply to spherical kernel");
+    // An explicit command-line kernel option overrides the schedule's per-row kernel spec.
     opt = get_options("radius");
     if (!opt.empty()) {
-      kernel = std::make_shared<SphereFixedRadius>(H, subsample_factors, default_type(opt[0][0]) * size_multiplier);
+      kernel = std::make_shared<SphereFixedRadius>(H, subsample_factors, default_type(opt[0][0]));
       volume_derived = false;
       break;
     }
     opt = get_options("aspect_ratio");
     if (!opt.empty()) {
       kernel = std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, default_type(opt[0][0]) * volumes_for_sizing * size_multiplier);
+          H, subsample_factors, ssize_t(std::lround(default_type(opt[0][0]) * volumes_for_sizing)));
       break;
     }
     opt = get_options("minvoxels");
     if (!opt.empty()) {
-      kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, ssize_t(opt[0][0]) * size_multiplier);
+      kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, ssize_t(opt[0][0]));
       break;
     }
-    // If operating in iterative mode and past the first iteration and not obeying explicit user overload,
-    //   use the rank-based kernel;
-    //   otherwise, default to the aspect ratio
-    if (rank_per_mm.valid()) {
+    // Otherwise the kernel type and its free parameter come from this iteration's schedule row.
+    switch (kernel_spec.type) {
+    case kernel_spec_type::ASPECT_RATIO:
+      // n ~ param * m voxels (rank-naive); used for the first iteration (no rank map yet).
+      kernel = std::make_shared<SphereMinVoxels>(
+          H, subsample_factors, ssize_t(std::lround(kernel_spec.param * volumes_for_sizing)));
+      break;
+    case kernel_spec_type::RMSE:
+      // Grow until the estimator's predicted sigma-RMSE meets the tolerance (floor n>=m+r, capped).
+      if (!rank_per_mm.valid())
+        throw Exception("An RMSE-tolerance kernel requires a signal-rank density map from a prior "
+                        "iteration, but none is available; the first iteration must use an "
+                        "aspect-ratio kernel");
+      if (!predicted_rmse)
+        throw Exception("An RMSE-tolerance kernel requires a noise-level estimator with a "
+                        "predicted-RMSE model; the selected estimator does not provide one");
+      kernel = std::make_shared<SphereRMSE>(H, subsample_factors, rank_per_mm, volumes_for_sizing,
+                                            kernel_spec.param, predicted_rmse);
+      break;
+    case kernel_spec_type::RANK:
+      // Square noise block n >= m + r; reserved for the final reconstruction pass.
+      if (!rank_per_mm.valid())
+        throw Exception("A rank-adaptive (square noise block) kernel requires a signal-rank density "
+                        "map from a prior iteration, but none is available");
       kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing);
       break;
     }
-    kernel = std::make_shared<SphereMinVoxels>(
-        H, subsample_factors, default_aspect_ratio * volumes_for_sizing * size_multiplier);
   } break;
   case Kernel::shape_type::CUBOID: {
     auto check_invalid_option = [](const std::string &item) {
@@ -200,6 +222,12 @@ make_kernel(const Header &H,
     opt = get_options("extent");
     std::array<ssize_t, 3> extent;
     const ssize_t toal_num_volumes = Denoise::num_volumes(H);
+    // The cuboid is a fixed-geometry kernel and cannot track signal rank; when sized automatically
+    //   it targets cuboid_factor * num_volumes voxels, taking the aspect ratio from an ASPECT_RATIO
+    //   schedule row (else a sensible non-square default of 2.0, since a near-square Casorati matrix
+    //   estimates the noise level imprecisely).
+    const default_type cuboid_factor =
+        (kernel_spec.type == kernel_spec_type::ASPECT_RATIO) ? kernel_spec.param : default_type(2.0);
     if (!opt.empty()) {
       auto userinput = parse_ints<uint32_t>(opt[0][0]);
       if (userinput.size() == 1)
@@ -216,19 +244,12 @@ make_kernel(const Header &H,
                           "(odd for no subsampling or subsampling by an odd factor; "
                           "even for subsampling by an even factor)");
       }
-      // If the size multiplier is large enough to trigger an increment in cuboid extent,
-      //   make the requisite change here
-      const ssize_t user_patch_size = extent[0] * extent[1] * extent[2];
-      do {
-        const ssize_t new_size = (extent[0] + 2) * (extent[1] + 2) * (extent[2] + 2);
-        if (new_size > size_multiplier * user_patch_size)
-          break;
-        extent = {extent[0] + 2, extent[1] + 2, extent[2] + 2};
-      } while (true);
+      // A user-specified -extent is used verbatim (the former kernel_multiplier-driven growth of
+      //   the user patch has been removed; size the patch directly via -extent).
     } else {
       extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
       ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
-      while (extent[0] * extent[1] * extent[2] < size_multiplier * std::max(toal_num_volumes, prev_num_voxels)) {
+      while (extent[0] * extent[1] * extent[2] < cuboid_factor * std::max(toal_num_volumes, prev_num_voxels)) {
         prev_num_voxels = extent[0] * extent[1] * extent[2];
         // If multiple axes are tied for spatial extent in mm, increment all of them
         const default_type min_length =

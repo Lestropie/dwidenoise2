@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "denoise/denoise.h"
@@ -64,6 +66,15 @@ public:
     result.sigma2 = 0.0;
     result.lamplus = 0.0;
     return result;
+  }
+
+  // Predicted relative RMSE of the noise level estimate; calibrated by numerical simulation of
+  //   log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n). R^2 = 0.93.
+  double predicted_rmse(const ssize_t m, const ssize_t n, const double r) const final {
+    const double lm = std::log(double(m));
+    const double ln = std::log(double(n));
+    const double lr = std::log(std::max(r, 1.0));
+    return std::exp(3.07484 - 1.01543 * lm - 1.16065 * ln + 0.69571 * lr + 0.088552 * lm * ln);
   }
 };
 

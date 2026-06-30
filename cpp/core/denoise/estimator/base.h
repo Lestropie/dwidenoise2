@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cassert>
+#include <limits>
 #include <vector>
 
 #include "denoise/denoise.h"
@@ -61,6 +62,16 @@ public:
 
   // Whether operator() for multiple partitions is implemented for this estimator.
   virtual bool supports_partitioning() const { return false; }
+
+  // Predicted relative RMSE of this estimator's noise level estimate for a Casorati matrix of m
+  //   volumes, n voxels and signal rank r (sigma = 1). Used by the RMSE-tolerance kernel to decide
+  //   how large to grow the patch. Data-driven estimators override this with a calibrated model
+  //   (log RMSE = c + p*log m + q*log n + s*log r + g*log m*log n; coefficients from numerical
+  //   simulation across m, n and signal-rank density). The default (non-data-driven estimators,
+  //   e.g. imposed sigma / unity) returns NaN: such estimators cannot size an RMSE kernel.
+  virtual double predicted_rmse(const ssize_t /*m*/, const ssize_t /*n*/, const double /*r*/) const {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
 };
 
 } // namespace MR::Denoise::Estimator

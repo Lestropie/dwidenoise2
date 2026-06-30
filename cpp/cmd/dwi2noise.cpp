@@ -472,7 +472,9 @@ void run() {
     config.spatial_subsample_ratios = {default_spatial_subsample_ratio,
                                        default_spatial_subsample_ratio,
                                        default_spatial_subsample_ratio};
-    config.kernel_size_multiplier = 1.0;
+    // Single pass, no prior rank map available: size by a (rank-naive) aspect ratio (n ~ 2m).
+    config.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
+    config.kernel.param = 2.0;
     config.smooth_noiseout = noise_smooth_type::NONE;
     config.temporal_subsample = 1.0;
     config.update_noise = true;

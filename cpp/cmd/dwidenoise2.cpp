@@ -518,12 +518,22 @@ void run(Header &dwi,
     }
   }
 
+  // Final (reconstruction) pass: kernel type/parameter from the final schedule row (a rank-adaptive
+  //   "rank" kernel by default, n >= m+r). Build the predicted-RMSE model from the estimator only if
+  //   that row uses an RMSE kernel; the estimator is still the data-driven one here (the Unity
+  //   substitution below happens afterwards).
+  Kernel::predicted_rmse_func final_prmse;
+  if (iterations.back().kernel.type == Kernel::kernel_spec_type::RMSE)
+    // Capture the estimator by value: the kernel calls this during reconstruction, after the
+    //   data-driven estimator may have been replaced below by the dummy Unity estimator.
+    final_prmse = [estimator](ssize_t mm, ssize_t nn, double rr) { return estimator->predicted_rmse(mm, nn, rr); };
   auto kernel = Kernel::make_kernel(input_preconditioned,
                                     subsample->get_factors(),
-                                    iterations.back().kernel_size_multiplier,
+                                    iterations.back().kernel,
                                     rank_per_mm,
                                     Denoise::num_volumes(input),
-                                    num_partitions);
+                                    num_partitions,
+                                    final_prmse);
   kernel->set_mask(mask);
 
   // Unless the final schedule row is configured to (re)estimate the noise level, assume the
@@ -793,7 +803,9 @@ void run() {
     const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
     Iterative::Iteration config;
     config.spatial_subsample_ratios = {f, f, f};
-    config.kernel_size_multiplier = 1.0;
+    // Single pass (no prior rank map; -fixed_rank forbids rank-dependent sizing): aspect ratio n ~ 2m.
+    config.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
+    config.kernel.param = 2.0;
     config.smooth_noiseout = noise_smooth_type::NONE;
     config.temporal_subsample = 1.0;
     config.update_noise = true; // a single-pass schedule must estimate the noise level
@@ -829,13 +841,17 @@ void run() {
   if (iterations.back().temporal_subsample < 1.0)
     throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
                     "volumes (temporal_subsample = 1); sub-sample only the noise-estimation iterations");
-  // -fixed_rank is only meaningful at a single kernel size, as the signal rank varies with it.
+  // -fixed_rank imposes a single signal rank, but the signal rank varies with kernel size; it is
+  //   therefore incompatible with any kernel whose size depends on the rank (the rank-adaptive
+  //   "rank" kernel n>=m+r, and the RMSE-tolerance kernel, which grows using the signal rank).
+  //   Only the rank-naive aspect-ratio kernel may be combined with -fixed_rank.
   if (fixed_rank) {
     for (const auto &it : iterations)
-      if (it.kernel_size_multiplier != 1.0)
-        throw Exception("Option -fixed_rank cannot be combined with a schedule that uses non-unity "
-                        "kernel_multiplier values, as the signal rank varies with kernel size; "
-                        "use a schedule whose kernel_multiplier is 1 throughout");
+      if (it.kernel.type != Kernel::kernel_spec_type::ASPECT_RATIO)
+        throw Exception("Option -fixed_rank cannot be combined with a schedule that uses a "
+                        "rank-adaptive (\"rank\") or RMSE-tolerance kernel, as the signal rank "
+                        "varies with kernel size; use a schedule whose rows all use aspect-ratio "
+                        "kernels");
   }
   // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.
   {

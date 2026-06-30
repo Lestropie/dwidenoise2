@@ -46,7 +46,7 @@ namespace {
 // Existing schedule files that omit the new column will continue to parse,
 //   taking the default; hence the format is forward-compatible.
 const std::vector<std::string> recognised_columns(
-    {"spatial_subsample", "kernel_multiplier", "smooth_noise", "temporal_subsample", "update_noise",
+    {"spatial_subsample", "kernel", "smooth_noise", "temporal_subsample", "update_noise",
      "partitions", "max_partition_size"});
 
 // Whitespace-tokenise a line (collapsing runs of whitespace, dropping empties).
@@ -79,21 +79,51 @@ noise_smooth_type parse_smooth_noise(const std::string &value, const size_t line
   return smooth ? noise_smooth_type::SMOOTH : noise_smooth_type::NONE;
 }
 
-default_type parse_kernel_multiplier(const std::string &value, const size_t lineno) {
-  default_type result = 0.0;
-  size_t consumed = 0;
-  try {
-    result = std::stod(value, &consumed);
-  } catch (std::exception &) {
-    consumed = 0;
+// The "kernel" column selects the per-iteration kernel type and its free parameter. Recognised
+//   values (the size multiplier of the former "kernel_multiplier" column is achieved instead via
+//   these per-kernel parameters):
+//   - "aspect=<ratio>" (or "aspect_ratio=<ratio>"): spherical kernel of ~ratio*m voxels (rank-naive).
+//   - "rmse=<tolerance>": spherical kernel grown until the estimator's predicted relative noise
+//                         RMSE meets <tolerance> (a small positive fraction), floored at n>=m+r.
+//   - "rank": rank-adaptive spherical kernel grown until n>=m+r (square noise block); no parameter.
+Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
+  const auto eq = value.find('=');
+  const std::string key = (eq == std::string::npos) ? value : value.substr(0, eq);
+  const std::string arg = (eq == std::string::npos) ? std::string() : value.substr(eq + 1);
+  const auto parse_pos_double = [&](const std::string &what) {
+    default_type r = 0.0;
+    size_t consumed = 0;
+    try {
+      r = std::stod(arg, &consumed);
+    } catch (std::exception &) {
+      consumed = 0;
+    }
+    if (arg.empty() || consumed != arg.size() || !(r > 0.0))
+      throw Exception("Schedule file line " + str(lineno) + ": "
+                      "kernel " + what + " must be a positive number (got \"" + value + "\")");
+    return r;
+  };
+  Kernel::KernelSpec spec;
+  if (key == "aspect" || key == "aspect_ratio") {
+    spec.type = Kernel::kernel_spec_type::ASPECT_RATIO;
+    spec.param = parse_pos_double("aspect ratio (e.g. \"aspect=2.0\")");
+  } else if (key == "rmse") {
+    spec.type = Kernel::kernel_spec_type::RMSE;
+    spec.param = parse_pos_double("RMSE tolerance (e.g. \"rmse=0.02\")");
+    if (spec.param >= 1.0)
+      throw Exception("Schedule file line " + str(lineno) + ": "
+                      "kernel RMSE tolerance must be a small fraction below 1 (got \"" + value + "\")");
+  } else if (key == "rank") {
+    if (!arg.empty())
+      throw Exception("Schedule file line " + str(lineno) + ": "
+                      "kernel \"rank\" takes no parameter (got \"" + value + "\")");
+    spec.type = Kernel::kernel_spec_type::RANK;
+  } else {
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "unrecognised kernel \"" + value + "\"; valid kernels are "
+                    "\"aspect=<ratio>\", \"rmse=<tolerance>\" and \"rank\"");
   }
-  if (consumed != value.size())
-    throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value \"" + value + "\" for column \"kernel_multiplier\" is not a valid number");
-  if (result <= 0.0)
-    throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value for column \"kernel_multiplier\" must be greater than zero (got \"" + value + "\")");
-  return result;
+  return spec;
 }
 
 std::array<ssize_t, 3> parse_spatial_subsample(const std::string &value, const size_t lineno) {
@@ -245,7 +275,7 @@ std::string resolve(const std::string &spec, const std::string &command) {
 
 // Total volume count above which use of a command's embedded default schedule prompts a
 //   "this may be slow" warning. The default schedule's coarsest passes use large
-//   (kernel_multiplier-scaled) patches whose PCA cost grows with the volume count;
+//   patches whose PCA cost grows with the volume count;
 //   beyond a few hundred volumes a lighter schedule is usually preferable.
 constexpr size_t default_schedule_slow_threshold = 255;
 
@@ -297,15 +327,17 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
     //   update_noise is resolved to a concrete value per command after loading.
     Iterative::Iteration iteration;
     iteration.spatial_subsample_ratios = {default_spatial_subsample_ratio, default_spatial_subsample_ratio, default_spatial_subsample_ratio};
-    iteration.kernel_size_multiplier = 1.0;
+    // Default kernel (when the "kernel" column is omitted): rank-naive aspect ratio n ~ 2m.
+    iteration.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
+    iteration.kernel.param = 2.0;
     iteration.smooth_noiseout = noise_smooth_type::NONE;
     for (size_t column = 0; column != header.size(); ++column) {
       const std::string &key = header[column];
       const std::string &value = tokens[column];
       if (key == "spatial_subsample")
         iteration.spatial_subsample_ratios = parse_spatial_subsample(value, lineno);
-      else if (key == "kernel_multiplier")
-        iteration.kernel_size_multiplier = parse_kernel_multiplier(value, lineno);
+      else if (key == "kernel")
+        iteration.kernel = parse_kernel(value, lineno);
       else if (key == "smooth_noise")
         iteration.smooth_noiseout = parse_smooth_noise(value, lineno);
       else if (key == "temporal_subsample")
@@ -342,6 +374,14 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
   if (result.empty())
     throw Exception("Schedule file \"" + path + "\" defines no iterations "
                     "(a column header but no data rows)");
+
+  // The first iteration has no signal-rank density from a prior iteration, so it cannot use a
+  //   rank-dependent kernel; it must use an aspect-ratio kernel (the default when "kernel" is
+  //   omitted). "rank" and "rmse" kernels are valid only from the second iteration onward.
+  if (result.front().kernel.type != Kernel::kernel_spec_type::ASPECT_RATIO)
+    throw Exception("Schedule file \"" + path + "\": the first iteration must use an aspect-ratio "
+                    "kernel (e.g. \"aspect=2.0\"); the \"rank\" and \"rmse\" kernels require a "
+                    "signal-rank density from a prior iteration and so may not appear on the first row");
 
   // Any iteration that is not the last must (re)estimate the noise level: a non-final
   //   iteration exists precisely to refine the estimate fed to the next iteration, so a

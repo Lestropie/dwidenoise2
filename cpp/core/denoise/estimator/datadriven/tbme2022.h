@@ -249,6 +249,16 @@ public:
 
   bool supports_partitioning() const final { return true; }
 
+  // Predicted relative RMSE of the noise level estimate; calibrated by numerical simulation of
+  //   log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n) over m in [30,2000], n >= m
+  //   and rank density a in [0.25,4] (sigma = 1; conservative theta = 1.5 fit). R^2 = 0.94.
+  double predicted_rmse(const ssize_t m, const ssize_t n, const double r) const final {
+    const double lm = std::log(double(m));
+    const double ln = std::log(double(n));
+    const double lr = std::log(std::max(r, 1.0));
+    return std::exp(1.77080 - 0.77121 * lm - 0.96847 * ln + 0.70667 * lr + 0.068829 * lm * ln);
+  }
+
 protected:
   const ssize_t K;
 

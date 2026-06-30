@@ -47,7 +47,19 @@
 #                          ceil(num_volumes / max_partition_size) (after any temporal
 #                          sub-sampling). "none" disables it. Default: none. Mutually
 #                          exclusive with partitions.
-#  - kernel_multiplier   : multiplier applied to the PCA patch size. Default: 1.
+#  - kernel               : the PCA patch sizing rule for this iteration. One of:
+#                            * "aspect=<ratio>"  - spherical kernel of ~ratio*m voxels (m = number
+#                              of volumes); naive to signal rank. The first iteration must use this
+#                              (no rank estimate exists yet).
+#                            * "rmse=<tolerance>" - spherical kernel grown until the estimator's
+#                              predicted relative noise-level RMSE meets <tolerance> (e.g. 0.02),
+#                              floored at the square noise block (n >= m + signal_rank) and capped.
+#                              Requires a signal-rank density from a prior iteration.
+#                            * "rank" - rank-adaptive kernel grown until n >= m + signal_rank (the
+#                              residual noise block is ~square); used for the final reconstruction.
+#                          Default (column omitted): "aspect=2.0". (Replaces the former
+#                          kernel_multiplier column; a larger patch is now requested directly via
+#                          a larger aspect ratio or a smaller RMSE tolerance.)
 #  - update_noise        : whether the noise level estimate is (re)computed in this
 #                          iteration ("true" or "false"). Must be true for any
 #                          non-final iteration. Default: true for non-final rows;
@@ -64,8 +76,8 @@
 #                          -noise_out), so smoothing it would make the exported / applied
 #                          map deviate from the map the PCA actually used.
 #
-spatial_subsample   kernel_multiplier   update_noise   smooth_noise
-8                   16                  true           false
-4                   4                   true           false
-2                   1                   true           true
-2                   1                   false          false
+spatial_subsample   kernel        update_noise   smooth_noise
+8                   aspect=2.0    true           false
+4                   rmse=0.02     true           false
+2                   rmse=0.02     true           true
+2                   rank          false          false

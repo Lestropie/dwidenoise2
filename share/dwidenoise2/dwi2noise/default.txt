@@ -46,7 +46,14 @@
 #                          ceil(num_volumes / max_partition_size) (after any temporal
 #                          sub-sampling). "none" disables it. Default: none. Mutually
 #                          exclusive with partitions.
-#  - kernel_multiplier   : multiplier applied to the PCA patch size. Default: 1.
+#  - kernel               : the PCA patch sizing rule for this iteration. One of
+#                            "aspect=<ratio>" (spherical kernel of ~ratio*m voxels; rank-naive; the
+#                            first iteration must use this), or "rmse=<tolerance>" (spherical kernel
+#                            grown until the estimator's predicted relative noise-level RMSE meets
+#                            <tolerance>, e.g. 0.02, requiring a signal-rank density from a prior
+#                            iteration). Default (column omitted): "aspect=2.0". (Replaces the former
+#                            kernel_multiplier column.) The "rank" kernel is for dwidenoise2
+#                            reconstruction only and is not used by dwi2noise.
 #  - smooth_noise        : whether to smooth the estimated noise map before it is
 #                          passed to the next iteration ("true" or "false").
 #                          Default: false.
@@ -55,7 +62,7 @@
 #   iteration produces the output map), so the "update_noise" column accepted by
 #   dwidenoise2 is not permitted here and will be rejected if present.
 #
-spatial_subsample   kernel_multiplier   smooth_noise
-8,8,8       16                  false
-4,4,4       4                   false
-2,2,2       1                   true
+spatial_subsample   kernel        smooth_noise
+8,8,8               aspect=2.0    false
+4,4,4               rmse=0.02     false
+2,2,2               rmse=0.02     true

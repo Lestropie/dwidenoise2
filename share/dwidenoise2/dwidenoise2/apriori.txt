@@ -23,11 +23,12 @@
 #   - the estimated noise level map, via dwidenoise2 -noise_in (this parameterises the
 #     variance-stabilising transform and fixes the noise level for denoising); and
 #   - the signal-rank density map (dwi2noise -rankpermm_out), via dwidenoise2 -rankpermm_in
-#     (this sizes the rank-adaptive reconstruction kernel; without it dwidenoise2 falls
-#     back to a fixed aspect-ratio kernel and the result will differ slightly).
+#     (this sizes the rank-adaptive "rank" reconstruction kernel; it is required by this
+#     schedule, whose single row uses the "rank" kernel and which therefore errors if no
+#     rank density is supplied).
 # e.g.:
 #   dwi2noise DWI.mif noise.mif -rankpermm_out rpm.mif
 #   dwidenoise2 DWI.mif out.mif -noise_in noise.mif -rankpermm_in rpm.mif -schedule apriori
 #
-spatial_subsample   kernel_multiplier   update_noise   smooth_noise
-2                   1                   false          false
+spatial_subsample   kernel   update_noise   smooth_noise
+2                   rank     false          false
