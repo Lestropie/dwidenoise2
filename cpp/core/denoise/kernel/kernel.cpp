@@ -34,13 +34,16 @@ namespace MR::Denoise::Kernel {
 using namespace App;
 
 const char *const shape_description =
+    "The shape and size of the sliding spatial window kernel are configured per schedule iteration "
+    "through the \"kernel\" column of the schedule (see the schedule file format); "
+    "there are no command-line options for configuring the kernel. "
     "The sliding spatial window behaves differently at the edges of the image FoV "
     "depending on the shape / size selected for that window. "
     "The default behaviour is to use a spherical kernel centred at the voxel of interest, "
     "whose size is some multiple of the number of input volumes; "
     "where some such voxels lie outside of the image FoV, "
     "the radius of the kernel will be increased until the requisite number of voxels are used. "
-    "For a spherical kernel of a fixed radius, "
+    "For a spherical kernel of a fixed radius (the \"radius=\" kernel), "
     "no such expansion will occur, "
     "and so for voxels near the image edge a reduced number of voxels will be present in the kernel. "
     "For a cuboid kernel, "
@@ -56,13 +59,13 @@ const char *const default_size_description =
     "is at least as large as the estimated rank of the non-noise signal at that location. "
     "For a single-iteration schedule (e.g. an iteration prior to any rank estimate being available), "
     "the size of the default spherical kernel is set to select a number of voxels that is "
-    "1.0 / 0.85 ~ 1.18 times the number of volumes in the input series. "
-    "If a cuboid kernel is requested, "
-    "but the -extent option is not specified, "
-    "the command will select the smallest isotropic patch size "
-    "that exceeds the number of DW images in the input data; "
-    "e.g., 5x5x5 for data with <= 125 DWI volumes, "
-    "7x7x7 for data with <= 343 DWI volumes, etc.";
+    "twice the number of volumes in the input series (the \"aspect=2.0\" kernel). "
+    "If a cuboid kernel is requested by a schedule row (the \"cuboid\" kernel keyword) "
+    "without an explicit extent, "
+    "the command will select the smallest near-isotropic patch size "
+    "whose voxel count is at least twice the number of DW images in the input data "
+    "(the default aspect ratio; a different ratio may be requested as \"cuboid=<ratio>x\", "
+    "e.g. \"cuboid=1x\" for a patch of at least the number of DW images).";
 
 const char *const cuboid_size_description =
     "Permissible sizes for the cuboid kernel depend on the subsampling factor. "
@@ -71,35 +74,17 @@ const char *const cuboid_size_description =
     "such that a unique voxel lies at the very centre of each kernel. "
     "If however an even subsampling factor is used, "
     "then the extent(s) of the kernel must be even, "
-    "reflecting the fact that it is a voxel corner that resides at the centre of the kernel."
-    "In either case, if the extent is specified manually, "
-    "the user can either provide a single integer---"
-    "which will determine the number of voxels in the kernel across all three spatial axes---"
-    "or a comma-separated list of three integers,"
-    "individually defining the number of voxels in the kernel for all three spatial axes.";
-
-// clang-format off
-const OptionGroup options = OptionGroup("Options for controlling the sliding spatial window kernel")
-+ Option("shape",
-         "Set the shape of the sliding spatial window. "
-         "Options are: " + Enum::join<shape_type>(",") + "; default: sphere")
-  + Argument("choice").type_choice<shape_type>()
-+ Option("radius", "Set an absolute spherical kernel radius in mm")
-  + Argument("value").type_float(0.0)
-+ Option("aspect_ratio",
-         "Set the spherical kernel size as a ratio of number of voxels to number of input volumes "
-         "(default: 1.0/0.85 ~= 1.18)")
-  + Argument("value").type_float(0.0)
-+ Option("minvoxels",
-         "Set the minimum number of voxels to be present in any spherical kernel"
-         " (each kernel will be enlarged until this number is met or exceeded)")
-  + Argument("count").type_integer(1)
-// TODO Command-line option that allows user to specify minimum absolute number of voxels in kernel
-+ Option("extent",
-         "Set the patch size of the cuboid kernel; "
-         "can be either a single integer or a comma-separated triplet of integers (see Description)")
-  + Argument("window").type_sequence_int();
-// clang-format on
+    "reflecting the fact that it is a voxel corner that resides at the centre of the kernel. "
+    "In either case, if the extent is specified manually in a schedule row, "
+    "the \"cuboid\" kernel keyword can take either a single integer---"
+    "which will determine the number of voxels in the kernel across all three spatial axes "
+    "(e.g. \"cuboid=5\")---"
+    "or a comma-separated triplet of integers "
+    "individually defining the number of voxels in the kernel for all three spatial axes "
+    "(e.g. \"cuboid=5,5,5\"). "
+    "Alternatively an aspect-ratio threshold may be given as \"cuboid=<ratio>x\" "
+    "(e.g. \"cuboid=2x\"), which auto-sizes the near-isotropic patch to contain at least "
+    "<ratio> times the number of volumes.";
 
 namespace {
 // Warn when temporal sub-sampling leaves the Casorati matrix with an unsuitable shape.
@@ -148,11 +133,10 @@ make_kernel(const Header &H,
             const ssize_t full_num_volumes,
             const ssize_t num_partitions,
             const predicted_rmse_func &predicted_rmse) {
-  const Kernel::shape_type shape = App::get_option_choice("shape", Kernel::shape_type::SPHERE);
-  std::vector<App::ParsedOption> opt;
   std::shared_ptr<Kernel::Base> kernel;
   // Whether the kernel size is derived from the volume count (true for the dynamic
-  //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / cuboid).
+  //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / fixed voxel
+  //   count / cuboid).
   bool volume_derived = true;
   // Volume count from which the dynamic (volume-derived) kernels are sized. With P partitions
   //   the patch is sized from the smallest partition (m'/P) so each partition's Casorati matrix
@@ -160,96 +144,78 @@ make_kernel(const Header &H,
   assert(num_partitions >= 1);
   const ssize_t volumes_for_sizing = std::max<ssize_t>(1, Denoise::num_volumes(H) / num_partitions);
 
-  switch (shape) {
-  case Kernel::shape_type::SPHERE: {
-    // TODO Could infer that user wants a cuboid kernel if -extent is used, even if -shape is not
-    if (!get_options("extent").empty())
-      throw Exception("-extent option does not apply to spherical kernel");
-    // An explicit command-line kernel option overrides the schedule's per-row kernel spec.
-    opt = get_options("radius");
-    if (!opt.empty()) {
-      kernel = std::make_shared<SphereFixedRadius>(H, subsample_factors, default_type(opt[0][0]));
-      volume_derived = false;
-      break;
-    }
-    opt = get_options("aspect_ratio");
-    if (!opt.empty()) {
-      kernel = std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, ssize_t(std::lround(default_type(opt[0][0]) * volumes_for_sizing)));
-      break;
-    }
-    opt = get_options("minvoxels");
-    if (!opt.empty()) {
-      kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, ssize_t(opt[0][0]));
-      break;
-    }
-    // Otherwise the kernel type and its free parameter come from this iteration's schedule row.
-    switch (kernel_spec.type) {
-    case kernel_spec_type::ASPECT_RATIO:
-      // n ~ param * m voxels (rank-naive); used for the first iteration (no rank map yet).
-      kernel = std::make_shared<SphereMinVoxels>(
-          H, subsample_factors, ssize_t(std::lround(kernel_spec.param * volumes_for_sizing)));
-      break;
-    case kernel_spec_type::RMSE:
-      // Grow until the estimator's predicted sigma-RMSE meets the tolerance (floor n>=m+r, capped).
-      if (!rank_per_mm.valid())
-        throw Exception("An RMSE-tolerance kernel requires a signal-rank density map from a prior "
-                        "iteration, but none is available; the first iteration must use an "
-                        "aspect-ratio kernel");
-      if (!predicted_rmse)
-        throw Exception("An RMSE-tolerance kernel requires a noise-level estimator with a "
-                        "predicted-RMSE model; the selected estimator does not provide one");
-      kernel = std::make_shared<SphereRMSE>(H, subsample_factors, rank_per_mm, volumes_for_sizing,
-                                            kernel_spec.param, predicted_rmse);
-      break;
-    case kernel_spec_type::RANK:
-      // Square noise block n >= m + r; reserved for the final reconstruction pass.
-      if (!rank_per_mm.valid())
-        throw Exception("A rank-adaptive (square noise block) kernel requires a signal-rank density "
-                        "map from a prior iteration, but none is available");
-      kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing);
-      break;
-    }
-  } break;
-  case Kernel::shape_type::CUBOID: {
-    auto check_invalid_option = [](const std::string &item) {
-      if (!get_options(item).empty())
-        throw Exception("-" + item + " option is inapplicable if cuboid kernel shape is selected");
-    };
-    check_invalid_option("radius");
-    check_invalid_option("aspect_ratio");
-    check_invalid_option("minvoxels");
-    opt = get_options("extent");
+  // Every attribute of the kernel (shape and size) is taken from this iteration's schedule row
+  //   (kernel_spec); there are no longer any command-line kernel options to override it.
+  switch (kernel_spec.type) {
+  case kernel_spec_type::ASPECT_RATIO:
+    // n ~ param * m voxels (rank-naive); the first iteration uses this (no rank map yet).
+    kernel = std::make_shared<SphereMinVoxels>(
+        H, subsample_factors, ssize_t(std::lround(kernel_spec.param * volumes_for_sizing)));
+    break;
+  case kernel_spec_type::VOXELS:
+    // Fixed, absolute minimum voxel count (independent of the volume count).
+    kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, ssize_t(std::lround(kernel_spec.param)));
+    volume_derived = false;
+    break;
+  case kernel_spec_type::RADIUS:
+    // Fixed spherical radius in mm.
+    kernel = std::make_shared<SphereFixedRadius>(H, subsample_factors, kernel_spec.param);
+    volume_derived = false;
+    break;
+  case kernel_spec_type::RMSE:
+    // Grow until the estimator's predicted sigma-RMSE meets the tolerance (floor n>=m+r, capped).
+    if (!rank_per_mm.valid())
+      throw Exception("An RMSE-tolerance kernel requires a signal-rank density map from a prior iteration,"
+                      " but none is available");
+    if (!predicted_rmse)
+      throw Exception("An RMSE-tolerance kernel requires a noise-level estimator with a "
+                      "predicted-RMSE model; the selected estimator does not provide one");
+    kernel = std::make_shared<SphereRMSE>(H, subsample_factors, rank_per_mm, volumes_for_sizing,
+                                          kernel_spec.param, predicted_rmse);
+    break;
+  case kernel_spec_type::RANK:
+    // Square noise block n >= m + r; reserved for the final reconstruction pass.
+    if (!rank_per_mm.valid())
+      throw Exception("A rank-adaptive (square noise block) kernel requires a signal-rank density "
+                      "map from a prior iteration, but none is available");
+    kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing);
+    break;
+  case kernel_spec_type::RANK_FIXED: {
+    // n = m + r spherical kernel for the imposed fixed-rank estimator; r is the fixed signal rank
+    //   supplied via dwidenoise2 -fixed_rank (a constant, not a per-voxel data-driven density).
+    auto opt = get_options("fixed_rank");
+    if (opt.empty())
+      throw Exception("The \"rank_fixed\" kernel (n = m + r) is applicable only when a fixed signal "
+                      "rank is imposed via -fixed_rank");
+    const ssize_t r = ssize_t(opt[0][0]);
+    kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, volumes_for_sizing + r);
+    break;
+  }
+  case kernel_spec_type::CUBOID: {
     std::array<ssize_t, 3> extent;
-    const ssize_t toal_num_volumes = Denoise::num_volumes(H);
-    // The cuboid is a fixed-geometry kernel and cannot track signal rank; when sized automatically
-    //   it targets cuboid_factor * num_volumes voxels, taking the aspect ratio from an ASPECT_RATIO
-    //   schedule row (else a sensible non-square default of 2.0, since a near-square Casorati matrix
-    //   estimates the noise level imprecisely).
-    const default_type cuboid_factor =
-        (kernel_spec.type == kernel_spec_type::ASPECT_RATIO) ? kernel_spec.param : default_type(2.0);
-    if (!opt.empty()) {
-      auto userinput = parse_ints<uint32_t>(opt[0][0]);
-      if (userinput.size() == 1)
-        extent = {userinput[0], userinput[0], userinput[0]};
-      else if (userinput.size() == 3)
-        extent = {userinput[0], userinput[1], userinput[2]};
-      else
-        throw Exception("-extent must be either a scalar or a list of length 3");
+    const ssize_t total_num_volumes = Denoise::num_volumes(H);
+    if (kernel_spec.extent[0] != 0) {
+      // Explicit extent from the schedule row; validate geometry against the runtime image and
+      //   subsampling factors (this cannot be checked at schedule-parse time).
+      extent = kernel_spec.extent;
       for (ssize_t axis = 0; axis < 3; ++axis) {
         if (extent[axis] > H.size(axis))
-          throw Exception("-extent must not exceed the image dimensions");
+          throw Exception("Cuboid kernel extent must not exceed the image dimensions");
         if ((subsample_factors[axis] & 1) != (extent[axis] & 1))
-          throw Exception("-extent must match subsampling factors "
+          throw Exception("Cuboid kernel extent must match subsampling factors "
                           "(odd for no subsampling or subsampling by an odd factor; "
                           "even for subsampling by an even factor)");
       }
-      // A user-specified -extent is used verbatim (the former kernel_multiplier-driven growth of
-      //   the user patch has been removed; size the patch directly via -extent).
     } else {
+      // Automatic sizing to an aspect-ratio threshold: the cuboid is a fixed-geometry kernel and
+      //   cannot track signal rank, so grow the near-isotropic patch until it contains at least
+      //   kernel_spec.param * num_volumes voxels (param is the schedule row's "cuboid=<ratio>x"
+      //   aspect ratio; the bundled default is 2.0, since a near-square Casorati matrix estimates
+      //   the noise level imprecisely).
+      const default_type cuboid_factor = kernel_spec.param;
       extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
       ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
-      while (extent[0] * extent[1] * extent[2] < cuboid_factor * std::max(toal_num_volumes, prev_num_voxels)) {
+      while (extent[0] * extent[1] * extent[2] < cuboid_factor * std::max(total_num_volumes, prev_num_voxels)) {
         prev_num_voxels = extent[0] * extent[1] * extent[2];
         // If multiple axes are tied for spatial extent in mm, increment all of them
         const default_type min_length =
@@ -262,7 +228,7 @@ make_kernel(const Header &H,
     }
     INFO("selected cuboid patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]));
 
-    if (std::min(toal_num_volumes, extent[0] * extent[1] * extent[2]) < 15) {
+    if (std::min(total_num_volumes, extent[0] * extent[1] * extent[2]) < 15) {
       WARN("The number of volumes or the patch size is small; "
            "this may lead to discretisation effects in the noise level "
            "and cause inconsistent denoising between adjacent voxels");

@@ -239,6 +239,12 @@ compared to a cuboid kernel with the same number of voxels,
 the maximal distance of any voxel to the centre of the patch is reduced.
 The kernel is isotropic in realspace, and therefore suitably accounts for anisotropic voxels.
 
+The shape and size of the sliding-window kernel are configured entirely through the `kernel`
+column of the (per-iteration) schedule; there are no command-line options for the kernel.
+A bespoke kernel (e.g. a fixed radius `radius=<mm>`, a fixed voxel count `voxels=<count>`,
+or a `cuboid`) is obtained by authoring a schedule file rather than passing command-line flags
+(see the schedule file format in the command help).
+
 This was first shown for diffusion MRI denoising in the following manuscript:
 
 L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.

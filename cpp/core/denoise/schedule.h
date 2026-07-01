@@ -56,6 +56,12 @@ std::vector<Iterative::Iteration> load(const std::string &command);
 //   this replaces the schedule that was previously hard-coded into each command.
 std::vector<Iterative::Iteration> load_default(const std::string &command);
 
+// Load a specific bundled schedule of the command by name (e.g. "fixedrank"), independently of
+//   the -schedule option. Used when a command engages a dedicated bundled schedule as its default
+//   in a particular mode of operation (e.g. dwidenoise2 -fixed_rank, whose single-pass n=m+r
+//   schedule is bundled as "fixedrank"). Resolves to "<bundled directory>/<command>/<name>.txt".
+std::vector<Iterative::Iteration> load_bundled(const std::string &command, const std::string &name);
+
 // Issue a warning when a command's bundled default noise estimation schedule is used on a
 //   dataset large enough that the full multi-resolution default may be slow, suggesting a
 //   lighter -schedule. "num_volumes" is the total number of volumes implied by the input

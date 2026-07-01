@@ -139,8 +139,11 @@ void usage() {
 
   EXAMPLES
   + Example("To approximately replicate the behaviour of the original dwidenoise command",
-            "dwidenoise2 DWI.mif out.mif -shape cuboid -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive -schedule legacy",
-            "While this is neither guaranteed to match exactly the output of the original dwidenoise command"
+            "dwidenoise2 DWI.mif out.mif -vst_method none -demodulate none -demean none -filter truncate -aggregator exclusive -schedule legacy",
+            "The bundled \"legacy\" schedule selects the cuboid sliding-window kernel used by the"
+            " original command (there are no command-line kernel options; kernel shape and size are"
+            " configured through the schedule)."
+            " While this is neither guaranteed to match exactly the output of the original dwidenoise command"
             " nor is it a recommended use case,"
             " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
             " that must be explicitly disabled in order to approximate that behaviour.")
@@ -216,12 +219,12 @@ void usage() {
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
     "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
 
-  + "* If using -estimator mrm2023: "
+  + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
     "Magnetic Resonance in Medicine, 2023, 89(3), 1160-1172"
 
-  + "* If using -estimator tbme2022 (the default): "
+  + "* If using -estimator tbme2022: "
     "Zhu, W.; Ma, X.; Zhu, X.-H.; Ugurbil, K.; Chen, W.; Wu, X. "
     "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
     "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"
@@ -245,7 +248,6 @@ void usage() {
   + datatype_option
   + decomposition_option
   + Estimator::estimator_denoise_options
-  + Kernel::options
   + Option("rankpermm_in",
            "Import a precomputed signal-rank density (signal rank per mm of kernel radius),"
            " either as a scalar value or as a 3D image (e.g. exported by dwi2noise -rankpermm_out),"
@@ -779,9 +781,9 @@ void run() {
   // Resolve the iteration schedule. When the user supplies -schedule it is the single
   //   source of truth for both the spatial and temporal sub-sampling of each iteration;
   //   otherwise the command's bundled default schedule is loaded from file (Schedule::load_default).
-  //   "one-pass" operation is simply a single-row schedule. -fixed_rank imposes the signal
-  //   rank at a single kernel size, and -vst_method none removes the coupling between
-  //   iterations; either reduces to a single-iteration schedule.
+  //   "one-pass" operation is simply a single-row schedule. -fixed_rank imposes a constant signal
+  //   rank and reduces to a dedicated single-pass schedule (see below); -vst_method none removes
+  //   the coupling between iterations and likewise reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   const bool fixed_rank = !get_options("fixed_rank").empty();
   if (Schedule::requested()) {
@@ -795,15 +797,21 @@ void run() {
                       "one row: without a variance-stabilising transform there is no coupling "
                       "between iterations for the additional schedule rows to control; "
                       "use a single-row schedule");
-  } else if (vst_none || fixed_rank) {
-    if (vst_none)
-      WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-           "refining the noise level estimate would have no effect on subsequent iterations "
-           "and is therefore wasted computation; performing a single pass instead");
+  } else if (fixed_rank) {
+    // -fixed_rank selects the imposed (constant) fixed-rank estimator. A fixed rank does not yield
+    //   a robust data-driven noise level, so its estimate is not used to refine the
+    //   variance-stabilising transform: this is a single denoising pass, not an iterative schedule.
+    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_fixed"
+    //   kernel, which reads r from -fixed_rank).
+    iterations = Schedule::load_bundled("dwidenoise2", "fixedrank");
+  } else if (vst_none) {
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
+         "refining the noise level estimate would have no effect on subsequent iterations "
+         "and is therefore wasted computation; performing a single pass instead");
     const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
     Iterative::Iteration config;
     config.spatial_subsample_ratios = {f, f, f};
-    // Single pass (no prior rank map; -fixed_rank forbids rank-dependent sizing): aspect ratio n ~ 2m.
+    // Single pass (no prior rank map): aspect ratio n ~ 2m.
     config.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
     config.kernel.param = 2.0;
     config.smooth_noiseout = noise_smooth_type::NONE;
@@ -841,17 +849,28 @@ void run() {
   if (iterations.back().temporal_subsample < 1.0)
     throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
                     "volumes (temporal_subsample = 1); sub-sample only the noise-estimation iterations");
-  // -fixed_rank imposes a single signal rank, but the signal rank varies with kernel size; it is
-  //   therefore incompatible with any kernel whose size depends on the rank (the rank-adaptive
-  //   "rank" kernel n>=m+r, and the RMSE-tolerance kernel, which grows using the signal rank).
-  //   Only the rank-naive aspect-ratio kernel may be combined with -fixed_rank.
+  // -fixed_rank is a single denoising pass with the imposed fixed-rank estimator, sized to the
+  //   n = m + r ("rank_fixed") kernel. Its noise level estimate is not robust enough to drive the
+  //   variance-stabilising transform, so multi-row (iterative) schedules are disallowed; and every
+  //   row must use the "rank_fixed" kernel (the default bundled "fixedrank" schedule satisfies
+  //   both when -fixed_rank is given without -schedule).
   if (fixed_rank) {
+    if (iterations.size() > 1)
+      throw Exception("Option -fixed_rank performs a single denoising pass (a fixed-rank noise level "
+                      "estimate is not used to refine the variance-stabilising transform) and cannot "
+                      "be combined with a multi-row schedule; use the bundled single-row \"fixedrank\" "
+                      "schedule (the default when -fixed_rank is given without -schedule)");
     for (const auto &it : iterations)
-      if (it.kernel.type != Kernel::kernel_spec_type::ASPECT_RATIO)
-        throw Exception("Option -fixed_rank cannot be combined with a schedule that uses a "
-                        "rank-adaptive (\"rank\") or RMSE-tolerance kernel, as the signal rank "
-                        "varies with kernel size; use a schedule whose rows all use aspect-ratio "
-                        "kernels");
+      if (it.kernel.type != Kernel::kernel_spec_type::RANK_FIXED)
+        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_fixed\" (n = m + r) "
+                        "kernel; use the bundled \"fixedrank\" schedule (the default when -fixed_rank "
+                        "is given without -schedule)");
+  } else {
+    // The "rank_fixed" kernel (n = m + r) has no defined r without an imposed fixed rank.
+    for (const auto &it : iterations)
+      if (it.kernel.type == Kernel::kernel_spec_type::RANK_FIXED)
+        throw Exception("A schedule uses the \"rank_fixed\" kernel (n = m + r) but no fixed signal rank "
+                        "was provided; supply -fixed_rank <value> (or use a different kernel)");
   }
   // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.
   {

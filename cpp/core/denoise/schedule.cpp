@@ -79,13 +79,30 @@ noise_smooth_type parse_smooth_noise(const std::string &value, const size_t line
   return smooth ? noise_smooth_type::SMOOTH : noise_smooth_type::NONE;
 }
 
-// The "kernel" column selects the per-iteration kernel type and its free parameter. Recognised
-//   values (the size multiplier of the former "kernel_multiplier" column is achieved instead via
-//   these per-kernel parameters):
+// The "kernel" column selects the per-iteration kernel shape and size. Every attribute of the
+//   sliding-window kernel is expressed here; there are no command-line kernel options. Recognised
+//   values:
 //   - "aspect=<ratio>" (or "aspect_ratio=<ratio>"): spherical kernel of ~ratio*m voxels (rank-naive).
 //   - "rmse=<tolerance>": spherical kernel grown until the estimator's predicted relative noise
 //                         RMSE meets <tolerance> (a small positive fraction), floored at n>=m+r.
+//                         Requires a signal-rank density from a prior iteration.
 //   - "rank": rank-adaptive spherical kernel grown until n>=m+r (square noise block); no parameter.
+//             Requires a signal-rank density from a prior iteration.
+//   - "radius=<mm>": fixed-radius spherical kernel of <mm> millimetres (rank-naive; replaces the
+//                    former -radius command-line option).
+//   - "voxels=<count>": spherical kernel enlarged until it contains at least <count> voxels, an
+//                       absolute count independent of the volume count (replaces -minvoxels).
+//   - cuboid kernel (replaces -shape cuboid / -extent), one of:
+//       * "cuboid=<x>,<y>,<z>" : explicit per-axis voxel counts;
+//       * "cuboid=<n>"         : isotropic voxel count (n x n x n);
+//       * "cuboid=<ratio>x"    : aspect-ratio threshold - auto-grow the near-isotropic patch until
+//                                it holds at least ratio*m voxels (the trailing "x" marks a ratio,
+//                                e.g. "cuboid=2x", distinguishing it from a voxel count);
+//       * "cuboid"             : shorthand for "cuboid=2x".
+//     Extent-vs-subsampling parity is validated at run time, not here.
+//   - "rank_fixed": spherical kernel of exactly n=m+r voxels for the imposed fixed-rank estimator;
+//                   r comes from dwidenoise2 -fixed_rank (so this kernel is meaningful only with
+//                   that option). No parameter.
 Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
   const auto eq = value.find('=');
   const std::string key = (eq == std::string::npos) ? value : value.substr(0, eq);
@@ -103,6 +120,11 @@ Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
                       "kernel " + what + " must be a positive number (got \"" + value + "\")");
     return r;
   };
+  const auto reject_arg = [&](const std::string &kern) {
+    if (!arg.empty())
+      throw Exception("Schedule file line " + str(lineno) + ": "
+                      "kernel \"" + kern + "\" takes no parameter (got \"" + value + "\")");
+  };
   Kernel::KernelSpec spec;
   if (key == "aspect" || key == "aspect_ratio") {
     spec.type = Kernel::kernel_spec_type::ASPECT_RATIO;
@@ -114,14 +136,69 @@ Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
       throw Exception("Schedule file line " + str(lineno) + ": "
                       "kernel RMSE tolerance must be a small fraction below 1 (got \"" + value + "\")");
   } else if (key == "rank") {
-    if (!arg.empty())
-      throw Exception("Schedule file line " + str(lineno) + ": "
-                      "kernel \"rank\" takes no parameter (got \"" + value + "\")");
+    reject_arg("rank");
     spec.type = Kernel::kernel_spec_type::RANK;
+  } else if (key == "radius") {
+    spec.type = Kernel::kernel_spec_type::RADIUS;
+    spec.param = parse_pos_double("radius in mm (e.g. \"radius=5\")");
+  } else if (key == "voxels") {
+    spec.type = Kernel::kernel_spec_type::VOXELS;
+    spec.param = parse_pos_double("voxel count (e.g. \"voxels=100\")");
+  } else if (key == "cuboid") {
+    spec.type = Kernel::kernel_spec_type::CUBOID;
+    if (arg.empty()) {
+      // Bare "cuboid": auto-size to the default aspect ratio (grow until n >= 2*m voxels).
+      spec.extent = {0, 0, 0};
+      spec.param = 2.0;
+    } else if (arg.back() == 'x') {
+      // "cuboid=<ratio>x": auto-size until the voxel count reaches ratio * m (an aspect-ratio
+      //   threshold, e.g. "cuboid=2x"). The trailing 'x' distinguishes a ratio from a voxel count.
+      const std::string ratio_str = arg.substr(0, arg.size() - 1);
+      default_type ratio = 0.0;
+      size_t consumed = 0;
+      try {
+        ratio = std::stod(ratio_str, &consumed);
+      } catch (std::exception &) {
+        consumed = 0;
+      }
+      if (ratio_str.empty() || consumed != ratio_str.size() || !(ratio > 0.0))
+        throw Exception("Schedule file line " + str(lineno) + ": "
+                        "cuboid aspect ratio must be a positive number followed by \"x\" "
+                        "(e.g. \"cuboid=2x\"); got \"" + value + "\"");
+      spec.extent = {0, 0, 0};
+      spec.param = ratio;
+    } else {
+      // Explicit voxel extent: a single integer (isotropic) or a comma-separated triplet.
+      std::vector<ssize_t> ext;
+      try {
+        ext = parse_ints<ssize_t>(arg);
+      } catch (Exception &) {
+        throw Exception("Schedule file line " + str(lineno) + ": "
+                        "cuboid \"" + arg + "\" must be an integer, a comma-separated triplet of "
+                        "integers, or an aspect ratio of the form \"<ratio>x\" "
+                        "(e.g. \"cuboid=5\", \"cuboid=5,5,5\" or \"cuboid=2x\")");
+      }
+      if (ext.size() == 1)
+        spec.extent = {ext[0], ext[0], ext[0]};
+      else if (ext.size() == 3)
+        spec.extent = {ext[0], ext[1], ext[2]};
+      else
+        throw Exception("Schedule file line " + str(lineno) + ": "
+                        "cuboid extent must be a single integer or a triplet (got " + str(ext.size()) +
+                        " values)");
+      for (ssize_t axis = 0; axis != 3; ++axis)
+        if (spec.extent[axis] < 1)
+          throw Exception("Schedule file line " + str(lineno) + ": "
+                          "cuboid extent values must be positive integers (got \"" + value + "\")");
+    }
+  } else if (key == "rank_fixed") {
+    reject_arg("rank_fixed");
+    spec.type = Kernel::kernel_spec_type::RANK_FIXED;
   } else {
     throw Exception("Schedule file line " + str(lineno) + ": "
                     "unrecognised kernel \"" + value + "\"; valid kernels are "
-                    "\"aspect=<ratio>\", \"rmse=<tolerance>\" and \"rank\"");
+                    "\"aspect=<ratio>\", \"rmse=<tolerance>\", \"rank\", \"radius=<mm>\", "
+                    "\"voxels=<count>\", \"cuboid\"[=<extent>] and \"rank_fixed\"");
   }
   return spec;
 }
@@ -376,12 +453,14 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
                     "(a column header but no data rows)");
 
   // The first iteration has no signal-rank density from a prior iteration, so it cannot use a
-  //   rank-dependent kernel; it must use an aspect-ratio kernel (the default when "kernel" is
-  //   omitted). "rank" and "rmse" kernels are valid only from the second iteration onward.
-  if (result.front().kernel.type != Kernel::kernel_spec_type::ASPECT_RATIO)
-    throw Exception("Schedule file \"" + path + "\": the first iteration must use an aspect-ratio "
-                    "kernel (e.g. \"aspect=2.0\"); the \"rank\" and \"rmse\" kernels require a "
-                    "signal-rank density from a prior iteration and so may not appear on the first row");
+  //   rank-dependent kernel ("rank" or "rmse"). All rank-naive kernels (the default "aspect",
+  //   "radius", "voxels", "cuboid" and "rank_fixed") are permitted on the first row.
+  if (result.front().kernel.type == Kernel::kernel_spec_type::RMSE ||
+      result.front().kernel.type == Kernel::kernel_spec_type::RANK)
+    throw Exception("Schedule file \"" + path + "\": the first iteration may not use the \"rmse\" or "
+                    "\"rank\" kernel; these require a signal-rank density from a prior iteration. "
+                    "Use a rank-naive kernel on the first row (e.g. \"aspect=2.0\", \"radius=<mm>\", "
+                    "\"voxels=<count>\" or \"cuboid\")");
 
   // Any iteration that is not the last must (re)estimate the noise level: a non-final
   //   iteration exists precisely to refine the estimate fed to the next iteration, so a
@@ -448,6 +527,17 @@ std::vector<Iterative::Iteration> load_default(const std::string &command) {
   std::vector<Iterative::Iteration> schedule = parse(path, command);
   INFO("Using bundled default noise estimation schedule \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
+  return schedule;
+}
+
+std::vector<Iterative::Iteration> load_bundled(const std::string &command, const std::string &name) {
+  const std::string path = (std::filesystem::path(bundled_directory(command)) / (name + ".txt")).string();
+  if (!std::ifstream(path).good())
+    throw Exception("Unable to locate the bundled \"" + name + "\" noise estimation schedule for command \"" +
+                    command + "\" (expected at \"" + path + "\"); the software installation may be incomplete");
+  std::vector<Iterative::Iteration> schedule = parse(path, command);
+  INFO("Using bundled \"" + name + "\" noise estimation schedule \"" + path + "\" (" + str(schedule.size()) +
+       " iteration" + (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
 }
 

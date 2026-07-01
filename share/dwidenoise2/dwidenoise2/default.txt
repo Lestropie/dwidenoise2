@@ -57,6 +57,18 @@
 #                              Requires a signal-rank density from a prior iteration.
 #                            * "rank" - rank-adaptive kernel grown until n >= m + signal_rank (the
 #                              residual noise block is ~square); used for the final reconstruction.
+#                            * "radius=<mm>" - fixed-radius spherical kernel of <mm> millimetres
+#                              (rank-naive; replaces the former -radius command-line option).
+#                            * "voxels=<count>" - spherical kernel enlarged until it contains at
+#                              least <count> voxels, an absolute count independent of the volume
+#                              count (replaces the former -minvoxels command-line option).
+#                            * cuboid kernel (replaces -shape cuboid / -extent):
+#                              "cuboid=<x>,<y>,<z>" (per-axis voxel counts), "cuboid=<n>" (isotropic
+#                              n x n x n), "cuboid=<ratio>x" (auto-size to >= ratio*m voxels, e.g.
+#                              "cuboid=2x"), or bare "cuboid" (= "cuboid=2x").
+#                          The sliding-window kernel (shape and size) is configured entirely here;
+#                          there are no command-line kernel options. ("rank_fixed", an n=m+r kernel,
+#                          also exists but is specific to dwidenoise2 -fixed_rank.)
 #                          Default (column omitted): "aspect=2.0". (Replaces the former
 #                          kernel_multiplier column; a larger patch is now requested directly via
 #                          a larger aspect ratio or a smaller RMSE tolerance.)

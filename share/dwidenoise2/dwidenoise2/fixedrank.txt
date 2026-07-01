@@ -1,0 +1,34 @@
+# Required Notice: Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;
+# Required Notice: The Florey Institute of Neuroscience and Mental Health.
+#
+# Licensed under the PolyForm Noncommercial License 1.0.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
+#
+#     https://polyformproject.org/licenses/noncommercial/1.0.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied.
+# See the License of the specific language
+# governing permissions and limitations under the License.
+#
+# dwidenoise2 denoising schedule: "fixedrank"
+#
+# This is the schedule engaged by default when a fixed signal rank is imposed via
+# dwidenoise2 -fixed_rank (i.e. when -fixed_rank is given without an explicit -schedule).
+#
+# A fixed rank imposes a constant number of signal components rather than estimating the
+# noise level from the data. Such a fixed-rank noise level estimate is not robust enough to
+# drive the variance-stabilising transform, so this is a single denoising pass: there is no
+# iterative multi-resolution refinement (that would only propagate an unreliable estimate).
+#
+# The single row uses the "rank_fixed" kernel, which sizes the spherical patch to exactly
+# n = m + r voxels (m = number of volumes, r = the imposed fixed rank read from -fixed_rank),
+# so that the residual noise block of the Casorati matrix is approximately square. It performs
+# unity spatial sub-sampling so that every output voxel is reconstructed regardless of the
+# selected aggregator.
+#
+spatial_subsample   kernel       update_noise   smooth_noise
+1                   rank_fixed   true           false

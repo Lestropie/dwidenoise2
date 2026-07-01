@@ -22,5 +22,11 @@
 # to achieve that replication
 # (see example usage in dwidenoise2 command)
 #
+# The legacy dwidenoise command used a cuboid sliding-window kernel sized to the smallest patch
+# exceeding the number of DW volumes (n >= m), so this schedule selects "cuboid=1x": a cuboid
+# auto-sized to an aspect ratio of 1 (at least m voxels). The "cuboid" keyword replaces the former
+# -shape cuboid command-line option; "=1x" replaces its implicit n >= m sizing (bare "cuboid"
+# would instead target n >= 2m).
+#
 spatial_subsample    temporal_subsample   partitions     smooth_noise    update_noise    kernel
-1                    1                    1              false           true            aspect=2.0
+1                    1                    1              false           true            cuboid=1x

@@ -138,12 +138,12 @@ void usage() {
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
     "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
 
-  + "* If using -estimator mrm2023: "
+  + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
     "Magnetic Resonance in Medicine, 2023, 89(3), 1160-1172"
 
-  + "* If using -estimator tbme2022 (the default): "
+  + "* If using -estimator tbme2022: "
     "Zhu, W.; Ma, X.; Zhu, X.-H.; Ugurbil, K.; Chen, W.; Wu, X. "
     "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
     "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"
@@ -168,7 +168,6 @@ void usage() {
            " the schedule then refines the estimate (for a multi-stage schedule the supplied"
            " image is only an initial seed, not the final estimated output)")
     + Argument("value/image").type_float(0.0).type_image_in()
-  + Kernel::options
   + Schedule::schedule_option
   + precondition_options(false)
 

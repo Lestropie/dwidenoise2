@@ -52,7 +52,12 @@ const OptionGroup estimator_denoise_options =
       + Argument("value/image").type_float(0.0).type_image_in()
 
     + Option("fixed_rank",
-             "set a fixed input signal rank rather than estimating the noise level from the data")
+             "impose a fixed input signal rank rather than estimating the noise level from the data. "
+             "This selects the fixed-rank estimator (mutually exclusive with -estimator) and performs "
+             "a single denoising pass with a spherical kernel sized to n = m + r voxels "
+             "(the bundled \"fixedrank\" schedule); a fixed-rank noise level is not robust enough to "
+             "drive an iterative variance-stabilising transform, so no multi-resolution refinement is "
+             "performed")
       + Argument("value").type_integer(1);
 
 std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool permit_bypass) {
