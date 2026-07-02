@@ -63,7 +63,7 @@ double estimate_sigma_mad(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   const size_t mid = d.size() / 2;
   std::nth_element(d.begin(), d.begin() + mid, d.end());
   const double median_abs_diff = d[mid];
-  return median_abs_diff / 0.6744897501960817 / std::sqrt(2.0); // 0.6745 = Phi^{-1}(0.75)
+  return median_abs_diff / 0.6744897501960817 / Math::sqrt2; // 0.6745 = Phi^{-1}(0.75)
 }
 
 // 2x box-downsample of a plane (2x2 average, clamped at the far edge for odd sizes). The first
@@ -118,7 +118,7 @@ void upsample_phase(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
       const double w11 = fx * fy;
       const double r = w00 * pr_c(I0, J0) + w10 * pr_c(I1, J0) + w01 * pr_c(I0, J1) + w11 * pr_c(I1, J1);
       const double im = w00 * pi_c(I0, J0) + w10 * pi_c(I1, J0) + w01 * pi_c(I0, J1) + w11 * pi_c(I1, J1);
-      const double mag = std::sqrt(Math::pow2(r) + Math::pow2(im));
+      const double mag = std::hypot(r, im);
       if (mag > std::numeric_limits<double>::min() * 1e3) {
         pr(i, j) = r / mag;
         pi(i, j) = im / mag;
@@ -385,7 +385,7 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   // --- Extract unit-magnitude phase -----------------------------------------------------
   for (ssize_t j = 0; j != Ny; ++j)
     for (ssize_t i = 0; i != Nx; ++i) {
-      const double mag = std::sqrt(Math::pow2(ur(i, j)) + Math::pow2(ui(i, j)));
+      const double mag = std::hypot(ur(i, j), ui(i, j));
       if (mag > std::numeric_limits<double>::min() * 1e3) {
         phase_r(i, j) = ur(i, j) / mag;
         phase_i(i, j) = ui(i, j) / mag;
