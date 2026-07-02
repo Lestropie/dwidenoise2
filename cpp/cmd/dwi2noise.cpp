@@ -138,6 +138,11 @@ void usage() {
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
     "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
 
+  + "* If denoising complex data without changing -demodulate from its default (apc): "
+    "Pizzolato, M.; Gilbert, G.; Thiran, J.-P.; Descoteaux, M.; Deriche, R. "
+    "Adaptive phase correction of diffusion-weighted images. "
+    "NeuroImage, 2020, 206, 116274, doi: 10.1016/j.neuroimage.2019.116274"
+
   + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
@@ -277,7 +282,7 @@ void run(Header &dwi,
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
                       " partitions); choose a different -estimator or remove partitioning from the schedule");
     preconditioner.set_partitioning_active(num_partitions > 1);
-    preconditioner.update_vst_parameters(vst_image, input);
+    preconditioner.update_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
         Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
@@ -334,7 +339,7 @@ void run(Header &dwi,
                     "(final schedule row requests " + str(num_partitions) +
                     " partitions); choose a different -estimator or remove partitioning from the schedule");
   preconditioner.set_partitioning_active(num_partitions > 1);
-  preconditioner.update_vst_parameters(vst_image, input);
+  preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
   input_preconditioned =
       Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");

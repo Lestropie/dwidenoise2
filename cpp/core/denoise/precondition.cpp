@@ -39,14 +39,23 @@ namespace MR::Denoise {
 
 const char *const demodulation_description =
     "If the input data are of complex type, "
-    "then a smooth non-linear phase will be demodulated removed from each k-space prior to PCA. "
+    "then a smooth phase is demodulated from each k-space prior to PCA, "
+    "so that the residual phase is coherent across volumes and the Casorati matrix remains low-rank. "
     "In the absence of metadata indicating otherwise, "
     "it is inferred that the first two axes correspond to acquired slices, "
     "and different slices / volumes will be demodulated individually; "
     "this behaviour can be modified using the -demod_axes option. "
-    "A strictly linear phase term can instead be regressed from each k-space, "
-    "similarly to performed in Cordero-Grande et al. 2019, "
-    "by specifying -demodulate linear.";
+    "The method of phase estimation is selected with -demodulate. "
+    "The default 'apc' performs noise-adaptive phase correction (Pizzolato et al. 2020): "
+    "the background phase is re-estimated at every noise level estimation iteration "
+    "from the empirical complex data via a noise-weighted total-variation smoothing, "
+    "the strength of which is driven by the current noise level map "
+    "(the first iteration, which has no noise map yet, "
+    "instead self-calibrates from a data-derived global noise level with uniform spatial weighting). "
+    "The alternative 'hann' uses a fixed full-extent Hann-window non-linear phase estimated only once; "
+    "'linear' instead regresses a strictly linear phase term from each k-space, "
+    "similarly to performed in Cordero-Grande et al. 2019; "
+    "and 'none' disables phase demodulation.";
 
 // clang-format off
 OptionGroup precondition_options(const bool include_output)
@@ -56,7 +65,7 @@ OptionGroup precondition_options(const bool include_output)
   + Option("demodulate",
            "select form of phase demodulation; "
            "options are: " + Enum::join<demodulation_t>(",") + " "
-           "(default: nonlinear)")
+           "(default: apc for complex data)")
     + Argument("mode").type_choice<demodulation_t>()
   + Option("demod_axes",
            "comma-separated list of axis indices along which FFT can be applied for phase demodulation")
@@ -145,7 +154,7 @@ Demodulation select_demodulation(const Header &H) {
   Demodulation result;
   if (opt_mode.empty()) {
     if (complex) {
-      result.mode = demodulation_t::NONLINEAR;
+      result.mode = demodulation_t::APC;
     } else {
       if (!opt_axes.empty()) {
         throw Exception("Option -demod_axes cannot be specified: "
@@ -379,15 +388,36 @@ Precondition<T>::Precondition(Image<T> &image,
   }
 
   // Step 1: Phase demodulation
-  // Only the smooth phase needs to be retained here;
-  //   the actual demodulation of the data is performed on-the-fly,
-  //   both for the Casorati fill and for the stabilised-domain mean computation.
-  if (demodulation.mode != demodulation_t::NONE) {
+  // Only the smooth phase needs to be retained here; the actual demodulation of the data is
+  //   performed on-the-fly, both for the Casorati fill and for the stabilised-domain mean
+  //   computation.
+  // - LINEAR / HANN: a fixed phase (Cordero-Grande linear ramp, or full-extent Hann-window
+  //     non-linear phase) estimated once here and held unchanged for every iteration.
+  // - APC: no fixed bootstrap. The phase is (re-)estimated from the empirical complex data by
+  //     update_parameters() on every iteration, including the first (which self-calibrates a
+  //     global noise level; see PhaseEstimator). A unit-magnitude phase is allocated now so
+  //     the map is valid before the first pass (demodulation is a no-op until that pass
+  //     overwrites it) and so it serves as the per-slice fallback for any slice APC cannot
+  //     calibrate.
+  switch (demodulation.mode) {
+  case demodulation_t::NONE:
+    break;
+  case demodulation_t::LINEAR:
+  case demodulation_t::HANN: {
     typename DemodulatorSelector<T>::type demodulator(image,                                        //
                                                       demodulation.axes,                            //
                                                       demodulation.mode == demodulation_t::LINEAR); //
     phase_image = demodulator();
+  } break;
+  case demodulation_t::APC:
+    phase_image =
+        Image<cfloat>::scratch(image, "Scratch image storing adaptive-phase-correction background phase");
+    for (auto l = Loop(phase_image)(phase_image); l; ++l)
+      phase_image.value() = cfloat(1.0f, 0.0f);
+    break;
   }
+  apc = PhaseEstimator(demodulation.axes);
+  apc_enabled = (demodulation.mode == demodulation_t::APC);
 
   // Step 2: Demeaning
   // Here only the structure is established (group indexing and storage allocation);
@@ -444,11 +474,20 @@ Precondition<T>::Precondition(Image<T> &image,
   // The stabilised-domain mean *values* are intentionally not computed here, only their
   //   storage allocated above. Every iteration selects its temporal subset and (re)computes
   //   the means against the current noise level map via set_temporal_subsample() +
-  //   update_vst_parameters() before the preconditioner is applied (see the run() loops in
+  //   update_parameters() before the preconditioner is applied (see the run() loops in
   //   dwidenoise2 / dwi2noise). Computing them at construction would therefore always be
   //   immediately overwritten before use; doing so previously manifested as two back-to-back
   //   "Computing stabilised-domain mean intensities" passes. Callers must invoke
-  //   update_vst_parameters() to populate the means before applying the forward/inverse transform.
+  //   update_parameters() to populate the means before applying the forward/inverse transform.
+}
+
+// Adaptive phase correction: re-estimate phase_image in place from the empirical complex
+//   input and the current noise level map. Complex T only; a compiled no-op for real T so the
+//   explicit template instantiations at the foot of this file remain well-formed.
+template <typename T> void Precondition<T>::update_phase(Image<T> &input) {
+  if constexpr (is_complex<T>::value) {
+    apc(input, vst_noise_image, phase_image);
+  }
 }
 
 template <typename T>

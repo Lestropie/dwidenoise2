@@ -83,7 +83,7 @@ void usage() {
     " - A greater number of mechanisms for noise level estimation,"
       " including taking a pre-estimated noise map as input;"
     " - Preconditioning, including (per-shell) demeaning,"
-      " phase demodulation (linear or nonlinear),"
+      " phase demodulation (linear, Hann, or noise-adaptive),"
       " and variance-stabilising transform to compensate for within-patch heteroscedasticity;"
     " - Overcomplete local PCA;"
     " - Subsampling (performing fewer PCAs than there are input voxels);"
@@ -218,6 +218,11 @@ void usage() {
   + "Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. " // Internal
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
     "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
+
+  + "* If denoising complex data without changing -demodulate from its default (apc): "
+    "Pizzolato, M.; Gilbert, G.; Thiran, J.-P.; Descoteaux, M.; Deriche, R. "
+    "Adaptive phase correction of diffusion-weighted images. "
+    "NeuroImage, 2020, 206, 116274, doi: 10.1016/j.neuroimage.2019.116274"
 
   + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
@@ -424,7 +429,7 @@ void run(Header &dwi,
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
     // Resolve the partition count for this iteration from the (post-subsampling) volume count m'.
     //   When partitioning, the preconditioner performs no demeaning (done per partition within
-    //   Estimate); set this before update_vst_parameters so it skips the now-unused mean pass.
+    //   Estimate); set this before update_parameters so it skips the now-unused mean pass.
     const ssize_t mprime = preconditioner.header().size(3);
     const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
     if (num_partitions > 1 && !estimator->supports_partitioning())
@@ -432,7 +437,7 @@ void run(Header &dwi,
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
                       " partitions); choose a different -estimator or remove partitioning from the schedule");
     preconditioner.set_partitioning_active(num_partitions > 1);
-    preconditioner.update_vst_parameters(vst_image, input);
+    preconditioner.update_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
         Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
@@ -485,12 +490,12 @@ void run(Header &dwi,
   //   recompute the full-data means under the final noise level map.
   preconditioner.set_temporal_subsample(1.0, rng, temporal_min_per_group);
   // Resolve partitioning for the reconstruction pass (sized from the full volume count, as the
-  //   final row's temporal_subsample is validated to be 1.0). Set before update_vst_parameters
+  //   final row's temporal_subsample is validated to be 1.0). Set before update_parameters
   //   so the (unused) preconditioner-side demeaning pass is skipped when partitioning.
   const ssize_t mprime_final = preconditioner.header().size(3);
   const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
   preconditioner.set_partitioning_active(num_partitions > 1);
-  preconditioner.update_vst_parameters(vst_image, input);
+  preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
 
   auto subsample = std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);

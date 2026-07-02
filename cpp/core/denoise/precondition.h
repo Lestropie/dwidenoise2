@@ -26,6 +26,7 @@
 #include "app.h"
 #include "denoise/kernel/voxel.h"
 #include "denoise/noise_model/noise_model.h"
+#include "denoise/phase_estimator.h"
 #include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
@@ -38,7 +39,20 @@ namespace MR::Denoise {
 
 extern const char *const demodulation_description;
 
-enum class demodulation_t { NONE, LINEAR, NONLINEAR };
+// Phase demodulation applied to complex data before PCA. This [none, linear, hann, apc]
+//   classification refines the historical [none, linear, nonlinear]: both "hann" and "apc"
+//   are nonlinear-phase methods (they are not an independent axis of choice).
+// - NONE: no phase demodulation.
+// - LINEAR: regress a strictly linear phase ramp from each k-space (Cordero-Grande et al.
+//     2019); estimated once and held for every iteration.
+// - HANN: a fixed full-extent Hann-window nonlinear k-space phase, estimated once and held
+//     for every iteration (the previous "nonlinear" behaviour; retained for comparison).
+// - APC: noise-adaptive nonlinear phase (Pizzolato et al. 2020; see MR::Denoise::PhaseEstimator).
+//     Re-estimated every noise-estimation iteration from the empirical complex data by a
+//     noise-weighted total-variation smoothing. The first iteration, which has no noise map
+//     yet, self-calibrates from a data-derived global noise level with uniform weighting.
+//     This is the default for complex input data.
+enum class demodulation_t { NONE, LINEAR, HANN, APC };
 
 enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
 
@@ -117,12 +131,25 @@ public:
                Image<float> &vst_noise,
                std::shared_ptr<NoiseModel::Base> noise_model);
   Precondition(Precondition &) = default;
-  // Refresh both variance-stabilising-transform parameters together:
-  //   the noise level map (VST scale) and, derived from it, the
-  //   stabilised-domain per-group means (VST offset); see vst_plan.md section 3.2.
-  // A pass over the input is required to recompute the stabilised-domain means.
-  void update_vst_parameters(Image<float> new_vst_noise, Image<T> input) {
+  // Refresh the preconditioning parameters together, each iteration of the noise-estimation
+  //   schedule: the noise level map (VST scale), the stabilised-domain per-group means (VST
+  //   offset, derived from it; see vst_plan.md section 3.2), and -- when adaptive phase
+  //   correction is active (-demodulate apc) -- the background phase map.
+  // A pass over the input is required to recompute the stabilised-domain means; when APC runs
+  //   it must precede that pass, because the means are formed from the demodulated data
+  //   (serialise_and_stabilise) and so must reflect the updated phase.
+  // APC guards (all must hold): (1) complex input (compile-time gate; the phase is ill-defined
+  //   for real T); (2) -demodulate apc selected (apc_enabled); (3) a phase map is maintained
+  //   (phase_image.valid()). APC runs every call, including the first: the incoming noise map
+  //   may be absent on the first iteration, in which case the estimator self-calibrates a
+  //   global noise level from the data with uniform weighting (see PhaseEstimator); later
+  //   iterations pass the refined spatially-varying map.
+  void update_parameters(Image<float> new_vst_noise, Image<T> input) {
     vst_noise_image = new_vst_noise;
+    if constexpr (is_complex<T>::value) {          // (1)
+      if (apc_enabled && phase_image.valid())      // (2), (3)
+        update_phase(input);
+    }
     compute_means(input);
   }
   // The bias_handling and debias_anchor arguments apply only to the inverse transform
@@ -165,7 +192,7 @@ public:
   // While a subset is active, header().size(3) and the forward output hold only the
   //   m' selected volumes, so downstream code (Estimate / kernel sizing) sees m'
   //   volumes and need not know that sub-sampling occurred.
-  // A subsequent update_vst_parameters() / compute_means() forms the per-group means
+  // A subsequent update_parameters() / compute_means() forms the per-group means
   //   over this same subset, keeping the stabilised Casorati matrix exactly
   //   rank-deficient by null_rank().
   void set_temporal_subsample(default_type fraction, Math::RNG &rng, ssize_t min_per_group);
@@ -222,6 +249,13 @@ private:
   std::shared_ptr<NoiseModel::Base> noise_model;
   // First step: Phase demodulation
   Image<cfloat> phase_image;
+  // Adaptive phase correction (Pizzolato APC): each update_parameters() call re-estimates
+  //   phase_image from the empirical complex input, driven by the current noise map (or, on
+  //   the first iteration when no map exists yet, a self-calibrated global noise level). The
+  //   estimator itself is stateless/cheap to copy; its per-thread scratch is allocated inside
+  //   its threaded driver, so Precondition remains trivially copyable.
+  PhaseEstimator apc;
+  bool apc_enabled = false; // -demodulate apc on complex data
   // Second step (forward): variance-stabilising transform.
   //   The noise level map is the VST scale / dispersion parameter.
   Image<float> vst_noise_image;
@@ -246,6 +280,12 @@ private:
   // (Re)compute the stabilised-domain per-group means from the input,
   //   using the currently stored noise level map for stabilisation.
   void compute_means(Image<T> input);
+
+  // Re-estimate phase_image in place from the empirical complex input and the current noise
+  //   level map (adaptive phase correction). A no-op for real T (the phase is ill-defined),
+  //   guarded internally by `if constexpr (is_complex<T>::value)` so the explicit
+  //   instantiations for real T compile.
+  void update_phase(Image<T> &input);
 };
 
 } // namespace MR::Denoise
