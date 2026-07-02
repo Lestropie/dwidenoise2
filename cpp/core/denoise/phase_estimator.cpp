@@ -62,13 +62,78 @@ double estimate_sigma_mad(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   const double median_abs_diff = d[mid];
   return median_abs_diff / 0.6744897501960817 / std::sqrt(2.0); // 0.6745 = Phi^{-1}(0.75)
 }
+
+// 2x box-downsample of a plane (2x2 average, clamped at the far edge for odd sizes). The first
+//   iteration solves the phase on the resulting coarse grid: a background phase is low-bandwidth,
+//   so decimation is near-lossless, at ~1/4 the voxel count (hence ~1/4 the per-sweep cost). The
+//   coarse-grid noise level after 2x2 averaging is lower than native, but the first pass
+//   self-calibrates its noise level from that same coarse data (robust MAD), so the discrepancy
+//   criterion stays self-consistent; the coarse solve is only a bootstrap the later native passes
+//   refine.
+void downsample2x(const Eigen::Ref<const Eigen::ArrayXXd> &src, Eigen::Ref<Eigen::ArrayXXd> dst) {
+  const ssize_t Nx = src.rows();
+  const ssize_t Ny = src.cols();
+  const ssize_t cNx = dst.rows();
+  const ssize_t cNy = dst.cols();
+  for (ssize_t j = 0; j != cNy; ++j) {
+    const ssize_t j0 = 2 * j;
+    const ssize_t j1 = std::min(j0 + 1, Ny - 1);
+    for (ssize_t i = 0; i != cNx; ++i) {
+      const ssize_t i0 = 2 * i;
+      const ssize_t i1 = std::min(i0 + 1, Nx - 1);
+      dst(i, j) = 0.25 * (src(i0, j0) + src(i1, j0) + src(i0, j1) + src(i1, j1));
+    }
+  }
+}
+
+// Bilinearly upsample a coarse unit-magnitude phase back to the native grid and renormalise to
+//   unit magnitude. Interpolating the (cos, sin) = (phase_r, phase_i) channels (rather than the
+//   wrapped angle) avoids phase-wrap artefacts; renormalisation restores |phase| == 1 as the
+//   demodulator requires. Cell-centred mapping is the inverse of downsample2x (coarse voxel I
+//   spans native {2I, 2I+1}, centre at native 2I+0.5).
+void upsample_phase(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
+                    const Eigen::Ref<const Eigen::ArrayXXd> &pi_c,
+                    Eigen::Ref<Eigen::ArrayXXd> pr,
+                    Eigen::Ref<Eigen::ArrayXXd> pi) {
+  const ssize_t Nx = pr.rows();
+  const ssize_t Ny = pr.cols();
+  const ssize_t cNx = pr_c.rows();
+  const ssize_t cNy = pr_c.cols();
+  for (ssize_t j = 0; j != Ny; ++j) {
+    const double cy = std::min(std::max((double(j) - 0.5) * 0.5, 0.0), double(cNy - 1));
+    const ssize_t J0 = std::min(ssize_t(std::floor(cy)), cNy - 1);
+    const ssize_t J1 = std::min(J0 + 1, cNy - 1);
+    const double fy = cy - double(J0);
+    for (ssize_t i = 0; i != Nx; ++i) {
+      const double cx = std::min(std::max((double(i) - 0.5) * 0.5, 0.0), double(cNx - 1));
+      const ssize_t I0 = std::min(ssize_t(std::floor(cx)), cNx - 1);
+      const ssize_t I1 = std::min(I0 + 1, cNx - 1);
+      const double fx = cx - double(I0);
+      const double w00 = (1.0 - fx) * (1.0 - fy);
+      const double w10 = fx * (1.0 - fy);
+      const double w01 = (1.0 - fx) * fy;
+      const double w11 = fx * fy;
+      const double r = w00 * pr_c(I0, J0) + w10 * pr_c(I1, J0) + w01 * pr_c(I0, J1) + w11 * pr_c(I1, J1);
+      const double im = w00 * pi_c(I0, J0) + w10 * pi_c(I1, J0) + w01 * pi_c(I0, J1) + w11 * pi_c(I1, J1);
+      const double mag = std::sqrt(r * r + im * im);
+      if (mag > std::numeric_limits<double>::min() * 1e3) {
+        pr(i, j) = r / mag;
+        pi(i, j) = im / mag;
+      } else {
+        pr(i, j) = 1.0;
+        pi(i, j) = 0.0;
+      }
+    }
+  }
+}
 } // namespace
 
 bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
                                  const Eigen::Ref<const Eigen::ArrayXXd> &fi,
                                  const Eigen::Ref<const Eigen::ArrayXXd> &sigma,
                                  Eigen::Ref<Eigen::ArrayXXd> phase_r,
-                                 Eigen::Ref<Eigen::ArrayXXd> phase_i) const {
+                                 Eigen::Ref<Eigen::ArrayXXd> phase_i,
+                                 const bool warm_start) const {
   const ssize_t Nx = fr.rows();
   const ssize_t Ny = fr.cols();
   const ssize_t Npix = Nx * Ny;
@@ -144,11 +209,27 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   if (!(sigmabar > 0.0))
     return false;
 
+  // --- Iteration budget (reduced once warm-started) -------------------------------------
+  const ssize_t n_cp = warm_start ? params.cp_iter_warm : params.cp_iter;
+  const ssize_t n_lambda = warm_start ? params.max_lambda_iter_warm : params.max_lambda_iter;
+  const ssize_t n_polish = warm_start ? params.polish_iter_warm : params.polish_iter;
+
   // --- Chambolle-Pock primal-dual state -------------------------------------------------
-  // Primal image u = (ur, ui), warm-started at the data; over-relaxed iterate ubar; dual
-  //   variable p = (pxr, pyr, pxi, pyi) = the (per channel, per direction) gradient field.
-  Eigen::ArrayXXd ur = fr, ui = fi;
-  Eigen::ArrayXXd ubr = fr, ubi = fi;
+  // Primal image u = (ur, ui); over-relaxed iterate ubar; dual variable p = (pxr, pyr, pxi, pyi)
+  //   = the (per channel, per direction) gradient field. Cold start (first pass): seed u at the
+  //   data f. Warm start (later passes): seed u at |f| * (incoming phase) -- same magnitude as f
+  //   but carrying the already-smooth previous phase, so the expensive phase smoothing is
+  //   ~converged and only the cheap magnitude smoothing remains, matching the reduced budget.
+  Eigen::ArrayXXd ur, ui;
+  if (warm_start) {
+    const Eigen::ArrayXXd mag = (fr.square() + fi.square()).sqrt();
+    ur = mag * phase_r;
+    ui = mag * phase_i;
+  } else {
+    ur = fr;
+    ui = fi;
+  }
+  Eigen::ArrayXXd ubr = ur, ubi = ui;
   Eigen::ArrayXXd pxr = Eigen::ArrayXXd::Zero(Nx, Ny);
   Eigen::ArrayXXd pyr = Eigen::ArrayXXd::Zero(Nx, Ny);
   Eigen::ArrayXXd pxi = Eigen::ArrayXXd::Zero(Nx, Ny);
@@ -229,8 +310,8 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   //   and lambda are refined jointly (the solver is warm-started across updates).
   double lambda = 2.1237 / sigmabar + 0.0547 / sigmabar2; // eq. 7
   const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar;
-  for (ssize_t li = 0; li != params.max_lambda_iter; ++li) {
-    run_cp(params.cp_iter, lambda);
+  for (ssize_t li = 0; li != n_lambda; ++li) {
+    run_cp(n_cp, lambda);
     const double Rr = std::sqrt((indom * w * (ur - fr).square()).sum());
     const double Ri = std::sqrt((indom * w * (ui - fi).square()).sum());
     const double lambda_new = lambda * (Rr + Ri) / target_scale;
@@ -243,7 +324,7 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   }
 
   // Settle the image at the converged lambda before extracting its argument.
-  run_cp(params.polish_iter, lambda);
+  run_cp(n_polish, lambda);
 
   // --- Extract unit-magnitude phase -----------------------------------------------------
   for (ssize_t j = 0; j != Ny; ++j)
@@ -275,7 +356,9 @@ public:
              const std::vector<size_t> &inner_axes,
              Image<T> &in,
              Image<float> &sigma,
-             Image<cfloat> &phase)
+             Image<cfloat> &phase,
+             bool warm_start,
+             bool downsample)
       : estimator(&estimator),
         outer_axes(outer_axes),
         inner_axes(inner_axes),
@@ -283,6 +366,7 @@ public:
         sigma(sigma),
         phase(phase),
         have_sigma(sigma.valid()),
+        warm_start(warm_start),
         transform(in),
         Nx(in.size(inner_axes[0])),
         Ny(in.size(inner_axes[1])),
@@ -290,7 +374,24 @@ public:
         fi(Nx, Ny),
         sig(Nx, Ny),
         phase_r(Nx, Ny),
-        phase_i(Nx, Ny) {}
+        phase_i(Nx, Ny) {
+    // Solve on a 2x-downsampled grid, then upsample the phase (a background phase is smooth, so
+    //   decimation is near-lossless at ~1/4 the cost). Requested (downsample) only for the first
+    //   pass of a multi-iteration schedule; disabled for tiny planes (no benefit; avoids
+    //   over-decimation). Warm-started passes are always native (downsample is never set for them).
+    use_coarse = downsample && Nx >= 4 && Ny >= 4;
+    if (use_coarse) {
+      const ssize_t cNx = (Nx + 1) / 2;
+      const ssize_t cNy = (Ny + 1) / 2;
+      fr_c.resize(cNx, cNy);
+      fi_c.resize(cNx, cNy);
+      // First pass self-calibrates its noise level from the (coarse) data, so no map is consumed
+      //   here; all-unknown sigma routes solve_plane to its MAD self-calibration branch.
+      sig_c = Eigen::ArrayXXd::Constant(cNx, cNy, -1.0);
+      pr_c.resize(cNx, cNy);
+      pi_c.resize(cNx, cNy);
+    }
+  }
 
   void operator()(const Iterator &pos) {
     const size_t ax = inner_axes[0];
@@ -306,26 +407,9 @@ public:
       fi(ix, iy) = double(value.imag());
     }
 
-    // Gather the per-voxel noise level, interpolated at each voxel's scanner position (the
-    //   noise map may be lower-resolution than the data). On the first iteration no noise map
-    //   exists yet (sigma invalid); mark every voxel unknown (-1) so solve_plane self-calibrates.
-    if (have_sigma) {
-      Interp::Cubic<Image<float>> sigma_interp(sigma);
-      for (auto l = Loop(inner_axes)(in); l; ++l) {
-        const ssize_t ix = in.index(ax);
-        const ssize_t iy = in.index(ay);
-        sigma_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(in.index(0)),   //
-                                                                        double(in.index(1)),   //
-                                                                        double(in.index(2))})); //
-        const double s = double(sigma_interp.value());
-        sig(ix, iy) = std::isfinite(s) ? s : -1.0;
-      }
-    } else {
-      sig.setConstant(-1.0);
-    }
-
-    // Pre-load the incoming (previous-iteration, or unit) phase so that, if solve_plane skips
-    //   this slice (fully degenerate: no estimable noise level), writing back is a no-op.
+    // Pre-load the incoming (previous-iteration, or unit) phase. On a warm-started pass this is
+    //   also the solver's initial guess; on any pass it is the fallback if solve_plane declines
+    //   the slice (fully degenerate: no estimable noise level), so writing back is a no-op.
     for (auto l = Loop(inner_axes)(phase); l; ++l) {
       const ssize_t ix = phase.index(ax);
       const ssize_t iy = phase.index(ay);
@@ -334,7 +418,37 @@ public:
       phase_i(ix, iy) = double(p.imag());
     }
 
-    estimator->solve_plane(fr, fi, sig, phase_r, phase_i);
+    if (warm_start) {
+      // Native resolution, warm-started from the incoming phase. Now that a noise map exists,
+      //   gather the per-voxel noise level (interpolated at each voxel's scanner position; the
+      //   map may be lower-resolution than the data) for spatially-varying weighting.
+      if (have_sigma) {
+        Interp::Cubic<Image<float>> sigma_interp(sigma);
+        for (auto l = Loop(inner_axes)(in); l; ++l) {
+          const ssize_t ix = in.index(ax);
+          const ssize_t iy = in.index(ay);
+          sigma_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(in.index(0)),   //
+                                                                          double(in.index(1)),   //
+                                                                          double(in.index(2))})); //
+          const double s = double(sigma_interp.value());
+          sig(ix, iy) = std::isfinite(s) ? s : -1.0;
+        }
+      } else {
+        sig.setConstant(-1.0);
+      }
+      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true);
+    } else if (use_coarse) {
+      // First pass, cold: solve on the 2x-downsampled grid (self-calibrated), then upsample.
+      //   If the coarse slice is degenerate, leave the pre-loaded incoming phase untouched.
+      downsample2x(fr, fr_c);
+      downsample2x(fi, fi_c);
+      if (estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false))
+        upsample_phase(pr_c, pi_c, phase_r, phase_i);
+    } else {
+      // First pass on a tiny plane: solve cold at native resolution (self-calibrated).
+      sig.setConstant(-1.0);
+      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, false);
+    }
 
     for (auto l = Loop(inner_axes)(phase); l; ++l) {
       const ssize_t ix = phase.index(ax);
@@ -351,15 +465,20 @@ private:
   Image<float> sigma;
   Image<cfloat> phase;
   bool have_sigma;
+  bool warm_start;
+  bool use_coarse = false;
   Transform transform;
   ssize_t Nx, Ny;
   Eigen::ArrayXXd fr, fi, sig, phase_r, phase_i;
+  // Coarse-grid scratch, allocated only for the first (cold) pass's 2x-downsampled solve.
+  Eigen::ArrayXXd fr_c, fi_c, sig_c, pr_c, pi_c;
 };
 
 } // namespace
 
 template <typename T>
-void PhaseEstimator::operator()(Image<T> &in, Image<float> &sigma, Image<cfloat> &io_phase) const {
+void PhaseEstimator::operator()(
+    Image<T> &in, Image<float> &sigma, Image<cfloat> &io_phase, bool warm_start, bool downsample) const {
   assert(inslice_axes.size() == 2);
   // Outer axes = every axis of the data except the two in-slice (demodulation) axes: the
   //   slice-normal spatial axis, the volume axis, and any serialised supra-volume axes. Each
@@ -370,12 +489,12 @@ void PhaseEstimator::operator()(Image<T> &in, Image<float> &sigma, Image<cfloat>
       outer_axes.push_back(a);
 
   ThreadedLoop("re-estimating background phase (adaptive phase correction)", in, outer_axes, inslice_axes)
-      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase));
+      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, warm_start, downsample));
 }
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and
 //   callers gate instantiation with `if constexpr (is_complex<T>::value)`.
-template void PhaseEstimator::operator()(Image<cfloat> &, Image<float> &, Image<cfloat> &) const;
-template void PhaseEstimator::operator()(Image<cdouble> &, Image<float> &, Image<cfloat> &) const;
+template void PhaseEstimator::operator()(Image<cfloat> &, Image<float> &, Image<cfloat> &, bool, bool) const;
+template void PhaseEstimator::operator()(Image<cdouble> &, Image<float> &, Image<cfloat> &, bool, bool) const;
 
 } // namespace MR::Denoise

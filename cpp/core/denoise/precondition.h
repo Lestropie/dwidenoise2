@@ -143,7 +143,12 @@ public:
   //   (phase_image.valid()). APC runs every call, including the first: the incoming noise map
   //   may be absent on the first iteration, in which case the estimator self-calibrates a
   //   global noise level from the data with uniform weighting (see PhaseEstimator); later
-  //   iterations pass the refined spatially-varying map.
+  //   iterations pass the refined spatially-varying map. When the schedule has more than one
+  //   iteration (set_apc_coarse_first), the first APC pass is solved on a 2x-downsampled grid
+  //   (cold start; a background phase is smooth, so this is near-lossless at ~1/4 the cost) and
+  //   every subsequent pass runs at native resolution but warm-started from the previous estimate
+  //   with a reduced iteration budget (see PhaseEstimator). A single-iteration schedule solves its
+  //   sole, authoritative pass at native resolution. apc_first_pass tracks which regime applies.
   void update_parameters(Image<float> new_vst_noise, Image<T> input) {
     vst_noise_image = new_vst_noise;
     if constexpr (is_complex<T>::value) {          // (1)
@@ -174,6 +179,13 @@ public:
   //   transforms skip the demean step. The GROUP_MEAN inverse anchor is unavailable in this mode.
   void set_partitioning_active(const bool active) { partitioning_active = active; }
   bool demean_active() const { return vst_mean_image.valid() && !partitioning_active; }
+
+  // Enable solving the first adaptive-phase-correction pass on a 2x-downsampled grid (its phase
+  //   upsampled to native). Set from the run loop to (schedule length > 1): downsampling is only
+  //   worthwhile when a later pass refines the phase at native resolution, so a single-iteration
+  //   schedule leaves it disabled and solves its sole, authoritative pass natively. No effect
+  //   unless -demodulate apc is active on complex data.
+  void set_apc_coarse_first(const bool enable) { apc_coarse_first = enable; }
 
   // Per-(preconditioned/output) row demeaning-group labels for the current data layout (length
   //   header().size(3) == m', accounting for any active temporal subset): the b-value shell or
@@ -255,7 +267,12 @@ private:
   //   estimator itself is stateless/cheap to copy; its per-thread scratch is allocated inside
   //   its threaded driver, so Precondition remains trivially copyable.
   PhaseEstimator apc;
-  bool apc_enabled = false; // -demodulate apc on complex data
+  bool apc_enabled = false;     // -demodulate apc on complex data
+  bool apc_first_pass = true;   // false after the first APC estimation: switches the estimator
+                                //   from the cold solve to warm-started native-resolution
+                                //   refinement (see update_parameters / PhaseEstimator)
+  bool apc_coarse_first = false; // solve the first (cold) APC pass on a 2x-downsampled grid; set
+                                 //   by set_apc_coarse_first iff the schedule has >1 iteration
   // Second step (forward): variance-stabilising transform.
   //   The noise level map is the VST scale / dispersion parameter.
   Image<float> vst_noise_image;

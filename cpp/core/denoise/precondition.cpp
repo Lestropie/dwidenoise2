@@ -486,7 +486,13 @@ Precondition<T>::Precondition(Image<T> &image,
 //   explicit template instantiations at the foot of this file remain well-formed.
 template <typename T> void Precondition<T>::update_phase(Image<T> &input) {
   if constexpr (is_complex<T>::value) {
-    apc(input, vst_noise_image, phase_image);
+    // First pass: cold solve; every pass thereafter: warm-started native refinement. Downsample
+    //   the first pass only when a later pass will refine it (multi-iteration schedule); a
+    //   single-iteration schedule solves its sole pass natively (apc_coarse_first == false).
+    const bool warm_start = !apc_first_pass;
+    const bool downsample = apc_first_pass && apc_coarse_first;
+    apc(input, vst_noise_image, phase_image, warm_start, downsample);
+    apc_first_pass = false;
   }
 }
 

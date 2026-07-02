@@ -402,6 +402,10 @@ void run(Header &dwi,
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
+  // Solve the first (cold) adaptive-phase-correction pass on a 2x-downsampled grid only when a
+  //   later iteration refines the phase at native resolution; a single-iteration schedule keeps
+  //   its sole, authoritative pass at native resolution.
+  preconditioner.set_apc_coarse_first(iterations.size() > 1);
   Image<T> input_preconditioned;
 
   // Per-voxel signal-rank density used to size the rank-adaptive reconstruction kernel. Normally
