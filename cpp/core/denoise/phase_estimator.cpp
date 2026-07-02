@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "algo/loop.h"
@@ -488,7 +489,10 @@ void PhaseEstimator::operator()(
     if (std::find(inslice_axes.begin(), inslice_axes.end(), a) == inslice_axes.end())
       outer_axes.push_back(a);
 
-  ThreadedLoop("re-estimating background phase (adaptive phase correction)", in, outer_axes, inslice_axes)
+  ThreadedLoop(std::string(warm_start ? "updating" : "estimating") + " background phase (adaptive phase correction)",
+               in,
+               outer_axes,
+               inslice_axes)
       .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, warm_start, downsample));
 }
 

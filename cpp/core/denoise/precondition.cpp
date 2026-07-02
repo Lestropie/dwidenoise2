@@ -750,11 +750,14 @@ void Precondition<T>::operator()(Image<T> input,
            "to each denoised sample");
     }
 
-    // Describe in the progress message which corrections are being reversed: re-addition of
-    //   the demeaning offset, the noise model governing the inverse variance-stabilising
-    //   transform, and (only for a non-linear model, where the distinction has an effect)
-    //   whether the noise-floor bias is being removed (DEBIAS) or preserved (PRESERVE).
-    std::string reversal_message = "Reversing data preconditioning";
+    // Describe which corrections are being reversed: re-addition of the demeaning offset,
+    //   the noise model governing the inverse variance-stabilising transform, (only for a
+    //   non-linear model, where the distinction has an effect) whether the noise-floor bias
+    //   is being removed (DEBIAS) or preserved (PRESERVE), and re-modulation of the estimated
+    //   background phase for complex data that were phase-demodulated during preconditioning.
+    //   This detail is esoteric relative to the progress bar, so it is reported via INFO()
+    //   rather than appended to the (per-voxel-updated) progress message itself.
+    const std::string reversal_message = "Reversing data preconditioning";
     {
       std::string detail;
       const auto append = [&detail](const std::string &item) { detail += (detail.empty() ? "" : ", ") + item; };
@@ -766,8 +769,10 @@ void Precondition<T>::operator()(Image<T> input,
           append(bias_handling == bias_handling_t::DEBIAS ? "removing noise-floor bias"
                                                           : "preserving noise-floor bias");
       }
+      if (phase.valid())
+        append("re-modulating estimated background phase");
       if (!detail.empty())
-        reversal_message += " (" + detail + ")";
+        INFO(reversal_message + ": " + detail);
     }
 
     for (auto l_voxel = Loop(reversal_message, H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
