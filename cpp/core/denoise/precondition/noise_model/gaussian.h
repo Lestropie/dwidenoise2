@@ -21,9 +21,9 @@
 
 #include "types.h"
 
-#include "denoise/noise_model/base.h"
+#include "denoise/precondition/noise_model/base.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 // Gaussian (complex / phase-demodulated) noise model.
 //
@@ -48,4 +48,4 @@ public:
   bool is_linear() const final { return true; }
 };
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

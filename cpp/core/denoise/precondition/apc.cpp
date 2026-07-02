@@ -15,7 +15,7 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/phase_estimator.h"
+#include "denoise/precondition/apc.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,7 +30,7 @@
 #include "mrtrix.h"
 #include "transform.h"
 
-namespace MR::Denoise {
+namespace MR::Denoise::Precondition {
 
 namespace {
 // Robust global per-component noise standard deviation from the finite differences of a
@@ -131,7 +131,7 @@ void upsample_phase(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
 }
 } // namespace
 
-bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
+bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
                                  const Eigen::Ref<const Eigen::ArrayXXd> &fi,
                                  const Eigen::Ref<const Eigen::ArrayXXd> &sigma,
                                  Eigen::Ref<Eigen::ArrayXXd> phase_r,
@@ -407,7 +407,7 @@ namespace {
 //   "phase", so no locking is required. See mrdegibbs's Unring2DFunctor for the same idiom.
 template <typename T> class APCFunctor {
 public:
-  APCFunctor(const PhaseEstimator &estimator,
+  APCFunctor(const AdaptivePhaseEstimator &estimator,
              const std::vector<size_t> &outer_axes,
              const std::vector<size_t> &inner_axes,
              Image<T> &in,
@@ -514,7 +514,7 @@ public:
   }
 
 private:
-  const PhaseEstimator *estimator;
+  const AdaptivePhaseEstimator *estimator;
   std::vector<size_t> outer_axes;
   std::vector<size_t> inner_axes;
   Image<T> in;
@@ -533,7 +533,7 @@ private:
 } // namespace
 
 template <typename T>
-void PhaseEstimator::operator()(
+void AdaptivePhaseEstimator::operator()(
     Image<T> &in, Image<float> &sigma, Image<cfloat> &io_phase, bool warm_start, bool downsample) const {
   assert(inslice_axes.size() == 2);
   // Outer axes = every axis of the data except the two in-slice (demodulation) axes: the
@@ -553,7 +553,7 @@ void PhaseEstimator::operator()(
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and
 //   callers gate instantiation with `if constexpr (is_complex<T>::value)`.
-template void PhaseEstimator::operator()(Image<cfloat> &, Image<float> &, Image<cfloat> &, bool, bool) const;
-template void PhaseEstimator::operator()(Image<cdouble> &, Image<float> &, Image<cfloat> &, bool, bool) const;
+template void AdaptivePhaseEstimator::operator()(Image<cfloat> &, Image<float> &, Image<cfloat> &, bool, bool) const;
+template void AdaptivePhaseEstimator::operator()(Image<cdouble> &, Image<float> &, Image<cfloat> &, bool, bool) const;
 
-} // namespace MR::Denoise
+} // namespace MR::Denoise::Precondition

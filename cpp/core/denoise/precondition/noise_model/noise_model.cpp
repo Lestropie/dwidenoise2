@@ -15,16 +15,16 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/noise_model/noise_model.h"
+#include "denoise/precondition/noise_model/noise_model.h"
 
 #include <cassert>
 
-#include "denoise/noise_model/gaussian.h"
-#include "denoise/noise_model/identity.h"
-#include "denoise/noise_model/noncentralchi.h"
-#include "denoise/noise_model/rician.h"
+#include "denoise/precondition/noise_model/gaussian.h"
+#include "denoise/precondition/noise_model/identity.h"
+#include "denoise/precondition/noise_model/noncentralchi.h"
+#include "denoise/precondition/noise_model/rician.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 std::shared_ptr<Base> make(const distribution_t distribution, //
                            const ssize_t num_channels,        //
@@ -54,4 +54,4 @@ std::shared_ptr<Base> make(const distribution_t distribution, //
   return nullptr;
 }
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

@@ -40,6 +40,7 @@ COPY share/dwidenoise2 /src/mrtrix3/share/mrtrix3
 #   the build tree (build/share/mrtrix3/); it must be named explicitly here because building
 #   named executable targets does not trigger MRtrix3's ALL custom targets.
 RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DMRTRIX_BUILD_GUI=OFF --preset=debug \
+    -DDWIDENOISE2_APC_PROFILE= \
     && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert mrinfo copy-share-data
 
 # Build final image.

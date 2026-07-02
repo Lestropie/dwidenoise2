@@ -15,7 +15,7 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/precondition.h"
+#include "denoise/precondition/preconditioner.h"
 
 #include <algorithm>
 #include <cmath>
@@ -26,227 +26,16 @@
 
 #include "algo/copy.h"
 #include "app.h"
-#include "axes.h"
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
 #include "interp/cubic.h"
-#include "metadata/bids.h"
 #include "transform.h"
+
+#include "denoise/precondition/vst.h"
 
 using namespace MR::App;
 
-namespace MR::Denoise {
-
-const char *const demodulation_description =
-    "If the input data are of complex type, "
-    "then a smooth phase is demodulated from each k-space prior to PCA, "
-    "so that the residual phase is coherent across volumes and the Casorati matrix remains low-rank. "
-    "In the absence of metadata indicating otherwise, "
-    "it is inferred that the first two axes correspond to acquired slices, "
-    "and different slices / volumes will be demodulated individually; "
-    "this behaviour can be modified using the -demod_axes option. "
-    "The method of phase estimation is selected with -demodulate. "
-    "The default 'apc' performs noise-adaptive phase correction (Pizzolato et al. 2020): "
-    "the background phase is re-estimated at every noise level estimation iteration "
-    "from the empirical complex data via a noise-weighted total-variation smoothing, "
-    "the strength of which is driven by the current noise level map "
-    "(the first iteration, which has no noise map yet, "
-    "instead self-calibrates from a data-derived global noise level with uniform spatial weighting). "
-    "The alternative 'hann' uses a fixed full-extent Hann-window non-linear phase estimated only once; "
-    "'linear' instead regresses a strictly linear phase term from each k-space, "
-    "similarly to performed in Cordero-Grande et al. 2019; "
-    "and 'none' disables phase demodulation.";
-
-// clang-format off
-OptionGroup precondition_options(const bool include_output)
-{
-  OptionGroup result ("Options for preconditioning data prior to PCA");
-  result
-  + Option("demodulate",
-           "select form of phase demodulation; "
-           "options are: " + Enum::join<demodulation_t>(",") + " "
-           "(default: apc for complex data)")
-    + Argument("mode").type_choice<demodulation_t>()
-  + Option("demod_axes",
-           "comma-separated list of axis indices along which FFT can be applied for phase demodulation")
-    + Argument("axes").type_sequence_int()
-  + Option("demean",
-           "select method of demeaning prior to PCA; "
-           "options are: " + Enum::join<demean_type>(",") + " "
-           "(default: 'shells' if DWI gradient table available; 'volume_groups' if volume groups present; 'all' otherwise)")
-    + Argument("mode").type_choice<demean_type>()
-  + Option("noise_dof",
-           "the number of receive channels N combined by sum-of-squares reconstruction of magnitude data, "
-           "such that the noise follows a non-central chi distribution with 2N degrees of freedom "
-           "(default: 1, i.e. Rician; ignored for complex input data)")
-    + Argument("count").type_integer(1)
-  + Option("vst_method",
-           "the variance-stabilising transform to apply prior to PCA; "
-           "options are: " + Enum::join<NoiseModel::vst_method_t>(",") + "; "
-           "'none' applies no transform; "
-           "'linear' divides by the noise level (the appropriate transform for Gaussian-distributed, "
-           "e.g. complex or phase-demodulated, data); "
-           "'foi', 'koay' and 'mom' construct a non-linear transform with bias-corrected inverse "
-           "for magnitude data, differing only in the inverse / debias strategy "
-           "(default: foi for magnitude data; complex data always use the linear transform)")
-    + Argument("method").type_choice<NoiseModel::vst_method_t>();
-  if (include_output) {
-    result
-    + Option("preconditioned_input",
-             "export the preconditioned version of the input image that is the input to PCA")
-      + Argument("image").type_image_out()
-    + Option("preconditioned_output",
-             "export the denoised data prior to reversal of preconditioning")
-      + Argument("image").type_image_out();
-  } else {
-    result
-    + Option("preconditioned",
-             "export the preconditioned version of the input image that is the input to PCA")
-      + Argument("image").type_image_out();
-  }
-  return result;
-}
-// clang-format on
-
-std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
-  auto opt_dof = get_options("noise_dof");
-  const NoiseModel::vst_method_t vst_method =
-      get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
-  // -vst_method none: no variance-stabilising transform (identity), for any data type.
-  //   The noise distribution and -noise_dof are irrelevant, and the data reach PCA
-  //   unmodified (save for any demeaning); see the single-pass fallback / warning in
-  //   the calling commands.
-  if (vst_method == NoiseModel::vst_method_t::NONE) {
-    if (!opt_dof.empty())
-      WARN("Option -noise_dof is ignored when -vst_method none is specified: "
-           "no variance-stabilising transform is applied");
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
-  }
-  if (complex) {
-    if (!opt_dof.empty()) {
-      WARN("Option -noise_dof is ignored for complex input data: "
-           "the demodulated noise is Gaussian (one degree of freedom per channel)");
-    }
-    // The forward transform for Gaussian data is linear, so foi/koay/mom collapse to
-    //   the linear transform; the default is harmless and no warning is emitted.
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
-  }
-  // -vst_method linear: the simple linear transform u = m / sigma for magnitude data too.
-  //   This only normalises the scale (the magnitude noise remains heteroscedastic near
-  //   the floor) and performs no noise-floor debiasing; -noise_dof has no effect.
-  if (vst_method == NoiseModel::vst_method_t::LINEAR) {
-    if (!opt_dof.empty())
-      WARN("Option -noise_dof is ignored when -vst_method linear is specified: "
-           "the linear transform does not model the magnitude noise distribution");
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
-  }
-  const ssize_t num_channels = opt_dof.empty() ? 1 : ssize_t(opt_dof[0][0]);
-  const NoiseModel::distribution_t distribution = num_channels == 1                          //
-                                                      ? NoiseModel::distribution_t::RICIAN   //
-                                                      : NoiseModel::distribution_t::NONCENTRALCHI; //
-  return NoiseModel::make(distribution, num_channels, vst_method);
-}
-
-Demodulation select_demodulation(const Header &H) {
-  const bool complex = H.datatype().is_complex();
-  auto opt_mode = get_options("demodulate");
-  auto opt_axes = get_options("demod_axes");
-  Demodulation result;
-  if (opt_mode.empty()) {
-    if (complex) {
-      result.mode = demodulation_t::APC;
-    } else {
-      if (!opt_axes.empty()) {
-        throw Exception("Option -demod_axes cannot be specified: "
-                        "no phase demodulation of magnitude data");
-      }
-    }
-  } else {
-    result.mode = Enum::from_name<demodulation_t>(std::string_view(opt_mode[0][0]));
-    if (!complex) {
-      switch (result.mode) {
-      case demodulation_t::NONE:
-        WARN("Specifying -demodulate none is redundant: "
-             "never any phase demodulation for magnitude input data");
-        break;
-      default:
-        throw Exception("Phase modulation cannot be utilised for magnitude-only input data");
-      }
-    }
-  }
-  if (!complex)
-    return result;
-  if (opt_axes.empty()) {
-    auto slice_encoding_it = H.keyval().find("SliceEncodingDirection");
-    if (slice_encoding_it == H.keyval().end()) {
-      // TODO Ideally this would be the first two axes *on disk*,
-      //   not following transform realignment
-      INFO("No header information on slice encoding; "
-           "assuming first two axes are within-slice");
-      result.axes = {0, 1};
-    } else {
-      auto dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
-      for (size_t axis = 0; axis != 3; ++axis) {
-        if (!dir[axis])
-          result.axes.push_back(axis);
-      }
-      INFO("For header SliceEncodingDirection=\"" + slice_encoding_it->second + "\", " + //
-           "chose demodulation axes: " + join(result.axes, ","));                        //
-    }
-  } else {
-    result.axes = parse_ints<size_t>(opt_axes[0][0]);
-    for (auto axis : result.axes) {
-      if (axis > 2)
-        throw Exception("Phase demodulation implementation not yet robust to non-spatial axes");
-    }
-  }
-  return result;
-}
-
-// INVESTIGATION REQUIRED (ongoing need for explicit demeaning under BDCSVD):
-//   Demeaning prior to PCA was originally introduced to condition the self-adjoint
-//   (Gram-matrix) eigendecomposition at single precision, where a large common-mean /
-//   low inter-volume-variance series (e.g. fMRI) made rank estimation unstable. The
-//   default decomposition is now BDCSVD, which operates on the data matrix directly rather
-//   than its Gram matrix and is far better conditioned against a dominant mean (the mean
-//   appears as a single well-separated singular value). Whether explicit demeaning is still
-//   required at all under the default BDCSVD decomposition has not been re-evaluated and
-//   should be investigated; it may be reducible to optional / off-by-default.
-demean_type select_demean(const Header &H) {
-  bool shells_available = false;
-  try {
-    auto grad = DWI::get_DW_scheme(H);
-    auto shells = DWI::Shells(grad);
-    shells_available = true;
-  } catch (Exception &) {
-  }
-  const bool volume_groups_available = H.ndim() > 4;
-  auto opt = get_options("demean");
-  if (opt.empty()) {
-    if (shells_available) {
-      // Default reverted to per-b-value-shell demeaning when a gradient table is present.
-      //   VERIFICATION FROM REAL DATA REQUIRED: the prior default of whole-dataset demeaning
-      //   ('all') was adopted on the basis of subjective image assessment. Per-shell demeaning
-      //   is expected to be the better-justified default, particularly now that noise-floor
-      //   debiasing is anchored per-sample (debias_anchor == SAMPLE) and is therefore no longer
-      //   sensitive to the demeaning grouping; this should be confirmed empirically.
-      INFO("Automatically demeaning per b-value shell based on input gradient table");
-      return demean_type::SHELLS;
-    }
-    if (volume_groups_available) {
-      INFO("Automatically demeaning by volume groups");
-      return demean_type::VOLUME_GROUPS;
-    }
-    INFO("Automatically demeaning across all volumes");
-    return demean_type::ALL;
-  }
-  const demean_type user_selection = Enum::from_name<demean_type>(std::string_view(opt[0][0]));
-  if (user_selection == demean_type::SHELLS && !shells_available)
-    throw Exception("Cannot demean by b-value shells as shell structure could not be inferred");
-  if (user_selection == demean_type::VOLUME_GROUPS && !volume_groups_available)
-    throw Exception("Cannot demean by volume groups as image does not possess volume groups");
-  return user_selection;
-}
+namespace MR::Denoise::Precondition {
 
 namespace {
 // Private functions to prevent compiler attempting to create complex functions for real types
@@ -276,71 +65,10 @@ template <typename T> typename std::enable_if<!is_complex<T>::value, T>::type mo
   return in;
 }
 
-// Forward variance-stabilising transform applied to a single datum.
-// For complex (Gaussian) data the transform is applied independently to the
-//   real and imaginary channels, as documented by the NoiseModel interface.
-template <typename T>
-typename std::enable_if<!is_complex<T>::value, T>::type
-vst_forward(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  return T(model.stabilise(default_type(in), sigma));
-}
-template <typename T>
-typename std::enable_if<is_complex<T>::value, T>::type
-vst_forward(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  using R = typename T::value_type;
-  return T(R(model.stabilise(default_type(in.real()), sigma)), R(model.stabilise(default_type(in.imag()), sigma)));
-}
-
-// Algebraic inverse of the forward variance-stabilising transform,
-//   recovering the conventional (still-biased) intensity scale.
-template <typename T>
-typename std::enable_if<!is_complex<T>::value, T>::type
-vst_inverse(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  return T(model.inverse_algebraic(default_type(in), sigma));
-}
-template <typename T>
-typename std::enable_if<is_complex<T>::value, T>::type
-vst_inverse(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  using R = typename T::value_type;
-  return T(R(model.inverse_algebraic(default_type(in.real()), sigma)),
-           R(model.inverse_algebraic(default_type(in.imag()), sigma)));
-}
-
-// Exact-unbiased inverse of the forward variance-stabilising transform,
-//   mapping a stabilised-domain (group) mean to the bias-free underlying level.
-// Applied only to the per-group DC term so that the magnitude noise-floor bias
-//   is not re-introduced into the denoised output.
-template <typename T>
-typename std::enable_if<!is_complex<T>::value, T>::type
-vst_inverse_unbiased(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  return T(model.inverse_unbiased(default_type(in), sigma));
-}
-template <typename T>
-typename std::enable_if<is_complex<T>::value, T>::type
-vst_inverse_unbiased(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  using R = typename T::value_type;
-  return T(R(model.inverse_unbiased(default_type(in.real()), sigma)),
-           R(model.inverse_unbiased(default_type(in.imag()), sigma)));
-}
-
-// Local gain of the inverse transform at the operating point: the linear factor
-//   by which a stabilised-domain residual is mapped back to the intensity scale.
-// For complex (Gaussian) data the gain is identical across the real and imaginary
-//   channels and independent of the operating point, so a single real factor suffices.
-template <typename T>
-typename std::enable_if<!is_complex<T>::value, default_type>::type
-vst_jacobian(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  return model.jacobian(default_type(in), sigma);
-}
-template <typename T>
-typename std::enable_if<is_complex<T>::value, default_type>::type
-vst_jacobian(const NoiseModel::Base &model, const T in, const default_type sigma) {
-  return model.jacobian(default_type(in.real()), sigma);
-}
 } // namespace
 
 template <typename T>
-Precondition<T>::Precondition(Image<T> &image,
+Preconditioner<T>::Preconditioner(Image<T> &image,
                               const Demodulation &demodulation,
                               const demean_type demean,
                               Image<float> &vst_noise,
@@ -395,7 +123,7 @@ Precondition<T>::Precondition(Image<T> &image,
   //     non-linear phase) estimated once here and held unchanged for every iteration.
   // - APC: no fixed bootstrap. The phase is (re-)estimated from the empirical complex data by
   //     update_parameters() on every iteration, including the first (which self-calibrates a
-  //     global noise level; see PhaseEstimator). A unit-magnitude phase is allocated now so
+  //     global noise level; see AdaptivePhaseEstimator). A unit-magnitude phase is allocated now so
   //     the map is valid before the first pass (demodulation is a no-op until that pass
   //     overwrites it) and so it serves as the per-slice fallback for any slice APC cannot
   //     calibrate.
@@ -416,7 +144,7 @@ Precondition<T>::Precondition(Image<T> &image,
       phase_image.value() = cfloat(1.0f, 0.0f);
     break;
   }
-  apc = PhaseEstimator(demodulation.axes);
+  apc = AdaptivePhaseEstimator(demodulation.axes);
   apc_enabled = (demodulation.mode == demodulation_t::APC);
 
   // Step 2: Demeaning
@@ -484,7 +212,7 @@ Precondition<T>::Precondition(Image<T> &image,
 // Adaptive phase correction: re-estimate phase_image in place from the empirical complex
 //   input and the current noise level map. Complex T only; a compiled no-op for real T so the
 //   explicit template instantiations at the foot of this file remain well-formed.
-template <typename T> void Precondition<T>::update_phase(Image<T> &input) {
+template <typename T> void Preconditioner<T>::update_phase(Image<T> &input) {
   if constexpr (is_complex<T>::value) {
     // First pass: cold solve; every pass thereafter: warm-started native refinement. Downsample
     //   the first pass only when a later pass will refine it (multi-iteration schedule); a
@@ -497,7 +225,7 @@ template <typename T> void Precondition<T>::update_phase(Image<T> &input) {
 }
 
 template <typename T>
-void Precondition<T>::set_temporal_subsample(default_type fraction, Math::RNG &rng, ssize_t min_per_group) {
+void Preconditioner<T>::set_temporal_subsample(default_type fraction, Math::RNG &rng, ssize_t min_per_group) {
   temporal_subset.clear();
   if (fraction >= 1.0)
     return;
@@ -563,7 +291,7 @@ void Precondition<T>::set_temporal_subsample(default_type fraction, Math::RNG &r
          "for one or more groups");
 }
 
-template <typename T> std::vector<ssize_t> Precondition<T>::output_volume_to_group() const {
+template <typename T> std::vector<ssize_t> Preconditioner<T>::output_volume_to_group() const {
   const ssize_t mprime = header().size(3);
   std::vector<ssize_t> result;
   // Output row k corresponds to the original (serialised) volume orig(k); under a temporal
@@ -588,7 +316,7 @@ template <typename T> std::vector<ssize_t> Precondition<T>::output_volume_to_gro
 // Serialise this voxel's volumes into "data", applying phase demodulation and,
 //   where a noise level map is available, the forward variance-stabilising transform.
 template <typename T>
-void Precondition<T>::serialise_and_stabilise(Image<T> &input,
+void Preconditioner<T>::serialise_and_stabilise(Image<T> &input,
                                               Image<cfloat> &phase,
                                               Image<uint32_t> &serialise,
                                               const Transform &transform,
@@ -637,7 +365,7 @@ void Precondition<T>::serialise_and_stabilise(Image<T> &input,
   }
 }
 
-template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
+template <typename T> void Preconditioner<T>::compute_means(Image<T> input_arg) {
   if (!vst_mean_image.valid())
     return;
   // When partitioning is active, demeaning is performed per partition inside Estimate/Recon, so
@@ -697,7 +425,7 @@ template <typename T> void Precondition<T>::compute_means(Image<T> input_arg) {
 }
 
 template <typename T>
-void Precondition<T>::operator()(Image<T> input,
+void Preconditioner<T>::operator()(Image<T> input,
                                  Image<T> output,
                                  const bool inverse,
                                  const bias_handling_t bias_handling,
@@ -960,9 +688,9 @@ void Precondition<T>::operator()(Image<T> input,
   }
 }
 
-template class Precondition<float>;
-template class Precondition<double>;
-template class Precondition<cfloat>;
-template class Precondition<cdouble>;
+template class Preconditioner<float>;
+template class Preconditioner<double>;
+template class Preconditioner<cfloat>;
+template class Preconditioner<cdouble>;
 
-} // namespace MR::Denoise
+} // namespace MR::Denoise::Precondition

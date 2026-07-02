@@ -31,7 +31,7 @@
 #include "denoise/exports.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/partition.h"
-#include "denoise/precondition.h"
+#include "denoise/precondition/preconditioner.h"
 #include "denoise/spatial_subsample.h"
 #include "filter/smooth.h"
 #include "image.h"
@@ -47,7 +47,7 @@ struct Iteration {
   noise_smooth_type smooth_noiseout;
   // Fraction of volumes (along the supra-spatial axes) used for noise level estimation
   //   in this iteration; 1.0 uses all volumes. Sub-sampling is stratified by demeaning
-  //   group and is owned entirely by the preconditioner (Precondition::set_temporal_subsample).
+  //   group and is owned entirely by the preconditioner (Preconditioner::set_temporal_subsample).
   default_type temporal_subsample = 1.0;
   // Whether the noise level estimate is (re)computed within this iteration.
   //   Must be true for any non-final iteration. For the final iteration the default is
@@ -96,7 +96,7 @@ void estimate(Image<T> &input,
               std::shared_ptr<SpatialSubsample> subsample,
               const decomp_type decomposition,
               std::shared_ptr<Estimator::Base> estimator,
-              const Precondition<T> &preconditioner,
+              const Precondition::Preconditioner<T> &preconditioner,
               Exports &exports,
               const ssize_t num_partitions = 1,
               std::shared_ptr<const Partitioning> partitioning = nullptr,

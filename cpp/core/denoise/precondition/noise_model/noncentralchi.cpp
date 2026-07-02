@@ -15,18 +15,18 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/noise_model/noncentralchi.h"
+#include "denoise/precondition/noise_model/noncentralchi.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
 
-#include "denoise/noise_model/noise_model.h"
+#include "denoise/precondition/noise_model/noise_model.h"
 #include "enum.h"
 #include "exception.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 namespace {
 
@@ -355,4 +355,4 @@ std::string NonCentralChi::description() const {
          " DOF; VST: " + Enum::lowercase_name(vst_method) + ")";
 }
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

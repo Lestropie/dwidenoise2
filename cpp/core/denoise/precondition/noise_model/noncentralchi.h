@@ -21,11 +21,11 @@
 
 #include "types.h"
 
-#include "denoise/noise_model/base.h"
-#include "denoise/noise_model/lut.h"
-#include "denoise/noise_model/noise_model.h"
+#include "denoise/precondition/noise_model/base.h"
+#include "denoise/precondition/noise_model/lut.h"
+#include "denoise/precondition/noise_model/noise_model.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 // Magnitude noise model: non-central chi with 2N degrees of freedom
 //   (N receive channels combined by sum-of-squares); N = 1 is the Rician case.
@@ -64,4 +64,4 @@ protected:
   default_type floor_mean;
 };
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

@@ -23,9 +23,9 @@
 
 #include "types.h"
 
-#include "denoise/noise_model/base.h"
+#include "denoise/precondition/noise_model/base.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 // Statistical distribution governing the raw image intensities prior to PCA:
 // - GAUSSIAN: complex (or phase-demodulated) data; zero-mean Gaussian per channel.
@@ -64,4 +64,4 @@ std::shared_ptr<Base> make(const distribution_t distribution, //
                            const ssize_t num_channels,        //
                            const vst_method_t vst_method);    //
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

@@ -24,7 +24,7 @@
 
 #include "types.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 // Reusable lookup table on a uniform grid, with linear interpolation in the
 //   interior and linear extrapolation beyond either end.
@@ -62,4 +62,4 @@ private:
   std::vector<default_type> y;
 };
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

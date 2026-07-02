@@ -32,14 +32,14 @@
 //   - near-Gaussianity of the stabilised residual at moderate-to-high SNR;
 //   - Gaussian (complex) model is exactly the prior linear transform.
 
-#include "denoise/noise_model/noise_model.h"
+#include "denoise/precondition/noise_model/noise_model.h"
 
 #include <cmath>
 #include <cstdio>
 #include <random>
 #include <vector>
 
-using namespace MR::Denoise::NoiseModel;
+using namespace MR::Denoise::Precondition::NoiseModel;
 
 namespace {
 

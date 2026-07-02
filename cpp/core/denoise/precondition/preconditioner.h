@@ -23,10 +23,9 @@
 
 #include <Eigen/Dense>
 
-#include "app.h"
-#include "denoise/kernel/voxel.h"
-#include "denoise/noise_model/noise_model.h"
-#include "denoise/phase_estimator.h"
+#include "denoise/precondition/apc.h"
+#include "denoise/precondition/noise_model/noise_model.h"
+#include "denoise/precondition/precondition.h"
 #include "filter/demodulate.h"
 #include "header.h"
 #include "image.h"
@@ -35,75 +34,7 @@
 #include "transform.h"
 #include "types.h"
 
-namespace MR::Denoise {
-
-extern const char *const demodulation_description;
-
-// Phase demodulation applied to complex data before PCA. This [none, linear, hann, apc]
-//   classification refines the historical [none, linear, nonlinear]: both "hann" and "apc"
-//   are nonlinear-phase methods (they are not an independent axis of choice).
-// - NONE: no phase demodulation.
-// - LINEAR: regress a strictly linear phase ramp from each k-space (Cordero-Grande et al.
-//     2019); estimated once and held for every iteration.
-// - HANN: a fixed full-extent Hann-window nonlinear k-space phase, estimated once and held
-//     for every iteration (the previous "nonlinear" behaviour; retained for comparison).
-// - APC: noise-adaptive nonlinear phase (Pizzolato et al. 2020; see MR::Denoise::PhaseEstimator).
-//     Re-estimated every noise-estimation iteration from the empirical complex data by a
-//     noise-weighted total-variation smoothing. The first iteration, which has no noise map
-//     yet, self-calibrates from a data-derived global noise level with uniform weighting.
-//     This is the default for complex input data.
-enum class demodulation_t { NONE, LINEAR, HANN, APC };
-
-enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
-
-// Handling of the noise-distribution bias when reversing preconditioning
-//   (the inverse variance-stabilising transform); see vst_plan.md section 3.3.
-// - DEBIAS: map the per-group operating point (DC term) to the bias-free
-//     underlying signal level, removing the magnitude noise-floor bias (the
-//     residual "haze"); the denoised fluctuations are mapped by a linear gain,
-//     so their Gaussian character and the homoscedasticity correction are retained.
-// - PRESERVE: map the operating point to the conventional biased-magnitude level,
-//     reproducing magnitude-scale output with the noise floor retained.
-// For complex (Gaussian) data there is no distribution bias and the two modes coincide.
-enum class bias_handling_t { DEBIAS, PRESERVE };
-
-// Operating point at which the non-linear inverse variance-stabilising transform (and its
-//   noise-floor debiasing) is evaluated when reversing preconditioning:
-// - SAMPLE: undo the demeaning offset first, then apply the inverse pointwise at each
-//     volume's own denoised value (operating point = group mean + denoised residual). The
-//     demeaning is treated purely as PCA conditioning and is reversed exactly before the
-//     inverse transform; debiasing is then independent of the demeaning grouping, and the
-//     natural (signal-dependent) heteroscedasticity is restored on the output scale. (default)
-// - GROUP_MEAN: linearise the inverse about the per-group stabilised-domain mean (the
-//     demeaning offset), mapping the denoised residual through the local Jacobian. Reproduces
-//     the prior behaviour; debiasing accuracy then depends on how far each volume departs from
-//     its group mean. Applies only to the DEBIAS bias handling: the PRESERVE (algebraic)
-//     inverse is always evaluated pointwise (a faithful, grouping-independent reversal).
-enum class debias_anchor_t { SAMPLE, GROUP_MEAN };
-
-App::OptionGroup precondition_options(const bool include_output);
-
-// Construct the noise model governing the variance-stabilising transform
-//   from the -noise_dof and -vst_method command-line options.
-// For complex (or phase-demodulated) data, pass complex == true to obtain the
-//   Gaussian model; -noise_dof is then ignored (with a warning if specified).
-// For magnitude data, the receive-channel count N from -noise_dof selects a
-//   Rician (N == 1) or non-central chi (N > 1) model, built with the requested
-//   -vst_method strategy.
-std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex);
-
-class Demodulation {
-public:
-  Demodulation(demodulation_t mode) : mode(mode) {}
-  Demodulation() : mode(demodulation_t::NONE) {}
-  explicit operator bool() const { return mode != demodulation_t::NONE; }
-  bool operator!() const { return mode == demodulation_t::NONE; }
-  demodulation_t mode;
-  std::vector<size_t> axes;
-};
-Demodulation select_demodulation(const Header &);
-
-demean_type select_demean(const Header &);
+namespace MR::Denoise::Precondition {
 
 // Need to SFINAE define the demodulator type,
 //   so that it does not attempt to compile the demodulation filter for non-complex types
@@ -123,14 +54,14 @@ template <typename T> struct DemodulatorSelector<std::complex<T>> {
   using type = Filter::Demodulate;
 };
 
-template <typename T> class Precondition {
+template <typename T> class Preconditioner {
 public:
-  Precondition(Image<T> &image,
-               const Demodulation &demodulation,
-               const demean_type demean,
-               Image<float> &vst_noise,
-               std::shared_ptr<NoiseModel::Base> noise_model);
-  Precondition(Precondition &) = default;
+  Preconditioner(Image<T> &image,
+                 const Demodulation &demodulation,
+                 const demean_type demean,
+                 Image<float> &vst_noise,
+                 std::shared_ptr<NoiseModel::Base> noise_model);
+  Preconditioner(Preconditioner &) = default;
   // Refresh the preconditioning parameters together, each iteration of the noise-estimation
   //   schedule: the noise level map (VST scale), the stabilised-domain per-group means (VST
   //   offset, derived from it; see vst_plan.md section 3.2), and -- when adaptive phase
@@ -142,13 +73,14 @@ public:
   //   for real T); (2) -demodulate apc selected (apc_enabled); (3) a phase map is maintained
   //   (phase_image.valid()). APC runs every call, including the first: the incoming noise map
   //   may be absent on the first iteration, in which case the estimator self-calibrates a
-  //   global noise level from the data with uniform weighting (see PhaseEstimator); later
+  //   global noise level from the data with uniform weighting (see AdaptivePhaseEstimator); later
   //   iterations pass the refined spatially-varying map. When the schedule has more than one
   //   iteration (set_apc_coarse_first), the first APC pass is solved on a 2x-downsampled grid
   //   (cold start; a background phase is smooth, so this is near-lossless at ~1/4 the cost) and
   //   every subsequent pass runs at native resolution but warm-started from the previous estimate
-  //   with a reduced iteration budget (see PhaseEstimator). A single-iteration schedule solves its
-  //   sole, authoritative pass at native resolution. apc_first_pass tracks which regime applies.
+  //   with a reduced iteration budget (see AdaptivePhaseEstimator). A single-iteration schedule
+  //   solves its sole, authoritative pass at native resolution. apc_first_pass tracks which regime
+  //   applies.
   void update_parameters(Image<float> new_vst_noise, Image<T> input) {
     vst_noise_image = new_vst_noise;
     if constexpr (is_complex<T>::value) {          // (1)
@@ -265,12 +197,12 @@ private:
   //   phase_image from the empirical complex input, driven by the current noise map (or, on
   //   the first iteration when no map exists yet, a self-calibrated global noise level). The
   //   estimator itself is stateless/cheap to copy; its per-thread scratch is allocated inside
-  //   its threaded driver, so Precondition remains trivially copyable.
-  PhaseEstimator apc;
+  //   its threaded driver, so Preconditioner remains trivially copyable.
+  AdaptivePhaseEstimator apc;
   bool apc_enabled = false;     // -demodulate apc on complex data
   bool apc_first_pass = true;   // false after the first APC estimation: switches the estimator
                                 //   from the cold solve to warm-started native-resolution
-                                //   refinement (see update_parameters / PhaseEstimator)
+                                //   refinement (see update_parameters / AdaptivePhaseEstimator)
   bool apc_coarse_first = false; // solve the first (cold) APC pass on a 2x-downsampled grid; set
                                  //   by set_apc_coarse_first iff the schedule has >1 iteration
   // Second step (forward): variance-stabilising transform.
@@ -305,4 +237,4 @@ private:
   void update_phase(Image<T> &input);
 };
 
-} // namespace MR::Denoise
+} // namespace MR::Denoise::Precondition

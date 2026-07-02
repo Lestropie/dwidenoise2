@@ -21,7 +21,7 @@
 
 #include "types.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 // Abstract noise model.
 //
@@ -80,4 +80,4 @@ public:
   virtual bool is_linear() const = 0;
 };
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

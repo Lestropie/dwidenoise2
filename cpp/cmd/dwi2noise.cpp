@@ -27,9 +27,9 @@
 #include "denoise/iterative.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/mask.h"
-#include "denoise/noise_model/noise_model.h"
 #include "denoise/partition.h"
-#include "denoise/precondition.h"
+#include "denoise/precondition/noise_model/noise_model.h"
+#include "denoise/precondition/preconditioner.h"
 #include "denoise/schedule.h"
 #include "denoise/spatial_subsample.h"
 #include "dwi/gradient.h"
@@ -42,6 +42,7 @@
 using namespace MR;
 using namespace App;
 using namespace MR::Denoise;
+using namespace MR::Denoise::Precondition;
 
 // clang-format off
 void usage() {
@@ -260,7 +261,7 @@ void run(Header &dwi,
   //   the -noise_dof and -vst_method options (Gaussian for complex data).
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
-  Precondition<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
+  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
   // Solve the first (cold) adaptive-phase-correction pass on a 2x-downsampled grid only when a
   //   later iteration refines the phase at native resolution; a single-iteration schedule keeps
   //   its sole, authoritative pass at native resolution.

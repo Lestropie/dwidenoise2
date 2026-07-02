@@ -118,7 +118,7 @@ protected:
   // Per-(output) volume demeaning-group label (length m'); empty ⇒ no demeaning. Drives the
   //   per-partition per-group mean subtraction (kept orthogonal to each partition's PCA) and
   //   the per-partition preconditioner rank rp_p. (Under partitioning the preconditioner itself
-  //   performs no demeaning; see Precondition::set_partitioning_active.)
+  //   performs no demeaning; see Preconditioner::set_partitioning_active.)
   std::vector<ssize_t> volume_group;
   ssize_t num_demean_groups; // max(volume_group)+1, or 0 when volume_group is empty
 

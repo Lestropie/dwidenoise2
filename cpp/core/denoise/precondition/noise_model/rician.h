@@ -19,11 +19,11 @@
 
 #include <string>
 
-#include "denoise/noise_model/noise_model.h"
-#include "denoise/noise_model/noncentralchi.h"
+#include "denoise/precondition/noise_model/noise_model.h"
+#include "denoise/precondition/noise_model/noncentralchi.h"
 #include "enum.h"
 
-namespace MR::Denoise::NoiseModel {
+namespace MR::Denoise::Precondition::NoiseModel {
 
 // Rician noise model: the single-channel (N = 1) special case of the
 //   non-central chi distribution.
@@ -35,4 +35,4 @@ public:
   }
 };
 
-} // namespace MR::Denoise::NoiseModel
+} // namespace MR::Denoise::Precondition::NoiseModel

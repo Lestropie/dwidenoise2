@@ -25,7 +25,7 @@
 #include "image.h"
 #include "types.h"
 
-namespace MR::Denoise {
+namespace MR::Denoise::Precondition {
 
 // Noise-map-driven background-phase re-estimation ("Adaptive Phase Correction", APC),
 //   after Pizzolato et al., "Adaptive phase correction of diffusion-weighted images",
@@ -192,7 +192,7 @@ namespace MR::Denoise {
 //   Validate any resulting parameter change against denoised rank / noise_out on that same
 //   dataset (not phase MSE), consistent with the rest of this file's tuning guidance.
 // ---------------------------------------------------------------------------------------
-class PhaseEstimator {
+class AdaptivePhaseEstimator {
 public:
   struct Params {
     // Chambolle-Pock primal-dual iterations run between successive lambda updates. The
@@ -241,13 +241,13 @@ public:
     double min_domain_fraction = 0.02;
   };
 
-  PhaseEstimator() = default;
+  AdaptivePhaseEstimator() = default;
   // Two overloads rather than a defaulted `Params` argument: a `= Params()` default argument
   //   for a member function declared inside the class is a complete-class context that would
   //   require Params's default member initialisers before the enclosing class is complete
   //   (rejected by GCC).
-  explicit PhaseEstimator(std::vector<size_t> inslice_axes) : inslice_axes(std::move(inslice_axes)) {}
-  PhaseEstimator(std::vector<size_t> inslice_axes, Params params)
+  explicit AdaptivePhaseEstimator(std::vector<size_t> inslice_axes) : inslice_axes(std::move(inslice_axes)) {}
+  AdaptivePhaseEstimator(std::vector<size_t> inslice_axes, Params params)
       : inslice_axes(std::move(inslice_axes)), params(params) {}
 
   // Full-image entry point. Re-estimates the background phase for every 2-D in-slice plane
@@ -307,4 +307,4 @@ private:
   Params params;
 };
 
-} // namespace MR::Denoise
+} // namespace MR::Denoise::Precondition
