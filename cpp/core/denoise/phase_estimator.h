@@ -143,6 +143,55 @@ namespace MR::Denoise {
 //   outer loop) vs spatially-varying Monte-Carlo SURE (svSURE; MSE-optimal but the ~98-min
 //   bottleneck, deferred).
 // ---------------------------------------------------------------------------------------
+//
+// Data-driven early termination (2026-07-02) and the DWIDENOISE2_APC_PROFILE experiment.
+//   Beyond the reduced ..._warm budgets, run_cp() now stops a sweep sequence early once the
+//   relative per-sweep change in the primal image falls below Params::cp_tol (a genuinely
+//   data-driven cut -- it only shortens a call once *that specific plane, at that specific
+//   outer iteration* has actually stopped moving; the ..._warm budgets are a fixed, uniform
+//   guess). The comparison is folded into the primal update's existing per-voxel pass, so it
+//   costs no extra sweep over the plane. cp_tol defaults tight (1e-6): a safety net against
+//   waste, not a substitute for the ..._warm budgets, since the right threshold cannot be
+//   chosen from first principles -- it depends on how quickly real (not synthetic) DWI planes
+//   actually settle once warm-started, which is an empirical question.
+//
+//   To answer that question, build with -DDWIDENOISE2_APC_PROFILE to compile in a per-plane
+//   DEBUG() line (run under -debug) reporting, for every solve_plane() call: plane size,
+//   cold/warm, spatially-varying vs self-calibrated, ndomain fraction, sigmabar, lambda
+//   iterations used vs budgeted, total Chambolle-Pock sweeps actually consumed vs the full
+//   budget (n_lambda*n_cp + n_polish), and the converged lambda. This is compile-time gated
+//   (rather than always emitted under -debug) because computing and formatting it triggers
+//   string work on every one of the many thousands of solve_plane() calls in a full run, which
+//   would be a needless cost in ordinary -debug diagnostic use; opting in is a deliberate,
+//   separate build for this experiment. The sweep- and lambda-iteration counters that feed the
+//   line exist *only* to report it -- run_cp()'s early-exit decision itself needs no count, only
+//   the per-sweep relative-change comparison -- so those counters (and run_cp()'s ssize_t return)
+//   are themselves compiled out under the non-profile build, not merely left unprinted. A
+//   non-profile build's timing therefore isolates the effect of cp_tol's early exit from the
+//   cost of instrumenting it, which is the point of comparing the two builds' run times.
+//
+//   Suggested experiment: build a DWIDENOISE2_APC_PROFILE binary and run it (dwidenoise2 or
+//   dwi2noise, default -demodulate apc, a representative multi-iteration schedule) over a
+//   modest real DWI dataset -- large enough to be representative of real anatomy/coil geometry
+//   (not the synthetic data used so far), small enough that the per-plane DEBUG log is
+//   tractable to inspect (e.g. a single low-resolution shell, or a cropped FOV). From the log:
+//     - Histogram cp_sweeps actually used (post-cp_tol) against the ..._warm budget on warm
+//       passes: a distribution clustered well under budget confirms head-room and motivates
+//       lowering cp_iter_warm/polish_iter_warm directly (cheaper long-term than relying on
+//       cp_tol's per-sweep check); a distribution hugging the budget means the current warm
+//       budget is already close to necessary and cp_tol is doing the real work.
+//     - Trend of cp_sweeps / lambda_iters across successive outer (noise-estimation)
+//       iterations, per plane: Pizzolato's own noise-map update converges over a handful of
+//       outer iterations, so later-iteration APC calls are expected to need *less* work than
+//       the second call already assumes with a single reduced budget -- if the log shows a
+//       further monotonic decline, a schedule-position-dependent budget (not just cold/warm)
+//       is worth adding.
+//     - Any planes where lambda_iters or cp_sweeps repeatedly hit their budget unconverged
+//       (rel change still above tol) flag cp_tol/the ..._warm budgets as too aggressive for
+//       that anatomy -- inspect before trusting a global reduction.
+//   Validate any resulting parameter change against denoised rank / noise_out on that same
+//   dataset (not phase MSE), consistent with the rest of this file's tuning guidance.
+// ---------------------------------------------------------------------------------------
 class PhaseEstimator {
 public:
   struct Params {
@@ -168,6 +217,17 @@ public:
     ssize_t polish_iter_warm = 12;
     // Relative-change tolerance for early exit of the lambda fixed-point iteration.
     double lambda_tol = 1e-2;
+    // Relative-change tolerance for early exit of the *inner* Chambolle-Pock sweeps
+    //   themselves (both the lambda-loop sweeps and the polish sweeps), checked every sweep
+    //   at negligible extra cost (the comparison piggybacks on the primal update's existing
+    //   per-voxel pass, so it does not add another sweep over the plane). Deliberately tight
+    //   by default: this is a safety net against the *fixed* per-call budget doing
+    //   inconsequential extra work once a warm-started plane has already re-settled -- not a
+    //   replacement for the ..._warm budgets, which remain the primary lever validated against
+    //   denoised rank. Set to 0 (or a negative value) to disable and always spend the full
+    //   budget, matching pre-2026-07 behaviour exactly. See DWIDENOISE2_APC_PROFILE below for
+    //   the instrumentation used to choose a data-driven value from empirical runs.
+    double cp_tol = 1e-6;
     // The per-voxel fidelity weight w = sigmabar^2 / sigma^2 is clamped to
     //   [1/weight_clamp, weight_clamp] to bound its dynamic range (guards near-zero sigma in
     //   background voxels, where w would otherwise diverge).

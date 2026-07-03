@@ -26,6 +26,8 @@
 #include "algo/loop.h"
 #include "algo/threaded_loop.h"
 #include "interp/cubic.h"
+#include "math/math.h"
+#include "mrtrix.h"
 #include "transform.h"
 
 namespace MR::Denoise {
@@ -116,7 +118,7 @@ void upsample_phase(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
       const double w11 = fx * fy;
       const double r = w00 * pr_c(I0, J0) + w10 * pr_c(I1, J0) + w01 * pr_c(I0, J1) + w11 * pr_c(I1, J1);
       const double im = w00 * pi_c(I0, J0) + w10 * pi_c(I1, J0) + w01 * pi_c(I0, J1) + w11 * pi_c(I1, J1);
-      const double mag = std::sqrt(r * r + im * im);
+      const double mag = std::sqrt(Math::pow2(r) + Math::pow2(im));
       if (mag > std::numeric_limits<double>::min() * 1e3) {
         pr(i, j) = r / mag;
         pi(i, j) = im / mag;
@@ -170,7 +172,7 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
         const double s = sigma(i, j);
         if (std::isfinite(s) && s > sigma_floor) {
           ++n_known;
-          sum_sigma2_known += s * s;
+          sum_sigma2_known += Math::pow2(s);
         }
       }
   }
@@ -191,7 +193,7 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
         const double s = sigma(i, j);
         if (std::isfinite(s) && s > sigma_floor) {
           indom(i, j) = 1.0;
-          w(i, j) = std::min(w_hi, std::max(w_lo, sigmabar2 / (s * s)));
+          w(i, j) = std::min(w_hi, std::max(w_lo, sigmabar2 / Math::pow2(s)));
         } else {
           indom(i, j) = 0.0; // still smoothed, but not part of the calibration
           w(i, j) = 1.0;
@@ -201,7 +203,7 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
     const double sigma_hat = estimate_sigma_mad(fr, fi);
     if (!(sigma_hat > 0.0))
       return false; // fully degenerate slice (constant / empty): keep the incoming phase
-    sigmabar2 = sigma_hat * sigma_hat;
+    sigmabar2 = Math::pow2(sigma_hat);
     ndomain = Npix;
     indom.setConstant(1.0);
     w.setConstant(1.0); // uniform weighting (no spatial noise information)
@@ -243,9 +245,24 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   const double tau = 1.0 / std::sqrt(L2);
   const double sigma_cp = 1.0 / std::sqrt(L2);
 
-  // One primal-dual sweep at fidelity weight "lambda". Warm-starts from the current state.
+  // One primal-dual sweep at fidelity weight "lambda". Warm-starts from the current state, and
+  //   stops early once the relative per-sweep change in u falls below params.cp_tol (data-driven
+  //   early exit; see the DWIDENOISE2_APC_PROFILE discussion in phase_estimator.h). That
+  //   sum_diff2/sum_old2 comparison is the termination criterion itself -- it stays unconditional
+  //   -- and piggybacks on the primal update's existing per-voxel pass, so it adds no extra sweep
+  //   over the plane. The *sweep count itself* (returned only under DWIDENOISE2_APC_PROFILE) is
+  //   purely diagnostic and is compiled out otherwise, so that a non-profile build's execution
+  //   time reflects only the termination criterion, not the bookkeeping used to report it.
+#ifdef DWIDENOISE2_APC_PROFILE
+  auto run_cp = [&](const ssize_t niter, const double lambda) -> ssize_t {
+    ssize_t used = 0;
+#else
   auto run_cp = [&](const ssize_t niter, const double lambda) {
+#endif
     for (ssize_t iter = 0; iter != niter; ++iter) {
+#ifdef DWIDENOISE2_APC_PROFILE
+      ++used;
+#endif
       // Dual update: p <- proj_{||.||<=1} ( p + sigma_cp * grad(ubar) ), with the vectorial
       //   (channel-coupled) projection: divide the whole (r,i)x(x,y) 4-vector at each voxel
       //   by max(1, its joint L2 norm). Forward differences; Neumann boundary (zero gradient
@@ -260,7 +277,7 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
           const double qyr = pyr(i, j) + sigma_cp * gyr;
           const double qxi = pxi(i, j) + sigma_cp * gxi;
           const double qyi = pyi(i, j) + sigma_cp * gyi;
-          const double norm = std::sqrt(qxr * qxr + qyr * qyr + qxi * qxi + qyi * qyi);
+          const double norm = std::sqrt(Math::pow2(qxr) + Math::pow2(qyr) + Math::pow2(qxi) + Math::pow2(qyi));
           const double inv = 1.0 / std::max(1.0, norm);
           pxr(i, j) = qxr * inv;
           pyr(i, j) = qyr * inv;
@@ -274,6 +291,10 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
       //   u = ( v + tau*lambda*w*f ) / ( 1 + tau*lambda*w ), v = u + tau*div(p). Over-relaxed
       //   ubar = 2*u_new - u_old (theta = 1). Each voxel is independent, so the in-place
       //   overwrite of u is safe.
+      // Relative per-sweep change in u, accumulated alongside the update itself (no extra pass):
+      //   the data-driven early-exit test below compares sum_diff2 against sum_old2.
+      double sum_diff2 = 0.0;
+      double sum_old2 = 0.0;
       for (ssize_t j = 0; j != Ny; ++j) {
         for (ssize_t i = 0; i != Nx; ++i) {
           // divergence, real channel
@@ -296,13 +317,22 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
           const double vi = ui(i, j) + tau * (dxi + dyi);
           const double unewr = (vr + tau * wl * fr(i, j)) / denom;
           const double unewi = (vi + tau * wl * fi(i, j)) / denom;
-          ubr(i, j) = 2.0 * unewr - ur(i, j);
-          ubi(i, j) = 2.0 * unewi - ui(i, j);
+          const double oldr = ur(i, j);
+          const double oldi = ui(i, j);
+          sum_diff2 += Math::pow2(unewr - oldr) + Math::pow2(unewi - oldi);
+          sum_old2 += Math::pow2(oldr) + Math::pow2(oldi);
+          ubr(i, j) = 2.0 * unewr - oldr;
+          ubi(i, j) = 2.0 * unewi - oldi;
           ur(i, j) = unewr;
           ui(i, j) = unewi;
         }
       }
+      if (params.cp_tol > 0.0 && sum_old2 > 0.0 && sum_diff2 < Math::pow2(params.cp_tol) * sum_old2)
+        break;
     }
+#ifdef DWIDENOISE2_APC_PROFILE
+    return used;
+#endif
   };
 
   // --- Discrepancy-criterion (Morozov) fixed point on lambda ----------------------------
@@ -311,8 +341,19 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   //   and lambda are refined jointly (the solver is warm-started across updates).
   double lambda = 2.1237 / sigmabar + 0.0547 / sigmabar2; // eq. 7
   const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar;
+  // Bookkeeping for the DWIDENOISE2_APC_PROFILE DEBUG() call below only -- entirely compiled out
+  //   otherwise, so a non-profile build's timing reflects only run_cp's cp_tol early exit, not
+  //   the cost of reporting it.
+#ifdef DWIDENOISE2_APC_PROFILE
+  ssize_t lambda_iters_used = 0;
+  ssize_t cp_sweeps_used = 0;
+#endif
   for (ssize_t li = 0; li != n_lambda; ++li) {
-    run_cp(n_cp, lambda);
+#ifdef DWIDENOISE2_APC_PROFILE
+    lambda_iters_used = li + 1;
+    cp_sweeps_used +=
+#endif
+        run_cp(n_cp, lambda);
     const double Rr = std::sqrt((indom * w * (ur - fr).square()).sum());
     const double Ri = std::sqrt((indom * w * (ui - fi).square()).sum());
     const double lambda_new = lambda * (Rr + Ri) / target_scale;
@@ -325,12 +366,26 @@ bool PhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
   }
 
   // Settle the image at the converged lambda before extracting its argument.
+#ifdef DWIDENOISE2_APC_PROFILE
+  const ssize_t polish_sweeps_used = run_cp(n_polish, lambda);
+  cp_sweeps_used += polish_sweeps_used;
+  DEBUG("APC solve_plane: " + str(Nx) + "x" + str(Ny) +                              //
+        " warm=" + str(warm_start) +                                                 //
+        " spatially_varying=" + str(spatially_varying) +                             //
+        " ndomain=" + str(ndomain) + "/" + str(Npix) +                               //
+        " sigmabar=" + str(sigmabar) +                                               //
+        " lambda_iters=" + str(lambda_iters_used) + "/" + str(n_lambda) +            //
+        " cp_sweeps=" + str(cp_sweeps_used) + "/" + str(n_lambda * n_cp + n_polish) + //
+        " polish_sweeps=" + str(polish_sweeps_used) + "/" + str(n_polish) +          //
+        " final_lambda=" + str(lambda));
+#else
   run_cp(n_polish, lambda);
+#endif
 
   // --- Extract unit-magnitude phase -----------------------------------------------------
   for (ssize_t j = 0; j != Ny; ++j)
     for (ssize_t i = 0; i != Nx; ++i) {
-      const double mag = std::sqrt(ur(i, j) * ur(i, j) + ui(i, j) * ui(i, j));
+      const double mag = std::sqrt(Math::pow2(ur(i, j)) + Math::pow2(ui(i, j)));
       if (mag > std::numeric_limits<double>::min() * 1e3) {
         phase_r(i, j) = ur(i, j) / mag;
         phase_i(i, j) = ui(i, j) / mag;
