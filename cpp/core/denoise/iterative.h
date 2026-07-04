@@ -25,6 +25,7 @@
 
 #include "algo/threaded_copy.h"
 #include "algo/threaded_loop.h"
+#include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/estimator.h"
@@ -140,14 +141,8 @@ void estimate(Image<T> &input,
   //   level used for stabilisation (sigma_{k-1}) yields the first-order refinement
   //   sigma_k = sigma_{k-1} * (post-VST sigma) (vst_plan.md section 5).
   if (vst_image.valid()) {
-    Interp::Cubic<Image<float>> vst_interp(vst_image);
-    const Transform transform(subsample->header());
-    for (auto l = Loop(exports.noise_out)(exports.noise_out); l; ++l) {
-      vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(exports.noise_out.index(0)),
-                                                                    double(exports.noise_out.index(1)),
-                                                                    double(exports.noise_out.index(2))}));
-      exports.noise_out.value() *= vst_interp.value();
-    }
+    ThreadedLoop(exports.noise_out)
+        .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), exports.noise_out);
   }
 }
 

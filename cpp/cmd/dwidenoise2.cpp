@@ -332,9 +332,9 @@ void usage() {
     + Argument("file").type_file_out()
   + Option("residual_statistics",
            "export images containing statistics of the residuals between input and denoised data,"
-          " with image paths in order representing: mean, variance, maxabs")
+          " with image paths in order representing: mean, standard deviation, maxabs")
     + Argument("mean_image").type_image_out()
-    + Argument("variance_image").type_image_out()
+    + Argument("std_image").type_image_out()
     + Argument("maxabs_image").type_image_out()
 
 
@@ -378,6 +378,112 @@ typename std::enable_if<std::is_same<T, cdouble>::value, default_type>::type mod
 template <typename T> typename std::enable_if<!is_complex<T>::value, default_type>::type modulus(const T in) {
   return Math::pow2(in);
 }
+
+namespace {
+// Voxel-wise functors for the final-output post-processing loops. ThreadedLoop copies the functor
+//   per thread, so each thread holds independent Image accessors; all operations below are
+//   voxel-local (or write voxel-disjoint volumes), so no locking is required.
+
+// Copy one image's value into another, voxel for voxel.
+struct CopyValueFunctor {
+  template <class ImageOut, class ImageIn> void operator()(ImageOut &out, ImageIn &in) {
+    out.value() = in.value();
+  }
+};
+
+// Rescale overcomplete-aggregation output: divide every volume at a voxel by that voxel's
+//   accumulated aggregation weight (voxels with zero weight are left unchanged). The 3-D weight
+//   map is the looped image; a per-thread copy of the (4-D) preconditioned output is held as a
+//   member and its volumes are updated in place.
+template <typename T> class AggregationRescaleFunctor {
+public:
+  explicit AggregationRescaleFunctor(Image<T> &output_preconditioned)
+      : output_preconditioned(output_preconditioned) {}
+  void operator()(Image<float> &sum_aggregation) {
+    const float sum = sum_aggregation.value();
+    if (sum == 0.0F)
+      return;
+    const double multiplier = 1.0 / static_cast<double>(sum);
+    assign_pos_of(sum_aggregation).to(output_preconditioned);
+    for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
+      output_preconditioned.value() *= multiplier;
+  }
+
+private:
+  Image<T> output_preconditioned;
+};
+
+// Divide the per-voxel output rank by its accumulated aggregation weight (0 where the weight is 0).
+struct RankOutputAggregationFunctor {
+  void operator()(Image<float> &rank_output, Image<float> &sum_aggregation) {
+    const float sum = sum_aggregation.value();
+    rank_output.value() = sum == 0.0F ? 0.0F : (rank_output.value() / sum);
+  }
+};
+
+// Add the preconditioner's demean null-rank back into the reported input rank (clamped to
+//   max_rank), only for voxels carrying a non-zero estimated signal rank.
+class RankInputAddbackFunctor {
+public:
+  RankInputAddbackFunctor(const uint16_t null_rank, const uint16_t max_rank)
+      : null_rank(null_rank), max_rank(max_rank) {}
+  void operator()(Image<uint16_t> &rank_input) {
+    if (rank_input.value() > 0)
+      rank_input.value() = std::min<uint16_t>(uint16_t(rank_input.value()) + null_rank, max_rank);
+  }
+
+private:
+  uint16_t null_rank;
+  uint16_t max_rank;
+};
+
+// Add the preconditioner's demean null-rank back into the reported output rank (clamped).
+class RankOutputAddbackFunctor {
+public:
+  RankOutputAddbackFunctor(const float null_rank, const float max_rank)
+      : null_rank(null_rank), max_rank(max_rank) {}
+  void operator()(Image<float> &rank_output) {
+    rank_output.value() = std::min<float>(float(rank_output.value()) + null_rank, max_rank);
+  }
+
+private:
+  float null_rank;
+  float max_rank;
+};
+
+// Per-voxel residual summary statistics. ThreadedLoop copies the functor per thread, so each thread
+//   holds its own (private) Image accessors for the 4-D input and denoised output. At each spatial
+//   voxel the functor runs an inner Welford accumulation across all supra-spatial (volume) axes, so
+//   the mean and variance are aggregated per voxel over that voxel's own volumes only: the sample
+//   count is the number of volumes at the voxel, not the whole-image element count. maxabs is the
+//   largest residual magnitude across that voxel's volumes.
+template <typename T> class ResidualStatsFunctor {
+public:
+  ResidualStatsFunctor(const Image<T> &input, const Image<T> &output) : input(input), output(output) {}
+  void operator()(Image<T> &residuals_mean, Image<float> &residuals_std, Image<float> &residuals_maxabs) {
+    assign_pos_of(residuals_mean, 0, 3).to(input, output);
+    T mean(0.0);
+    T m2(0.0);
+    default_type maxabs = 0.0;
+    size_t count = 0;
+    for (auto l = Loop(3)(input, output); l; ++l) {
+      const T diff = T(output.value()) - T(input.value());
+      ++count;
+      const T delta = diff - mean;
+      mean += T(delta / default_type(count));
+      const T delta2 = diff - mean;
+      m2 += delta * delta2;
+      maxabs = std::max(maxabs, default_type(std::abs(diff)));
+    }
+    residuals_mean.value() = mean;
+    residuals_std.value() = std::sqrt(std::abs(m2) / default_type(count));
+    residuals_maxabs.value() = maxabs;
+  }
+
+private:
+  Image<T> input, output;
+};
+} // namespace
 
 template <typename T>
 void run(Header &dwi,
@@ -521,8 +627,7 @@ void run(Header &dwi,
     if (rank_per_mm.valid()) {
       Header H_rpm(rank_per_mm);
       Image<float> rpm_out = Image<float>::create(opt[0][0].as_text(), H_rpm);
-      for (auto l = Loop(rpm_out)(rank_per_mm, rpm_out); l; ++l)
-        rpm_out.value() = rank_per_mm.value();
+      ThreadedLoop(rpm_out).run(CopyValueFunctor(), rpm_out, rank_per_mm);
     } else {
       WARN("-rankpermm_out: no signal-rank density is available to export "
            "(the schedule performed no noise-estimation iteration and none was supplied via "
@@ -617,28 +722,11 @@ void run(Header &dwi,
 
   // Rescale output if aggregation was performed
   if (aggregator != aggregator_type::EXCLUSIVE) {
-    for (auto l_voxel = Loop(final_exports.sum_aggregation)      //
-         (output_preconditioned, final_exports.sum_aggregation); //
-         l_voxel;                                                //
-         ++l_voxel) {                                            //
-      const float sum_aggregation = final_exports.sum_aggregation.value();
-      if (sum_aggregation != 0.0F) {
-        const double multiplier = 1.0 / static_cast<double>(sum_aggregation);
-        for (auto l_volume = Loop(3)(output_preconditioned); l_volume; ++l_volume)
-          output_preconditioned.value() *= multiplier;
-      }
-    }
+    ThreadedLoop(final_exports.sum_aggregation)
+        .run(AggregationRescaleFunctor<T>(output_preconditioned), final_exports.sum_aggregation);
     if (final_exports.rank_output.valid()) {
-      for (auto l = Loop(final_exports.sum_aggregation)                //
-           (final_exports.rank_output, final_exports.sum_aggregation); //
-           l;                                                          //
-           ++l) {                                                      //
-        const float sum_aggregation = final_exports.sum_aggregation.value();
-        final_exports.rank_output.value() =                           //
-            sum_aggregation == 0.0F                                   //
-            ? 0.0F                                                    //
-            : (final_exports.rank_output.value() /= sum_aggregation); //
-      }
+      ThreadedLoop(final_exports.sum_aggregation)
+          .run(RankOutputAggregationFunctor(), final_exports.rank_output, final_exports.sum_aggregation);
     }
   }
 
@@ -654,40 +742,27 @@ void run(Header &dwi,
   const ssize_t preconditioner_null_rank = preconditioner.demean_rank();
   if (preconditioner_null_rank > 0) {
     if (final_exports.rank_input.valid()) {
-      for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l) {
-        if (final_exports.rank_input.value() > 0)
-          final_exports.rank_input.value() =                                                                      //
-              std::min<uint16_t>(uint16_t(final_exports.rank_input.value()) + uint16_t(preconditioner_null_rank), //
-                                 uint16_t(max_rank));                                                             //
-      }
+      ThreadedLoop(final_exports.rank_input)
+          .run(RankInputAddbackFunctor(uint16_t(preconditioner_null_rank), uint16_t(max_rank)),
+               final_exports.rank_input);
     }
     if (final_exports.rank_output.valid()) {
-      for (auto l = Loop(final_exports.rank_output)(final_exports.rank_output); l; ++l)
-        final_exports.rank_output.value() =                                                             //
-            std::min<float>(float(final_exports.rank_output.value()) + float(preconditioner_null_rank), //
-                            float(max_rank));                                                           //
+      ThreadedLoop(final_exports.rank_output)
+          .run(RankOutputAddbackFunctor(float(preconditioner_null_rank), float(max_rank)),
+               final_exports.rank_output);
     }
   }
   if (vst_image.valid()) {
     if (final_exports.noise_out.valid()) {
-      Interp::Cubic<Image<float>> vst_interp(vst_image);
-      const Transform transform(subsample->header());
-      for (auto l = Loop(final_exports.noise_out)(final_exports.noise_out); l; ++l) {
-        vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
-                                                                      double(final_exports.noise_out.index(1)),
-                                                                      double(final_exports.noise_out.index(2))}));
-        final_exports.noise_out.value() *= vst_interp.value();
-      }
+      ThreadedLoop(final_exports.noise_out)
+          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), final_exports.noise_out);
     }
     if (final_exports.lamplus.valid()) {
-      Interp::Cubic<Image<float>> vst_interp(vst_image);
-      const Transform transform(subsample->header());
-      for (auto l = Loop(final_exports.lamplus)(final_exports.lamplus); l; ++l) {
-        vst_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(final_exports.noise_out.index(0)),
-                                                                      double(final_exports.noise_out.index(1)),
-                                                                      double(final_exports.noise_out.index(2))}));
-        final_exports.lamplus.value() *= vst_interp.value();
-      }
+      // Note: each lamplus voxel is scaled by the noise level interpolated at *its own* scanner
+      //   position (the looped image's index), correcting a prior copy-paste that sampled
+      //   final_exports.noise_out's index here.
+      ThreadedLoop(final_exports.lamplus)
+          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), final_exports.lamplus);
     }
   }
 
@@ -703,22 +778,15 @@ void run(Header &dwi,
     H_resstats_real.datatype() = DataType::Float32;
     H_resstats_real.datatype().set_byte_order_native();
     Image<T> residuals_mean = Image<T>::create(opt[0][0], H_resstats_complex);
-    Image<T> residuals_m2 = Image<T>::scratch(H_resstats_complex);
     Image<float> residuals_std = Image<float>::create(opt[0][1], H_resstats_real);
     Image<float> residuals_maxabs = Image<float>::create(opt[0][2], H_resstats_real);
-    size_t count = 0;
-    for (auto l = Loop("Computing statistics of denoising residuals", dwi)(input, output); l; ++l) {
-      assign_pos_of(input, 0, 3).to(residuals_mean, residuals_m2, residuals_maxabs);
-      const T diff = T(output.value()) - T(input.value());
-      count++;
-      const T delta = diff - T(residuals_mean.value());
-      residuals_mean.value() += T(delta / default_type(count));
-      const T delta2 = diff - T(residuals_mean.value());
-      residuals_m2.value() += delta * delta2;
-      residuals_maxabs.value() = std::max(default_type(residuals_maxabs.value()), default_type(std::abs(diff)));
-    }
-    for (auto l = Loop(H_resstats_real)(residuals_m2, residuals_std); l; ++l)
-      residuals_std.value() = std::sqrt(std::abs(T(residuals_m2.value())) / count);
+    // Per-voxel residual statistics: multi-thread over one spatial axis (the outer, slice axis) with
+    //   the two in-slice spatial axes iterated per thread; the Welford mean/variance accumulation
+    //   across all supra-spatial axes runs inside the functor, so each voxel's statistics are
+    //   aggregated over that voxel's volumes only.
+    ThreadedLoop("Computing statistics of denoising residuals", residuals_mean,
+                 std::vector<size_t>({2}), std::vector<size_t>({0, 1}))
+        .run(ResidualStatsFunctor<T>(input, output), residuals_mean, residuals_std, residuals_maxabs);
   }
 }
 

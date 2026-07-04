@@ -24,6 +24,8 @@
 #include "app.h"
 #include "header.h"
 #include "image.h"
+#include "interp/cubic.h"
+#include "transform.h"
 
 namespace MR::Denoise {
 
@@ -101,5 +103,28 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 //   (scalar value or 3D image path), mirroring import_vst_noise_map(). The map is conditioned
 //   (NaN->0 and padded) so it can be safely interpolated to size the reconstruction kernel.
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial);
+
+// Multiply a 3-D map in place by the noise level (variance-stabilising-transform scale)
+//   interpolated at each voxel's scanner position. When the data were stabilised with a noise
+//   map, an estimate derived on the stabilised data is a unit-less correction factor; multiplying
+//   by the noise level recovers the first-order refinement on the native scale (see
+//   Iterative::estimate and the dwidenoise2 final noise_out / lamplus exports). ThreadedLoop
+//   copies the functor per thread, giving each thread its own interpolator; the map being scaled
+//   is the looped image, so writes are voxel-disjoint. "grid" is the header defining the map's
+//   voxel-to-scanner transform (the sub-sample grid).
+class NoiseMapVSTRescaleFunctor {
+public:
+  NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid)
+      : vst_interp(vst_image), transform(grid) {}
+  void operator()(Image<float> &map) {
+    vst_interp.scanner(transform.voxel2scanner *
+                       Eigen::Vector3d({double(map.index(0)), double(map.index(1)), double(map.index(2))}));
+    map.value() *= vst_interp.value();
+  }
+
+private:
+  Interp::Cubic<Image<float>> vst_interp;
+  Transform transform;
+};
 
 } // namespace MR::Denoise

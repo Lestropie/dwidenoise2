@@ -54,7 +54,23 @@ template <typename T> struct DemodulatorSelector<std::complex<T>> {
   using type = Filter::Demodulate;
 };
 
+// Per-voxel ThreadedLoop functors implementing the forward / inverse preconditioning transforms
+//   and the stabilised-domain mean computation (defined in preconditioner.cpp). Declared here only
+//   so Preconditioner can befriend them: each needs the private serialise_and_stabilise() helper
+//   and the stored data-layout / noise-model state. Each processes one spatial voxel per
+//   invocation (its full column of volumes), which is independent of every other voxel, so the
+//   loop parallelises without locking.
+namespace detail {
+template <typename T> class ComputeMeansFunctor;
+template <typename T> class ForwardApplyFunctor;
+template <typename T> class InverseApplyFunctor;
+} // namespace detail
+
 template <typename T> class Preconditioner {
+  friend class detail::ComputeMeansFunctor<T>;
+  friend class detail::ForwardApplyFunctor<T>;
+  friend class detail::InverseApplyFunctor<T>;
+
 public:
   Preconditioner(Image<T> &image,
                  const Demodulation &demodulation,

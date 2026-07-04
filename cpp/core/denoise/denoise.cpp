@@ -19,6 +19,7 @@
 
 #include <optional>
 
+#include "algo/threaded_loop.h"
 #include "axes.h"
 #include "filter/smooth.h"
 #include "transform.h"
@@ -136,6 +137,61 @@ size_t num_volumes(const Header& H) {
   }
 }
 
+namespace {
+// Voxel-wise functors for ThreadedLoop. ThreadedLoop copies the functor per thread, so each
+//   thread receives independent Image voxel accessors (deep-copied); the operations below are
+//   strictly voxel-local, so no locking is required.
+
+// Copy (and optionally condition) a noise-level map into a scratch image, with either padded
+//   edge-clamped sampling (pad) or a direct positional copy, and optional NaN-to-zero imputation.
+//   Holds its own copy of the source image so each thread samples it independently.
+class ConditionNoiseMapFunctor {
+public:
+  ConditionNoiseMapFunctor(Image<float> &in, const noise_impute_type nan_to_zero, const noise_pad_type pad)
+      : in(in), nan_to_zero(nan_to_zero), pad(pad) {}
+  void operator()(Image<float> &out) {
+    if (pad == noise_pad_type::PAD) {
+      for (ssize_t axis = 0; axis != 3; ++axis)
+        in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
+    } else {
+      assign_pos_of(out).to(in);
+    }
+    if (nan_to_zero == noise_impute_type::NAN_TO_ZERO)
+      out.value() = std::isfinite(in.value()) ? in.value() : 0.0F;
+    else
+      out.value() = in.value();
+  }
+
+private:
+  Image<float> in;
+  noise_impute_type nan_to_zero;
+  noise_pad_type pad;
+};
+
+// Fill every voxel of a scratch image with a fixed value.
+class FillFloatFunctor {
+public:
+  explicit FillFloatFunctor(const float value) : value(value) {}
+  void operator()(Image<float> &image) { image.value() = value; }
+
+private:
+  float value;
+};
+
+// Per-voxel signal-rank density (rank per mm of kernel radius): rank_input / (P * radius).
+class RankPerMMFunctor {
+public:
+  explicit RankPerMMFunctor(const default_type partition_scale) : partition_scale(partition_scale) {}
+  void operator()(Image<float> &result, Image<uint16_t> &rank_input, Image<float> &max_dist) {
+    const float radius = max_dist.value();
+    result.value() = radius > 0.0F ? float(rank_input.value() / (partition_scale * radius)) : 0.0F;
+  }
+
+private:
+  default_type partition_scale;
+};
+} // namespace
+
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type nan_to_zero,
                                  const noise_pad_type pad,
@@ -149,18 +205,7 @@ Image<float> condition_noise_map(Image<float> &in,
     H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{-2.0, -2.0, -2.0};
   }
   Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
-  for (auto l = Loop(out)(out); l; ++l) {
-    if (pad == noise_pad_type::PAD) {
-      for (ssize_t axis = 0; axis != 3; ++axis)
-        in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
-    } else {
-      assign_pos_of(out).to(in);
-    }
-    if (nan_to_zero == noise_impute_type::NAN_TO_ZERO)
-      out.value() = std::isfinite(in.value()) ? in.value() : 0.0F;
-    else
-      out.value() = in.value();
-  }
+  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, nan_to_zero, pad), out);
   if (smooth == noise_smooth_type::SMOOTH) {
     Filter::Smooth smooth_filter(out);
     smooth_filter(out);
@@ -186,8 +231,7 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
     H.datatype() = DataType::Float32;
     H.datatype().set_byte_order_native();
     in = Image<float>::scratch(H, "Spatially-constant noise level map");
-    for (auto l = Loop(in)(in); l; ++l)
-      in.value() = float(scalar_value.value());
+    ThreadedLoop(in).run(FillFloatFunctor(float(scalar_value.value())), in);
   } else {
     in = Image<float>::open(std::string(arg));
     if (in.ndim() != 3)
@@ -200,10 +244,7 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
   assert(num_partitions >= 1);
   Image<float> result = Image<float>::scratch(max_dist, "Scratch image for rank per mm kernel radius");
   const default_type partition_scale = default_type(num_partitions);
-  for (auto l = Loop(result)(rank_input, max_dist, result); l; ++l) {
-    const float radius = max_dist.value();
-    result.value() = radius > 0.0F ? float(rank_input.value() / (partition_scale * radius)) : 0.0F;
-  }
+  ThreadedLoop(result).run(RankPerMMFunctor(partition_scale), result, rank_input, max_dist);
   return result;
 }
 
@@ -224,8 +265,7 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
     H.datatype() = DataType::Float32;
     H.datatype().set_byte_order_native();
     in = Image<float>::scratch(H, "Spatially-constant rank-per-mm map");
-    for (auto l = Loop(in)(in); l; ++l)
-      in.value() = float(scalar_value.value());
+    ThreadedLoop(in).run(FillFloatFunctor(float(scalar_value.value())), in);
   } else {
     in = Image<float>::open(std::string(arg));
     if (in.ndim() != 3)

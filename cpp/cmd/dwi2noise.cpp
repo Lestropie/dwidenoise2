@@ -243,6 +243,33 @@ void usage() {
 }
 // clang-format on
 
+namespace {
+// Voxel-wise functors for the final-export loops. ThreadedLoop copies the functor per thread, so
+//   each thread holds independent Image accessors; every operation below is voxel-local.
+
+// Copy one image's value into another, voxel for voxel.
+struct CopyValueFunctor {
+  template <class ImageOut, class ImageIn> void operator()(ImageOut &out, ImageIn &in) {
+    out.value() = in.value();
+  }
+};
+
+// Add the preconditioner's demean null-rank back into the reported input rank (clamped to
+//   max_rank), only for voxels carrying a non-zero estimated signal rank.
+class RankInputAddbackFunctor {
+public:
+  RankInputAddbackFunctor(const uint16_t null_rank, const uint16_t max_rank)
+      : null_rank(null_rank), max_rank(max_rank) {}
+  void operator()(Image<uint16_t> &rank_input) {
+    rank_input.value() = std::min<uint16_t>(uint16_t(rank_input.value()) + null_rank, max_rank);
+  }
+
+private:
+  uint16_t null_rank;
+  uint16_t max_rank;
+};
+} // namespace
+
 template <typename T>
 void run(Header &dwi,
          const Demodulation &demodulation,
@@ -381,8 +408,7 @@ void run(Header &dwi,
                                                          noise_impute_type::NAN_TO_ZERO,
                                                          noise_pad_type::NONE,
                                                          noise_smooth_type::SMOOTH);
-    for (auto l = Loop(final_exports.noise_out)(smoothed, final_exports.noise_out); l; ++l)
-      final_exports.noise_out.value() = smoothed.value();
+    ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, smoothed);
   }
 
   // Optionally export the per-voxel signal-rank density (rank per mm of kernel radius) of this final
@@ -400,8 +426,7 @@ void run(Header &dwi,
           Denoise::compute_rank_per_mm(final_exports.rank_input, final_exports.max_dist, num_partitions);
       Header H_rpm(final_exports.max_dist);
       Image<float> out = Image<float>::create(opt_rpm[0][0].as_text(), H_rpm);
-      for (auto l = Loop(out)(rpm, out); l; ++l)
-        out.value() = rpm.value();
+      ThreadedLoop(out).run(CopyValueFunctor(), out, rpm);
     }
   }
 
@@ -412,9 +437,8 @@ void run(Header &dwi,
   const uint16_t null_rank = uint16_t(preconditioner.demean_rank());
   const uint16_t max_rank = Denoise::num_volumes(dwi);
   if (null_rank > 0 && final_exports.rank_input.valid()) {
-    for (auto l = Loop(final_exports.rank_input)(final_exports.rank_input); l; ++l)
-      final_exports.rank_input.value() =
-          std::min<uint16_t>(uint16_t(final_exports.rank_input.value()) + null_rank, max_rank);
+    ThreadedLoop(final_exports.rank_input)
+        .run(RankInputAddbackFunctor(null_rank, max_rank), final_exports.rank_input);
   }
 }
 

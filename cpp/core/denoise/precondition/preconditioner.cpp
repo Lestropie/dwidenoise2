@@ -21,10 +21,12 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <vector>
 
 #include "algo/copy.h"
+#include "algo/threaded_loop.h"
 #include "app.h"
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
@@ -64,6 +66,14 @@ template <typename T> typename std::enable_if<!is_complex<T>::value, T>::type mo
   assert(false);
   return in;
 }
+
+// Fill every voxel of the adaptive-phase-correction phase map with a unit real phase (a no-op
+//   demodulator) before the first APC estimation pass overwrites it. Voxel-wise; ThreadedLoop
+//   copies the functor per thread.
+class FillUnitPhaseFunctor {
+public:
+  void operator()(Image<cfloat> &phase) { phase.value() = cfloat(1.0f, 0.0f); }
+};
 
 } // namespace
 
@@ -108,6 +118,11 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
         H_serialise,                                                               //
         "Scratch image for serialising non-spatial indices into Casorati matrix"); //
 
+    // Intentionally single-threaded: this assigns each voxel of the (small, non-spatial)
+    //   serialisation image a monotonically increasing index in traversal order, defining the
+    //   multi-index -> Casorati-column map. The value is a running counter, so it is inherently
+    //   order-dependent (not a per-voxel-independent computation) and carries no parallelisation
+    //   benefit; it is therefore left as a serial Loop rather than a ThreadedLoop.
     uint32_t output_index = 0;
     for (auto l = Loop(serialise_image)(serialise_image); l; ++l)
       serialise_image.value() = output_index++;
@@ -140,8 +155,7 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
   case demodulation_t::APC:
     phase_image =
         Image<cfloat>::scratch(image, "Scratch image storing adaptive-phase-correction background phase");
-    for (auto l = Loop(phase_image)(phase_image); l; ++l)
-      phase_image.value() = cfloat(1.0f, 0.0f);
+    ThreadedLoop(phase_image).run(FillUnitPhaseFunctor(), phase_image);
     break;
   }
   apc = AdaptivePhaseEstimator(demodulation.axes);
@@ -160,6 +174,10 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
     if (H_in.ndim() < 5)
       throw Exception("Cannot demean by volume groups if input image is <= 4D");
     index2group.resize(H_out.size(3));
+    // Intentionally single-threaded: builds the (small) index-to-group lookup table with a running
+    //   group counter over the non-spatial serialisation image. Like the serialisation fill above,
+    //   the group index is order-dependent and the table is tiny, so parallelisation is neither
+    //   well-defined nor beneficial.
     ssize_t group_index = 0;
     for (auto l_group = Loop(serialise_image, 1)(serialise_image); l_group; ++l_group, ++group_index) {
       for (auto l_volumes = Loop(serialise_image, 0, 1)(serialise_image); l_volumes; ++l_volumes)
@@ -365,45 +383,38 @@ void Preconditioner<T>::serialise_and_stabilise(Image<T> &input,
   }
 }
 
-template <typename T> void Preconditioner<T>::compute_means(Image<T> input_arg) {
-  if (!vst_mean_image.valid())
-    return;
-  // When partitioning is active, demeaning is performed per partition inside Estimate/Recon, so
-  //   no preconditioner-side means are needed (and the stored values are left unused).
-  if (partitioning_active)
-    return;
+namespace detail {
 
-  const Transform transform(input_arg);
-  Image<T> input(input_arg);
-  Image<cfloat> phase(phase_image);
-  Image<uint32_t> serialise(serialise_image);
-  Image<T> mean(vst_mean_image);
-  std::unique_ptr<Interp::Cubic<Image<float>>> vst;
-  if (vst_noise_image.valid())
-    vst.reset(new Interp::Cubic<Image<float>>(vst_noise_image));
-
-  // When a temporal subset is active, the means are formed over only the subset volumes,
-  //   so that the stabilised Casorati matrix (which holds only those volumes) is exactly
-  //   zero-mean per group, keeping it rank-deficient by null_rank().
-  const bool subsampled = !temporal_subset.empty();
-  const ssize_t neff = subsampled ? ssize_t(temporal_subset.size()) : H_out.size(3);
-  auto eff_index = [&](const ssize_t idx) -> ssize_t { return subsampled ? temporal_subset[idx] : idx; };
-
-  // Volume counts per group, required as divisors: the number of (subset) volumes in each group.
-  std::vector<ssize_t> group_counts;
-  if (mean.ndim() > 3) {
-    group_counts.assign(mean.size(3), 0);
-    for (ssize_t idx = 0; idx != neff; ++idx) {
-      const ssize_t v = eff_index(idx);
-      ++group_counts[!index2shell.empty() ? index2shell[v] : index2group[v]];
+// One spatial voxel per invocation: serialise + stabilise the voxel's volume column and write its
+//   per-group stabilised-domain mean(s). Mirrors the former serial body of
+//   Preconditioner::compute_means (see there and the passages it references for the subset /
+//   grouping / divisor rationale). The interpolator, the serialised "data" column and the group
+//   accumulators are per-thread scratch held by the functor, which ThreadedLoop copies per thread.
+template <typename T> class ComputeMeansFunctor {
+public:
+  ComputeMeansFunctor(const Preconditioner<T> &pre, Image<T> &input)
+      : pre(pre),
+        phase(pre.phase_image),
+        serialise(pre.serialise_image),
+        mean(pre.vst_mean_image),
+        transform(input),
+        subsampled(!pre.temporal_subset.empty()),
+        neff(subsampled ? ssize_t(pre.temporal_subset.size()) : pre.H_out.size(3)),
+        data(pre.H_out.size(3)),
+        sums(mean.ndim() > 3 ? mean.size(3) : 0) {
+    if (pre.vst_noise_image.valid())
+      vst.emplace(pre.vst_noise_image);
+    if (mean.ndim() > 3) {
+      group_counts.assign(mean.size(3), 0);
+      for (ssize_t idx = 0; idx != neff; ++idx) {
+        const ssize_t v = eff_index(idx);
+        ++group_counts[!pre.index2shell.empty() ? pre.index2shell[v] : pre.index2group[v]];
+      }
     }
   }
 
-  Eigen::Array<T, Eigen::Dynamic, 1> data(H_out.size(3));
-  // Per-group accumulator, reused across voxels to avoid repeated allocation.
-  std::vector<T> sums(mean.ndim() > 3 ? mean.size(3) : 0);
-  for (auto l_voxel = Loop("Computing stabilised-domain mean intensities", H_in, 0, 3)(input); l_voxel; ++l_voxel) {
-    serialise_and_stabilise(input, phase, serialise, transform, vst.get(), data);
+  void operator()(Image<T> &input) {
+    pre.serialise_and_stabilise(input, phase, serialise, transform, vst ? &vst.value() : nullptr, data);
     assign_pos_of(input, 0, 3).to(mean);
     if (mean.ndim() == 3) {
       T sum(T(0));
@@ -414,7 +425,7 @@ template <typename T> void Preconditioner<T>::compute_means(Image<T> input_arg) 
       std::fill(sums.begin(), sums.end(), T(0));
       for (ssize_t idx = 0; idx != neff; ++idx) {
         const ssize_t v = eff_index(idx);
-        sums[!index2shell.empty() ? index2shell[v] : index2group[v]] += data[v];
+        sums[!pre.index2shell.empty() ? pre.index2shell[v] : pre.index2group[v]] += data[v];
       }
       for (ssize_t group = 0; group != mean.size(3); ++group) {
         mean.index(3) = group;
@@ -422,6 +433,268 @@ template <typename T> void Preconditioner<T>::compute_means(Image<T> input_arg) 
       }
     }
   }
+
+private:
+  ssize_t eff_index(const ssize_t idx) const { return subsampled ? pre.temporal_subset[idx] : idx; }
+
+  const Preconditioner<T> &pre;
+  Image<cfloat> phase;
+  Image<uint32_t> serialise;
+  Image<T> mean;
+  Transform transform;
+  std::optional<Interp::Cubic<Image<float>>> vst;
+  bool subsampled;
+  ssize_t neff;
+  Eigen::Array<T, Eigen::Dynamic, 1> data;
+  std::vector<T> sums;
+  std::vector<ssize_t> group_counts;
+};
+
+// One spatial voxel per invocation: forward preconditioning (phase demodulation -> variance-
+//   stabilising transform -> stabilised-domain demeaning) of the voxel's volume column, written to
+//   the output. Mirrors the former serial forward body of Preconditioner::operator().
+template <typename T> class ForwardApplyFunctor {
+public:
+  ForwardApplyFunctor(const Preconditioner<T> &pre, Image<T> &input)
+      : pre(pre),
+        phase(pre.phase_image),
+        serialise(pre.serialise_image),
+        mean(pre.vst_mean_image),
+        transform(input),
+        data(pre.H_out.size(3)) {
+    if (pre.vst_noise_image.valid())
+      vst.emplace(pre.vst_noise_image);
+  }
+
+  void operator()(Image<T> &input, Image<T> &output) {
+    // Steps 1 & 2: serialise, phase demodulation, variance-stabilising transform
+    pre.serialise_and_stabilise(input, phase, serialise, transform, vst ? &vst.value() : nullptr, data);
+
+    // Step 3: demeaning (in the stabilised domain). Skipped when partitioning is active (the
+    //   per-partition per-group demeaning is then performed within Estimate/Recon).
+    if (mean.valid() && !pre.partitioning_active) {
+      assign_pos_of(input, 0, 3).to(mean);
+      if (mean.ndim() == 3) {
+        const T mean_value = mean.value();
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v)
+          data[v] -= mean_value;
+      } else if (!pre.index2shell.empty()) {
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          mean.index(3) = pre.index2shell[v];
+          data[v] -= T(mean.value());
+        }
+      } else if (!pre.index2group.empty()) {
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          mean.index(3) = pre.index2group[v];
+          data[v] -= T(mean.value());
+        }
+      } else {
+        assert(false);
+        data.fill(std::numeric_limits<T>::signaling_NaN());
+      }
+    }
+
+    // Write to output. Without temporal sub-sampling, emit every volume; with sub-sampling, emit
+    //   only the m' selected volumes (data was demeaned by the subset means).
+    if (pre.temporal_subset.empty()) {
+      for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+        output.index(3) = v;
+        output.value() = data[v];
+      }
+    } else {
+      for (ssize_t k = 0; k != ssize_t(pre.temporal_subset.size()); ++k) {
+        output.index(3) = k;
+        output.value() = data[pre.temporal_subset[k]];
+      }
+    }
+  }
+
+private:
+  const Preconditioner<T> &pre;
+  Image<cfloat> phase;
+  Image<uint32_t> serialise;
+  Image<T> mean;
+  Transform transform;
+  std::optional<Interp::Cubic<Image<float>>> vst;
+  Eigen::Array<T, Eigen::Dynamic, 1> data;
+};
+
+// One spatial voxel per invocation: inverse preconditioning of the voxel's volume column (undo
+//   demeaning / variance-stabilising transform, then re-modulate the background phase), written to
+//   the output. Mirrors the former serial inverse body of Preconditioner::operator(); the one-off
+//   setup (use_mean, num_groups, messages) is performed by the caller and passed in. Per-thread
+//   scratch (interpolator, "data" column, per-group accumulators) is held by the functor.
+template <typename T> class InverseApplyFunctor {
+public:
+  InverseApplyFunctor(const Preconditioner<T> &pre,
+                      Image<T> &input,
+                      const bool use_mean,
+                      const ssize_t num_groups,
+                      const bias_handling_t bias_handling,
+                      const debias_anchor_t debias_anchor)
+      : pre(pre),
+        phase(pre.phase_image),
+        serialise(pre.serialise_image),
+        mean(pre.vst_mean_image),
+        transform(input),
+        use_mean(use_mean),
+        num_groups(num_groups),
+        bias_handling(bias_handling),
+        debias_anchor(debias_anchor),
+        data(pre.H_out.size(3)),
+        group_offset(std::max<ssize_t>(num_groups, ssize_t(1)), T(0)),
+        group_dc(num_groups),
+        group_gain(num_groups) {
+    if (pre.vst_noise_image.valid())
+      vst.emplace(pre.vst_noise_image);
+  }
+
+  void operator()(Image<T> &input, Image<T> &output) {
+
+    for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+      input.index(3) = v;
+      data[v] = input.value();
+    }
+
+    if (vst) {
+      // Interpolate the noise level (variance-stabilising-transform scale) at this voxel.
+      vst->scanner(transform.voxel2scanner *                         //
+                   Eigen::Vector3d({default_type(input.index(0)),    //
+                                    default_type(input.index(1)),    //
+                                    default_type(input.index(2))})); //
+      const default_type sigma = vst->value();
+
+      if (bias_handling == bias_handling_t::DEBIAS && debias_anchor == debias_anchor_t::GROUP_MEAN &&
+          use_mean) {
+        // GROUP_MEAN (legacy) debiasing: linearise the unbiased inverse about the per-group
+        //   stabilised-domain mean, mapping the denoised residual through the local Jacobian.
+        assign_pos_of(input, 0, 3).to(mean);
+        for (ssize_t group = 0; group != num_groups; ++group) {
+          if (mean.ndim() > 3)
+            mean.index(3) = group;
+          const T op = mean.value();
+          group_dc[group] = vst_inverse_unbiased<T>(*pre.noise_model, op, sigma);
+          group_gain[group] = vst_jacobian<T>(*pre.noise_model, op, sigma);
+        }
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          const ssize_t group = num_groups == 1                                    //
+                                    ? 0                                            //
+                                    : (!pre.index2shell.empty() ? pre.index2shell[v]   //
+                                                                : pre.index2group[v]); //
+          data[v] = group_dc[group] + T(group_gain[group]) * data[v];
+        }
+      } else {
+        // SAMPLE (default) reversal, and all PRESERVE reversal: undo the demeaning offset, form
+        //   each volume's own denoised operating point, then apply the chosen non-linear inverse
+        //   pointwise at that point.
+        if (use_mean) {
+          assign_pos_of(input, 0, 3).to(mean);
+          for (ssize_t group = 0; group != num_groups; ++group) {
+            if (mean.ndim() > 3)
+              mean.index(3) = group;
+            group_offset[group] = mean.value();
+          }
+        } else {
+          group_offset[0] = T(0);
+        }
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          const ssize_t group = num_groups <= 1                                    //
+                                    ? 0                                            //
+                                    : (!pre.index2shell.empty() ? pre.index2shell[v]   //
+                                                                : pre.index2group[v]); //
+          const T u_recon = data[v] + group_offset[group];
+          data[v] = (bias_handling == bias_handling_t::DEBIAS)                //
+                        ? vst_inverse_unbiased<T>(*pre.noise_model, u_recon, sigma) //
+                        : vst_inverse<T>(*pre.noise_model, u_recon, sigma);         //
+        }
+      }
+    } else if (use_mean) {
+      // No variance-stabilising transform (demean-only bootstrap): reversal is re-addition of mean.
+      assign_pos_of(input, 0, 3).to(mean);
+      if (mean.ndim() == 3) {
+        const T mean_value = mean.value();
+        data += mean_value;
+      } else if (!pre.index2shell.empty()) {
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          mean.index(3) = pre.index2shell[v];
+          data[v] += T(mean.value());
+        }
+      } else if (!pre.index2group.empty()) {
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          mean.index(3) = pre.index2group[v];
+          data[v] += T(mean.value());
+        }
+      } else {
+        assert(false);
+        data.fill(std::numeric_limits<T>::signaling_NaN());
+      }
+    }
+
+    // Step 1 reversal: re-modulate phase
+    if (phase.valid()) {
+      assign_pos_of(input, 0, 3).to(phase);
+      if (serialise.valid()) {
+        for (auto l = Loop(pre.H_in, 3)(phase); l; ++l) {
+          for (ssize_t axis = 3; axis != pre.H_in.ndim(); ++axis)
+            serialise.index(axis - 3) = phase.index(axis);
+          data[serialise.value()] = modulate<T>(data[serialise.value()], phase.value());
+        }
+      } else {
+        for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+          phase.index(3) = v;
+          data[v] = modulate<T>(data[v], phase.value());
+        }
+      }
+    }
+
+    // Write to output
+    if (serialise.valid()) {
+      for (auto l = Loop(pre.H_in, 3)(output); l; ++l) {
+        for (ssize_t axis = 3; axis != pre.H_in.ndim(); ++axis)
+          serialise.index(axis - 3) = output.index(axis);
+        output.value() = data[serialise.value()];
+      }
+    } else {
+      for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
+        output.index(3) = v;
+        output.value() = data[v];
+      }
+    }
+  }
+
+private:
+  const Preconditioner<T> &pre;
+  Image<cfloat> phase;
+  Image<uint32_t> serialise;
+  Image<T> mean;
+  Transform transform;
+  std::optional<Interp::Cubic<Image<float>>> vst;
+  bool use_mean;
+  ssize_t num_groups;
+  bias_handling_t bias_handling;
+  debias_anchor_t debias_anchor;
+  Eigen::Array<T, Eigen::Dynamic, 1> data;
+  std::vector<T> group_offset;
+  std::vector<T> group_dc;
+  std::vector<default_type> group_gain;
+};
+
+} // namespace detail
+
+template <typename T> void Preconditioner<T>::compute_means(Image<T> input_arg) {
+  if (!vst_mean_image.valid())
+    return;
+  // When partitioning is active, demeaning is performed per partition inside Estimate/Recon, so
+  //   no preconditioner-side means are needed (and the stored values are left unused).
+  if (partitioning_active)
+    return;
+
+  // One independent problem per spatial voxel: serialise + stabilise the voxel's volume column and
+  //   write its per-group stabilised-domain mean(s). The subset / grouping / divisor handling (and
+  //   the reason the means are formed over only the temporal-subset volumes) lives in
+  //   detail::ComputeMeansFunctor.
+  ThreadedLoop("Computing stabilised-domain mean intensities", input_arg, 0, 3)
+      .run(detail::ComputeMeansFunctor<T>(*this, input_arg), input_arg);
 }
 
 template <typename T>
@@ -431,16 +704,10 @@ void Preconditioner<T>::operator()(Image<T> input,
                                  const bias_handling_t bias_handling,
                                  const debias_anchor_t debias_anchor) const {
 
-  // For thread-safety / const-ness
-  const Transform transform(input);
-  Image<uint32_t> serialise(serialise_image);
-  Image<cfloat> phase(phase_image);
+  // Only the stored layout is queried here, for the one-off setup below; the actual per-voxel
+  //   transform -- each thread's own image accessors, interpolator and scratch -- is performed by
+  //   the ThreadedLoop functors (detail::ForwardApplyFunctor / detail::InverseApplyFunctor).
   Image<T> mean(vst_mean_image);
-  std::unique_ptr<Interp::Cubic<Image<float>>> vst;
-  if (vst_noise_image.valid())
-    vst.reset(new Interp::Cubic<Image<float>>(vst_noise_image));
-
-  Eigen::Array<T, Eigen::Dynamic, 1> data(H_out.size(3));
   if (inverse) {
 
     assert(dimensions_match(H_out, input));
@@ -464,15 +731,11 @@ void Preconditioner<T>::operator()(Image<T> input,
     //   exactly as for -demean none. Treat the stored mean as absent in that case.
     const bool use_mean = mean.valid() && !partitioning_active;
 
-    // Per-group quantities, sized once and reused across voxels to avoid repeated allocation:
-    //   the stabilised-domain demean offset (SAMPLE), and the mapped DC value + local gain
-    //   (GROUP_MEAN legacy debiasing).
+    // Per-group quantities (the stabilised-domain demean offset for SAMPLE, and the mapped DC
+    //   value + local gain for GROUP_MEAN legacy debiasing) are sized per thread inside the functor.
     const ssize_t num_groups = use_mean ? (mean.ndim() == 3 ? 1 : mean.size(3)) : 0;
-    std::vector<T> group_offset(std::max<ssize_t>(num_groups, ssize_t(1)), T(0));
-    std::vector<T> group_dc(num_groups);
-    std::vector<default_type> group_gain(num_groups);
 
-    if (vst && !mean.valid()) {
+    if (vst_noise_image.valid() && !mean.valid()) {
       INFO("Reversing preconditioning without a demeaning reference: "
            "the non-linear inverse variance-stabilising transform is applied directly "
            "to each denoised sample");
@@ -491,143 +754,22 @@ void Preconditioner<T>::operator()(Image<T> input,
       const auto append = [&detail](const std::string &item) { detail += (detail.empty() ? "" : ", ") + item; };
       if (use_mean)
         append("reverting demeaning");
-      if (vst) {
+      if (vst_noise_image.valid()) {
         append(noise_model->description() + " noise model");
         if (!noise_model->is_linear())
           append(bias_handling == bias_handling_t::DEBIAS ? "removing noise-floor bias"
                                                           : "preserving noise-floor bias");
       }
-      if (phase.valid())
+      if (phase_image.valid())
         append("re-modulating estimated background phase");
       if (!detail.empty())
         INFO(reversal_message + ": " + detail);
     }
 
-    for (auto l_voxel = Loop(reversal_message, H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
-
-      for (ssize_t v = 0; v != H_out.size(3); ++v) {
-        input.index(3) = v;
-        data[v] = input.value();
-      }
-
-      if (vst) {
-        // Interpolate the noise level (variance-stabilising-transform scale) at this voxel.
-        vst->scanner(transform.voxel2scanner *                         //
-                     Eigen::Vector3d({default_type(input.index(0)),    //
-                                      default_type(input.index(1)),    //
-                                      default_type(input.index(2))})); //
-        const default_type sigma = vst->value();
-
-        if (bias_handling == bias_handling_t::DEBIAS && debias_anchor == debias_anchor_t::GROUP_MEAN &&
-            use_mean) {
-          // GROUP_MEAN (legacy) debiasing: linearise the unbiased inverse about the per-group
-          //   stabilised-domain mean (the demeaning offset), mapping the denoised residual
-          //   through the local Jacobian. Debiasing accuracy then depends on the proximity of
-          //   each volume to its group mean; see the SAMPLE default below and debias_anchor_t.
-          assign_pos_of(input, 0, 3).to(mean);
-          for (ssize_t group = 0; group != num_groups; ++group) {
-            if (mean.ndim() > 3)
-              mean.index(3) = group;
-            const T op = mean.value();
-            group_dc[group] = vst_inverse_unbiased<T>(*noise_model, op, sigma);
-            group_gain[group] = vst_jacobian<T>(*noise_model, op, sigma);
-          }
-          for (ssize_t v = 0; v != H_out.size(3); ++v) {
-            const ssize_t group = num_groups == 1                                //
-                                      ? 0                                        //
-                                      : (!index2shell.empty() ? index2shell[v]   //
-                                                              : index2group[v]); //
-            data[v] = group_dc[group] + T(group_gain[group]) * data[v];
-          }
-        } else {
-          // SAMPLE (default) reversal, and all PRESERVE reversal:
-          //   Undo the demeaning offset (it exists only to condition the PCA), forming each
-          //   volume's own denoised operating point u_recon = (group mean) + (denoised
-          //   residual), then apply the chosen non-linear inverse pointwise at u_recon. The
-          //   inverse is evaluated per volume (not linearised about a group mean), so debiasing
-          //   does not depend on the demeaning grouping and the natural signal-dependent
-          //   heteroscedasticity is restored. With -demean none there is no stored offset, so
-          //   u_recon == data[v] and the inverse is applied directly to each denoised sample.
-          if (use_mean) {
-            assign_pos_of(input, 0, 3).to(mean);
-            for (ssize_t group = 0; group != num_groups; ++group) {
-              if (mean.ndim() > 3)
-                mean.index(3) = group;
-              group_offset[group] = mean.value();
-            }
-          } else {
-            group_offset[0] = T(0);
-          }
-          for (ssize_t v = 0; v != H_out.size(3); ++v) {
-            const ssize_t group = num_groups <= 1                                //
-                                      ? 0                                        //
-                                      : (!index2shell.empty() ? index2shell[v]   //
-                                                              : index2group[v]); //
-            const T u_recon = data[v] + group_offset[group];
-            // DEBIAS: bias-free underlying level; PRESERVE: conventional biased-magnitude level.
-            //   (A Jensen second-moment correction for the post-denoising residual noise was
-            //   considered but deliberately omitted: its stabilised-domain variance is not
-            //   estimable from the data within this reversal, and a user-supplied value would
-            //   contradict the data-driven premise of the tool.)
-            data[v] = (bias_handling == bias_handling_t::DEBIAS)        //
-                          ? vst_inverse_unbiased<T>(*noise_model, u_recon, sigma)  //
-                          : vst_inverse<T>(*noise_model, u_recon, sigma);          //
-          }
-        }
-      } else if (use_mean) {
-        // No variance-stabilising transform (demean-only bootstrap):
-        //   reversal is simply re-addition of the stored mean.
-        assign_pos_of(input, 0, 3).to(mean);
-        if (mean.ndim() == 3) {
-          const T mean_value = mean.value();
-          data += mean_value;
-        } else if (!index2shell.empty()) {
-          for (ssize_t v = 0; v != H_out.size(3); ++v) {
-            mean.index(3) = index2shell[v];
-            data[v] += T(mean.value());
-          }
-        } else if (!index2group.empty()) {
-          for (ssize_t v = 0; v != H_out.size(3); ++v) {
-            mean.index(3) = index2group[v];
-            data[v] += T(mean.value());
-          }
-        } else {
-          assert(false);
-          data.fill(std::numeric_limits<T>::signaling_NaN());
-        }
-      }
-
-      // Step 1 reversal: re-modulate phase
-      if (phase.valid()) {
-        assign_pos_of(input, 0, 3).to(phase);
-        if (serialise.valid()) {
-          for (auto l = Loop(H_in, 3)(phase); l; ++l) {
-            for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
-              serialise.index(axis - 3) = phase.index(axis);
-            data[serialise.value()] = modulate<T>(data[serialise.value()], phase.value());
-          }
-        } else {
-          for (ssize_t v = 0; v != H_out.size(3); ++v) {
-            phase.index(3) = v;
-            data[v] = modulate<T>(data[v], phase.value());
-          }
-        }
-      }
-
-      // Write to output
-      if (serialise.valid()) {
-        for (auto l = Loop(H_in, 3)(output); l; ++l) {
-          for (ssize_t axis = 3; axis != H_in.ndim(); ++axis)
-            serialise.index(axis - 3) = output.index(axis);
-          output.value() = data[serialise.value()];
-        }
-      } else {
-        for (ssize_t v = 0; v != H_out.size(3); ++v) {
-          output.index(3) = v;
-          output.value() = data[v];
-        }
-      }
-    }
+    ThreadedLoop(reversal_message, input, 0, 3)
+        .run(detail::InverseApplyFunctor<T>(*this, input, use_mean, num_groups, bias_handling, debias_anchor),
+             input,
+             output);
     return;
   }
 
@@ -640,52 +782,8 @@ void Preconditioner<T>::operator()(Image<T> input,
   // Order: phase demodulation -> variance-stabilising transform -> demeaning;
   //   demeaning is performed in the stabilised domain so that the Casorati entries
   //   are zero-mean per group (vst_plan.md section 3.1).
-  for (auto l_voxel = Loop("Applying data preconditioning", H_in, 0, 3)(input, output); l_voxel; ++l_voxel) {
-
-    // Steps 1 & 2: serialise, phase demodulation, variance-stabilising transform
-    serialise_and_stabilise(input, phase, serialise, transform, vst.get(), data);
-
-    // Step 3: demeaning (in the stabilised domain).
-    //   Skipped when partitioning is active: the per-partition per-group demeaning is then
-    //   performed within Estimate/Recon, keeping the mean orthogonal to each partition's PCA.
-    if (mean.valid() && !partitioning_active) {
-      assign_pos_of(input, 0, 3).to(mean);
-      if (mean.ndim() == 3) {
-        const T mean_value = mean.value();
-        for (ssize_t v = 0; v != H_out.size(3); ++v)
-          data[v] -= mean_value;
-      } else if (!index2shell.empty()) {
-        for (ssize_t v = 0; v != H_out.size(3); ++v) {
-          mean.index(3) = index2shell[v];
-          data[v] -= T(mean.value());
-        }
-      } else if (!index2group.empty()) {
-        for (ssize_t v = 0; v != H_out.size(3); ++v) {
-          mean.index(3) = index2group[v];
-          data[v] -= T(mean.value());
-        }
-      } else {
-        assert(false);
-        data.fill(std::numeric_limits<T>::signaling_NaN());
-      }
-    }
-
-    // Write to output.
-    // Without temporal sub-sampling, emit every volume; with sub-sampling, emit only the
-    //   m' selected volumes (data was demeaned by the subset means, so the emitted columns
-    //   are exactly zero-mean per group).
-    if (temporal_subset.empty()) {
-      for (ssize_t v = 0; v != H_out.size(3); ++v) {
-        output.index(3) = v;
-        output.value() = data[v];
-      }
-    } else {
-      for (ssize_t k = 0; k != ssize_t(temporal_subset.size()); ++k) {
-        output.index(3) = k;
-        output.value() = data[temporal_subset[k]];
-      }
-    }
-  }
+  ThreadedLoop("Applying data preconditioning", input, 0, 3)
+      .run(detail::ForwardApplyFunctor<T>(*this, input), input, output);
 }
 
 template class Preconditioner<float>;

@@ -22,6 +22,7 @@
 #include <string>
 
 #include "algo/loop.h"
+#include "algo/threaded_loop.h"
 #include "datatype.h"
 #include "exception.h"
 #include "header.h"
@@ -99,60 +100,70 @@ inline void report_invalid_data(const size_t excluded_count, const Header &H) {
 //   (inded maxima / minima might not be required;
 //    just anything that is neither zero nor an existing value might suffice?)
 
-template <typename T> typename std::enable_if<is_complex<T>::value, Image<bool>>::type generate_mask(Image<T> &image) {
-  Header H(image);
-  H.ndim() = 3;
-  H.datatype() = DataType::Bit;
-  Image<bool> mask = Image<bool>::scratch(H, "Scratch mask of voxels with valid data for denoising");
-  size_t excluded_count(0);
-  for (auto l_voxel = Loop("Scanning image for invalid voxels", mask)(image, mask); l_voxel; ++l_voxel) {
-    T min_value(std::numeric_limits<typename T::value_type>::infinity(),
-                std::numeric_limits<typename T::value_type>::infinity());
-    T max_value(-std::numeric_limits<typename T::value_type>::infinity(),
-                -std::numeric_limits<typename T::value_type>::infinity());
+// Per-spatial-voxel mask-generation functor for ThreadedLoop. The 3-D mask is the looped image;
+//   each invocation examines all volumes at that voxel (held as a private per-thread copy of the
+//   input image) and marks the voxel valid iff every volume is finite and the values are not all
+//   identical (zero variance). "excluded_count" is a reduction: each thread accumulates its own
+//   tally and adds it to the shared grand total in the destructor, which runs only after all
+//   threads have rejoined (the RMS idiom documented in ThreadedLoop). Handles complex and real
+//   input through a single compile-time branch.
+template <typename T> class MaskFunctor {
+public:
+  MaskFunctor(Image<T> &image, size_t &grand_excluded)
+      : image(image), excluded(0), grand_excluded(grand_excluded) {}
+  ~MaskFunctor() { grand_excluded += excluded; }
+  void operator()(Image<bool> &mask) {
+    assign_pos_of(mask).to(image);
     bool all_finite = true;
-    for (auto l_inner = Loop(image, 3, image.ndim())(image); l_inner; ++l_inner) {
-      if (!std::isfinite(static_cast<T>(image.value()).real()) || !std::isfinite(static_cast<T>(image.value()).imag())) {
-        all_finite = false;
-      } else {
-        min_value = {std::min(min_value.real(), T(image.value()).real()),
-                     std::min(min_value.imag(), T(image.value()).imag())};
-        max_value = {std::max(max_value.real(), T(image.value()).real()),
-                     std::max(max_value.imag(), T(image.value()).imag())};
+    if constexpr (is_complex<T>::value) {
+      using R = typename T::value_type;
+      T min_value(std::numeric_limits<R>::infinity(), std::numeric_limits<R>::infinity());
+      T max_value(-std::numeric_limits<R>::infinity(), -std::numeric_limits<R>::infinity());
+      for (auto l_inner = Loop(image, 3, image.ndim())(image); l_inner; ++l_inner) {
+        const T value = image.value();
+        if (!std::isfinite(value.real()) || !std::isfinite(value.imag())) {
+          all_finite = false;
+        } else {
+          min_value = {std::min(min_value.real(), value.real()), std::min(min_value.imag(), value.imag())};
+          max_value = {std::max(max_value.real(), value.real()), std::max(max_value.imag(), value.imag())};
+        }
       }
+      if (all_finite && min_value != max_value)
+        mask.value() = true;
+      else
+        ++excluded;
+    } else {
+      T min_value(std::numeric_limits<T>::infinity());
+      T max_value(-std::numeric_limits<T>::infinity());
+      for (auto l_inner = Loop(image, 3, image.ndim())(image); l_inner; ++l_inner) {
+        const T value = image.value();
+        if (!std::isfinite(value)) {
+          all_finite = false;
+        } else {
+          min_value = std::min(min_value, value);
+          max_value = std::max(max_value, value);
+        }
+      }
+      if (all_finite && min_value != max_value)
+        mask.value() = true;
+      else
+        ++excluded;
     }
-    if (all_finite && min_value != max_value)
-      mask.value() = true;
-    else
-      ++excluded_count;
   }
-  report_invalid_data(excluded_count, H);
-  return mask;
-}
 
-template <typename T> typename std::enable_if<!is_complex<T>::value, Image<bool>>::type generate_mask(Image<T> &image) {
+private:
+  Image<T> image;
+  size_t excluded;
+  size_t &grand_excluded;
+};
+
+template <typename T> Image<bool> generate_mask(Image<T> &image) {
   Header H(image);
   H.ndim() = 3;
   H.datatype() = DataType::Bit;
   Image<bool> mask = Image<bool>::scratch(H, "Scratch mask of voxels with valid data for denoising");
   size_t excluded_count(0);
-  for (auto l_voxel = Loop("Scanning image for invalid voxels", mask)(image, mask); l_voxel; ++l_voxel) {
-    T min_value(std::numeric_limits<T>::infinity());
-    T max_value(-std::numeric_limits<T>::infinity());
-    bool all_finite = true;
-    for (auto l_inner = Loop(image, 3, image.ndim())(image); l_inner; ++l_inner) {
-      if (!std::isfinite(image.value())) {
-        all_finite = false;
-      } else {
-        min_value = std::min(min_value, T(image.value()));
-        max_value = std::max(max_value, T(image.value()));
-      }
-    }
-    if (all_finite && min_value != max_value)
-      mask.value() = true;
-    else
-      ++excluded_count;
-  }
+  ThreadedLoop("Scanning image for invalid voxels", mask).run(MaskFunctor<T>(image, excluded_count), mask);
   report_invalid_data(excluded_count, H);
   return mask;
 }

@@ -30,6 +30,8 @@
 #include "mrtrix.h"
 #include "transform.h"
 
+#define DWIDENOISE2_APC_PROFILE
+
 namespace MR::Denoise::Precondition {
 
 namespace {
