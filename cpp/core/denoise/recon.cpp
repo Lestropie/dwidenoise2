@@ -30,6 +30,7 @@ Recon<F>::Recon(const Image<F> &image,
                 std::shared_ptr<Estimator::Base> estimator,
                 filter_type filter,
                 aggregator_type aggregator,
+                const default_type aggregator_fwhm,
                 Exports &exports,
                 const ssize_t preconditioner_rank,
                 std::shared_ptr<const Partitioning> level_partitioning,
@@ -48,11 +49,19 @@ Recon<F>::Recon(const Image<F> &image,
                   kernel_num_partitions),
       filter(filter),
       aggregator(aggregator),
-      // FWHM = 2 x cube root of spacings between kernels
-      gaussian_multiplier(-std::log(2.0) /                                                          //
-                          Math::pow2(std::cbrt(subsample->get_factors()[0] * image.spacing(0)       //
-                                               * subsample->get_factors()[1] * image.spacing(1)     //
-                                               * subsample->get_factors()[2] * image.spacing(2)))), //
+      // Gaussian aggregator width. The reference length is the geometric mean over the three axes
+      //   of the physical spacing between adjacent PCA patch centres (reconstruction sub-sample
+      //   factor x voxel spacing); the FWHM is aggregator_fwhm times that spacing. The weight of a
+      //   voxel at distance d (mm) from the patch centre is
+      //     weight(d) = exp(gaussian_multiplier * d^2) = 2^(-(2d/FWHM)^2),
+      //   so gaussian_multiplier = -4 ln2 / FWHM^2. The default aggregator_fwhm == 2 places the
+      //   half-maximum exactly on the neighbouring patch centre and reproduces the width that was
+      //   previously hard-coded (then written as "FWHM = 2 x cube root of spacings between kernels").
+      gaussian_multiplier(-4.0 * std::log(2.0) /                                                        //
+                          Math::pow2(aggregator_fwhm *                                                  //
+                                     std::cbrt(subsample->get_factors()[0] * image.spacing(0)           //
+                                               * subsample->get_factors()[1] * image.spacing(1)         //
+                                               * subsample->get_factors()[2] * image.spacing(2)))),     //
       w(std::min(Estimate<F>::m, kernel->estimated_size())),
       Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
 

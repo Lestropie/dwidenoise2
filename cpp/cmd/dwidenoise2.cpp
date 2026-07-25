@@ -277,8 +277,17 @@ void usage() {
            "contribute to the reconstructed DWI signal in each voxel; "
            "options are: " + Enum::join<aggregator_type>(",") + "; default: Gaussian")
     + Argument("choice").type_choice<aggregator_type>()
-  // TODO For specifically the Gaussian aggregator,
-  //   should ideally be possible to select the FWHM of the aggregator
+  + Option("aggregator_fwhm",
+           "For the Gaussian aggregator only: "
+           "the full width at half maximum (FWHM) of the spatial weighting function, "
+           "expressed as a multiple of the spacing between adjacent PCA patches "
+           "(i.e. the reconstruction sub-sample grid: sub-sample factor x voxel size). "
+           "Larger values blend more strongly across neighbouring patches "
+           "(greater variance reduction, but more spatial blurring); "
+           "smaller values approach reconstruction from the nearest patch only. "
+           "Default: 2.0 "
+           "(the half-maximum then falls on the neighbouring patch centre).")
+    + Argument("multiple").type_float(0.0)
   + Option("preserve_noise_bias",
            "retain the noise-floor bias in the output rather than removing it by default"
            " (no effect for complex input data)")
@@ -495,6 +504,7 @@ void run(Header &dwi,
          std::shared_ptr<Estimator::Base> estimator,
          filter_type filter,
          aggregator_type aggregator,
+         const default_type aggregator_fwhm,
          const bias_handling_t bias_handling,
          const debias_anchor_t debias_anchor,
          const std::string &output_name,
@@ -682,6 +692,7 @@ void run(Header &dwi,
                 estimator,
                 filter,
                 aggregator,
+                aggregator_fwhm,
                 final_exports,
                 preconditioner.null_rank(),
                 partitioning,
@@ -828,6 +839,19 @@ void run() {
   }
 
   const aggregator_type aggregator = get_option_choice("aggregator", aggregator_type::GAUSSIAN);
+
+  // Width of the Gaussian aggregator, as a multiple of the inter-patch spacing (see -aggregator_fwhm).
+  //   It parameterises only the Gaussian weighting function, so reject an explicit request for any
+  //   other aggregator rather than silently ignoring it. type_float(0.0) already excludes negative
+  //   values; a value of exactly zero is additionally rejected as it would collapse the weighting.
+  const default_type aggregator_fwhm = get_option_value("aggregator_fwhm", default_aggregator_fwhm);
+  if (!get_options("aggregator_fwhm").empty()) {
+    if (aggregator != aggregator_type::GAUSSIAN)
+      throw Exception("Option -aggregator_fwhm only applies to the Gaussian aggregator "
+                      "(-aggregator gaussian); it has no meaning for the requested aggregator");
+    if (!(aggregator_fwhm > 0.0))
+      throw Exception("Value provided to -aggregator_fwhm must be greater than zero");
+  }
 
   const bias_handling_t bias_handling =
       get_options("preserve_noise_bias").empty() ? bias_handling_t::DEBIAS : bias_handling_t::PRESERVE;
@@ -1065,9 +1089,10 @@ void run() {
         iterations,     //
         decomposition,  //
         estimator,      //
-        filter,         //
-        aggregator,     //
-        bias_handling,  //
+        filter,          //
+        aggregator,      //
+        aggregator_fwhm, //
+        bias_handling,   //
         debias_anchor,  //
         argument[1].as_text(), //
         final_exports); //
@@ -1083,9 +1108,10 @@ void run() {
         iterations,     //
         decomposition,  //
         estimator,      //
-        filter,         //
-        aggregator,     //
-        bias_handling,  //
+        filter,          //
+        aggregator,      //
+        aggregator_fwhm, //
+        bias_handling,   //
         debias_anchor,  //
         argument[1].as_text(), //
         final_exports); //
@@ -1100,9 +1126,10 @@ void run() {
         iterations,     //
         decomposition,  //
         estimator,      //
-        filter,         //
-        aggregator,     //
-        bias_handling,  //
+        filter,          //
+        aggregator,      //
+        aggregator_fwhm, //
+        bias_handling,   //
         debias_anchor,  //
         argument[1].as_text(), //
         final_exports); //
@@ -1117,9 +1144,10 @@ void run() {
         iterations,     //
         decomposition,  //
         estimator,      //
-        filter,         //
-        aggregator,     //
-        bias_handling,  //
+        filter,          //
+        aggregator,      //
+        aggregator_fwhm, //
+        bias_handling,   //
         debias_anchor,  //
         argument[1].as_text(), //
         final_exports); //

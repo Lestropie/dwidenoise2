@@ -42,6 +42,7 @@ public:
         std::shared_ptr<Estimator::Base> estimator,
         filter_type filter,
         aggregator_type aggregator,
+        const default_type aggregator_fwhm,
         Exports &exports,
         const ssize_t null_rank,
         std::shared_ptr<const Partitioning> level_partitioning = nullptr,

@@ -54,6 +54,15 @@ enum class filter_type { OPTSHRINK, OPTTHRESH, TRUNCATE };
 
 enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
 
+// Default full width at half maximum of the Gaussian aggregator (option -aggregator_fwhm),
+//   expressed as a multiple of the spacing between adjacent PCA patch centres (the reconstruction
+//   sub-sample grid). A value of 2 places the half-maximum exactly on the neighbouring patch centre.
+//   It is both the value that was historically hard-coded and, from first principles, the smallest
+//   FWHM for which sampling the Gaussian on the overcomplete patch lattice leaves negligible residual
+//   ripple in the summed aggregation weights (an approximate partition of unity), so it maximises
+//   variance reduction without imprinting the sub-sampling grid or over-blurring the reconstruction.
+constexpr default_type default_aggregator_fwhm = 2.0;
+
 // These functions resolve dimensions of the matrix decomposition
 //   in the presence of precoditioning that make the data rank-deficient
 // - m = number of volumes
