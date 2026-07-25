@@ -289,10 +289,11 @@ void run(Header &dwi,
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
-  // Solve the first (cold) adaptive-phase-correction pass on a 2x-downsampled grid only when a
-  //   later iteration refines the phase at native resolution; a single-iteration schedule keeps
-  //   its sole, authoritative pass at native resolution.
-  preconditioner.set_apc_coarse_first(iterations.size() > 1);
+  // Cold adaptive-phase-correction solves within the noise-estimation iterations below are
+  //   bootstraps: the final iteration re-estimates at native resolution the phase of every volume
+  //   it uses, so they may be solved on a 2x-downsampled grid. Cleared before that final iteration
+  //   (and never set for a single-row schedule, which has no such iterations).
+  preconditioner.set_apc_refine_later(iterations.size() > 1);
   Image<T> input_preconditioned;
 
   Image<float> rank_per_mm;
@@ -364,6 +365,10 @@ void run(Header &dwi,
   //   (output) iteration: it produces a noise level map, which is volume-count-independent
   //   in expectation. The spatial subsampling follows the final entry of the schedule.
   preconditioner.set_temporal_subsample(iterations.back().temporal_subsample, rng, temporal_min_per_group);
+  // No APC pass follows this one: a volume this final subset draws in for the first time (earlier
+  //   iterations having sub-sampled it away) is solved cold at native resolution, not on the
+  //   coarse bootstrap grid.
+  preconditioner.set_apc_refine_later(false);
   const ssize_t mprime_final = preconditioner.header().size(3);
   const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
   if (num_partitions > 1 && !estimator->supports_partitioning())

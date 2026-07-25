@@ -519,10 +519,11 @@ void run(Header &dwi,
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
   Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
-  // Solve the first (cold) adaptive-phase-correction pass on a 2x-downsampled grid only when a
-  //   later iteration refines the phase at native resolution; a single-iteration schedule keeps
-  //   its sole, authoritative pass at native resolution.
-  preconditioner.set_apc_coarse_first(iterations.size() > 1);
+  // Cold adaptive-phase-correction solves within the noise-estimation iterations below are
+  //   bootstraps: the final (reconstruction) pass re-estimates every volume's phase at native
+  //   resolution, so they may be solved on a 2x-downsampled grid. Cleared before that final pass
+  //   (and never set for a single-row schedule, which has no such iterations).
+  preconditioner.set_apc_refine_later(iterations.size() > 1);
   Image<T> input_preconditioned;
 
   // Per-voxel signal-rank density used to size the rank-adaptive reconstruction kernel. Normally
@@ -610,6 +611,10 @@ void run(Header &dwi,
   //   temporal_subsample == 1, so all volumes are reconstructed. Clear any subset and
   //   recompute the full-data means under the final noise level map.
   preconditioner.set_temporal_subsample(1.0, rng, temporal_min_per_group);
+  // No APC pass follows this one, so any volume the noise-estimation iterations sub-sampled away
+  //   (never yet phase-estimated) must be solved cold at native resolution here rather than on the
+  //   coarse bootstrap grid.
+  preconditioner.set_apc_refine_later(false);
   // Resolve partitioning for the reconstruction pass (sized from the full volume count, as the
   //   final row's temporal_subsample is validated to be 1.0). Set before update_parameters
   //   so the (unused) preconditioner-side demeaning pass is skipped when partitioning.

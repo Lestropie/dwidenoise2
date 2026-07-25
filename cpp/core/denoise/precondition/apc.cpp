@@ -407,6 +407,9 @@ namespace {
 //   thread, so each thread gets independent Image voxel accessors and its own scratch Eigen
 //   planes (deep-copied). Reads only from "in"/"sigma" and writes a disjoint plane of
 //   "phase", so no locking is required. See mrdegibbs's Unring2DFunctor for the same idiom.
+// The cold/warm and native/downsampled regime is not a property of the pass but of the volume
+//   the current plane belongs to (see AdaptivePhaseEstimator's class comment): each outer
+//   position's volume is mapped to its serialised index and its VolumePlan looked up.
 template <typename T> class APCFunctor {
 public:
   APCFunctor(const AdaptivePhaseEstimator &estimator,
@@ -415,16 +418,17 @@ public:
              Image<T> &in,
              Image<float> &sigma,
              Image<cfloat> &phase,
-             bool warm_start,
-             bool downsample)
+             Image<uint32_t> &serialise,
+             const std::vector<AdaptivePhaseEstimator::VolumePlan> &plan)
       : estimator(&estimator),
         outer_axes(outer_axes),
         inner_axes(inner_axes),
         in(in),
         sigma(sigma),
         phase(phase),
+        serialise(serialise),
+        plan(&plan),
         have_sigma(sigma.valid()),
-        warm_start(warm_start),
         transform(in),
         Nx(in.size(inner_axes[0])),
         Ny(in.size(inner_axes[1])),
@@ -433,17 +437,21 @@ public:
         sig(Nx, Ny),
         phase_r(Nx, Ny),
         phase_i(Nx, Ny) {
-    // Solve on a 2x-downsampled grid, then upsample the phase (a background phase is smooth, so
-    //   decimation is near-lossless at ~1/4 the cost). Requested (downsample) only for the first
-    //   pass of a multi-iteration schedule; disabled for tiny planes (no benefit; avoids
-    //   over-decimation). Warm-started passes are always native (downsample is never set for them).
-    use_coarse = downsample && Nx >= 4 && Ny >= 4;
-    if (use_coarse) {
+    // Coarse-grid scratch, allocated once per thread if *any* planned volume requests a
+    //   downsampled solve (a 2x-downsampled solve with the phase upsampled: a background phase is
+    //   smooth, so decimation is near-lossless at ~1/4 the cost). Disabled for tiny planes (no
+    //   benefit; avoids over-decimation). Warm-started volumes never request it.
+    const bool any_coarse =
+        std::any_of(plan.begin(), plan.end(), [](const AdaptivePhaseEstimator::VolumePlan &vp) { //
+          return vp.estimate && vp.downsample;                                                   //
+        });
+    coarse_available = any_coarse && Nx >= 4 && Ny >= 4;
+    if (coarse_available) {
       const ssize_t cNx = (Nx + 1) / 2;
       const ssize_t cNy = (Ny + 1) / 2;
       fr_c.resize(cNx, cNy);
       fi_c.resize(cNx, cNy);
-      // First pass self-calibrates its noise level from the (coarse) data, so no map is consumed
+      // A cold solve self-calibrates its noise level from the (coarse) data, so no map is consumed
       //   here; all-unknown sigma routes solve_plane to its MAD self-calibration branch.
       sig_c = Eigen::ArrayXXd::Constant(cNx, cNy, -1.0);
       pr_c.resize(cNx, cNy);
@@ -452,6 +460,15 @@ public:
   }
 
   void operator()(const Iterator &pos) {
+    // This plane's volume: skipped entirely (before any data are gathered) unless the current
+    //   iteration uses it, and otherwise solved in the regime that volume's own estimation
+    //   history dictates.
+    const AdaptivePhaseEstimator::VolumePlan &vp = (*plan)[size_t(volume_index(pos))];
+    if (!vp.estimate)
+      return;
+    const bool warm_start = vp.warm_start;
+    const bool use_coarse = vp.downsample && coarse_available;
+
     const size_t ax = inner_axes[0];
     const size_t ay = inner_axes[1];
     assign_pos_of(pos, outer_axes).to(in, phase);
@@ -476,10 +493,27 @@ public:
       phase_i(ix, iy) = double(p.imag());
     }
 
-    if (warm_start) {
-      // Native resolution, warm-started from the incoming phase. Now that a noise map exists,
-      //   gather the per-voxel noise level (interpolated at each voxel's scanner position; the
-      //   map may be lower-resolution than the data) for spatially-varying weighting.
+    if (use_coarse) {
+      // Cold solve that a later pass will refine: solve on the 2x-downsampled grid, then upsample.
+      //   If the coarse slice is degenerate, leave the pre-loaded incoming phase untouched.
+      //   Deliberately self-calibrated even where a noise map exists (a volume first estimated at
+      //   iteration 2+ of a schedule that sub-samples): sigma would have to be decimated onto the
+      //   coarse grid to be consistent with the decimated data, and this solve is only a bootstrap
+      //   that the volume's next (native, spatially-weighted) pass refines.
+      downsample2x(fr, fr_c);
+      downsample2x(fi, fi_c);
+      if (estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false))
+        upsample_phase(pr_c, pi_c, phase_r, phase_i);
+    } else {
+      // Native resolution: warm-started from the incoming phase, or cold (the volume's first
+      //   estimate, with no later pass to refine it -- or a plane too small to decimate). Where a
+      //   noise map exists, gather the per-voxel noise level (interpolated at each voxel's scanner
+      //   position; the map may be lower-resolution than the data) for spatially-varying weighting.
+      //   This is keyed on the map's availability rather than on warm_start: a volume drawn into a
+      //   temporal subset for the first time at a later iteration is solved cold, but the noise map
+      //   its neighbours enjoy is equally valid for it, and there is no reason to discard it in
+      //   favour of the self-calibrated global level. Without a map (the very first pass of a
+      //   schedule with no -noise_in), all-unknown sigma routes solve_plane to self-calibration.
       if (have_sigma) {
         Interp::Cubic<Image<float>> sigma_interp(sigma);
         for (auto l = Loop(inner_axes)(in); l; ++l) {
@@ -494,18 +528,7 @@ public:
       } else {
         sig.setConstant(-1.0);
       }
-      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true);
-    } else if (use_coarse) {
-      // First pass, cold: solve on the 2x-downsampled grid (self-calibrated), then upsample.
-      //   If the coarse slice is degenerate, leave the pre-loaded incoming phase untouched.
-      downsample2x(fr, fr_c);
-      downsample2x(fi, fi_c);
-      if (estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false))
-        upsample_phase(pr_c, pi_c, phase_r, phase_i);
-    } else {
-      // First pass on a tiny plane: solve cold at native resolution (self-calibrated).
-      sig.setConstant(-1.0);
-      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, false);
+      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, warm_start);
     }
 
     for (auto l = Loop(inner_axes)(phase); l; ++l) {
@@ -516,27 +539,46 @@ public:
   }
 
 private:
+  // Serialised (Casorati column) index of the volume this outer position belongs to: the axis-3
+  //   index for 4D data, otherwise the index the preconditioner's serialisation image assigns to
+  //   the supra-spatial multi-index. This is the space in which VolumePlan entries (and the
+  //   preconditioner's temporal subset) are indexed.
+  ssize_t volume_index(const Iterator &pos) {
+    if (!serialise.valid())
+      return pos.index(3);
+    for (size_t axis = 3; axis != pos.ndim(); ++axis)
+      serialise.index(axis - 3) = pos.index(axis);
+    return ssize_t(serialise.value());
+  }
+
   const AdaptivePhaseEstimator *estimator;
   std::vector<size_t> outer_axes;
   std::vector<size_t> inner_axes;
   Image<T> in;
   Image<float> sigma;
   Image<cfloat> phase;
+  Image<uint32_t> serialise;
+  const std::vector<AdaptivePhaseEstimator::VolumePlan> *plan;
   bool have_sigma;
-  bool warm_start;
-  bool use_coarse = false;
+  // Whether coarse-grid scratch was allocated for this thread: false if no planned volume requests
+  //   a downsampled solve, or if the planes are too small to decimate.
+  bool coarse_available = false;
   Transform transform;
   ssize_t Nx, Ny;
   Eigen::ArrayXXd fr, fi, sig, phase_r, phase_i;
-  // Coarse-grid scratch, allocated only for the first (cold) pass's 2x-downsampled solve.
+  // Coarse-grid scratch, allocated only where some planned volume takes the 2x-downsampled
+  //   cold-solve path.
   Eigen::ArrayXXd fr_c, fi_c, sig_c, pr_c, pi_c;
 };
 
 } // namespace
 
 template <typename T>
-void AdaptivePhaseEstimator::operator()(
-    Image<T> &in, Image<float> &sigma, Image<cfloat> &io_phase, bool warm_start, bool downsample) const {
+void AdaptivePhaseEstimator::operator()(Image<T> &in,
+                                        Image<float> &sigma,
+                                        Image<cfloat> &io_phase,
+                                        Image<uint32_t> &serialise,
+                                        const std::vector<VolumePlan> &plan) const {
   assert(inslice_axes.size() == 2);
   // Outer axes = every axis of the data except the two in-slice (demodulation) axes: the
   //   slice-normal spatial axis, the volume axis, and any serialised supra-volume axes. Each
@@ -546,16 +588,37 @@ void AdaptivePhaseEstimator::operator()(
     if (std::find(inslice_axes.begin(), inslice_axes.end(), a) == inslice_axes.end())
       outer_axes.push_back(a);
 
-  ThreadedLoop(std::string(warm_start ? "updating" : "estimating") + " background phase (adaptive phase correction)",
-               in,
-               outer_axes,
-               inslice_axes)
-      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, warm_start, downsample));
+  // Describe the pass from the plan: "estimating" if it contains any cold solve, "updating" if
+  //   every planned volume is being refined from a prior estimate, and how many of the image's
+  //   volumes it touches at all (fewer than all under temporal sub-sampling). Volumes with
+  //   estimate == false still cost one no-op functor invocation per plane, so they remain in the
+  //   progress total; that dispatch is negligible against a solve.
+  ssize_t num_cold = 0;
+  ssize_t num_warm = 0;
+  for (const VolumePlan &vp : plan) {
+    if (!vp.estimate)
+      continue;
+    ++(vp.warm_start ? num_warm : num_cold);
+  }
+  if (num_cold + num_warm == 0)
+    return;
+  std::string message = std::string(num_cold > 0 ? "estimating" : "updating") +
+                        " background phase (adaptive phase correction)";
+  if (num_cold + num_warm < ssize_t(plan.size()))
+    message += " for " + str(num_cold + num_warm) + " of " + str(plan.size()) + " volumes";
+  INFO("Adaptive phase correction: " + str(num_cold) + " volume(s) estimated from a cold start, " +
+       str(num_warm) + " refined from a prior estimate, " + str(ssize_t(plan.size()) - num_cold - num_warm) +
+       " skipped (not used by this iteration)");
+
+  ThreadedLoop(message, in, outer_axes, inslice_axes)
+      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan));
 }
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and
 //   callers gate instantiation with `if constexpr (is_complex<T>::value)`.
-template void AdaptivePhaseEstimator::operator()(Image<cfloat> &, Image<float> &, Image<cfloat> &, bool, bool) const;
-template void AdaptivePhaseEstimator::operator()(Image<cdouble> &, Image<float> &, Image<cfloat> &, bool, bool) const;
+template void AdaptivePhaseEstimator::operator()(
+    Image<cfloat> &, Image<float> &, Image<cfloat> &, Image<uint32_t> &, const std::vector<VolumePlan> &) const;
+template void AdaptivePhaseEstimator::operator()(
+    Image<cdouble> &, Image<float> &, Image<cfloat> &, Image<uint32_t> &, const std::vector<VolumePlan> &) const;
 
 } // namespace MR::Denoise::Precondition

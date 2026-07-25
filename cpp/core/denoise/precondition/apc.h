@@ -72,17 +72,27 @@ namespace MR::Denoise::Precondition {
 //   (approximate) convergence therefore suits the loop far better than iterating any solver
 //   to full convergence. See dwidenoise2_dephase.md sections 2.2 and 2.5.
 //
-//   Cost across the iteration loop: the phase changes little once the noise map stabilises, so
-//   only the first pass is solved from a cold start -- and, because a background phase is smooth
-//   (low spatial bandwidth), that first pass is solved on a 2x-downsampled grid and the result
-//   upsampled (~1/4 the cost, near-lossless for a smooth field) whenever a later pass will refine
-//   it at native resolution (i.e. a multi-iteration schedule). A single-iteration schedule solves
-//   its sole, authoritative pass at native resolution instead. Every subsequent pass runs at
-//   native resolution but is warm-started from the previous estimate (seeded with |f| * the
-//   incoming phase), so a much smaller iteration budget (the Params ..._warm counts) re-settles
-//   it. The resolution and warm-start decisions live in operator() / the per-plane functor;
-//   solve_plane itself consumes only a warm_start flag (cold-start seed vs warm-start seed, and
-//   full vs reduced budget). This is the dominant lever on APC's contribution to run time.
+//   Cost across the iteration loop: the phase changes little once the noise map stabilises, so a
+//   volume is solved from a cold start only on the first pass that estimates it -- and, because a
+//   background phase is smooth (low spatial bandwidth), such a cold solve runs on a 2x-downsampled
+//   grid with the result upsampled (~1/4 the cost, near-lossless for a smooth field) whenever a
+//   later pass will refine it at native resolution. A cold solve with no later refinement to come
+//   (a single-iteration schedule, or the final authoritative pass of any schedule) is instead
+//   solved at native resolution. Every pass after a volume's first is native but warm-started from
+//   that volume's previous estimate (seeded with |f| * the incoming phase), so a much smaller
+//   iteration budget (the Params ..._warm counts) re-settles it.
+//
+//   These decisions are made *per volume*, not per pass, because the noise-estimation schedule may
+//   temporally sub-sample: an iteration draws a subset of volumes, preconditions only those, and
+//   estimates the phase of only those (Preconditioner::update_phase). A volume outside every
+//   earlier subset therefore reaches a later pass with no prior estimate at all -- its stored phase
+//   is still the unit-phase initialisation. Treating that as a warm start would seed the solver
+//   from an uninformative phase *and* grant it only the reduced ..._warm budget, i.e. the worst of
+//   both regimes. The caller therefore tracks, per volume, whether an estimate exists from a prior
+//   pass, and hands operator() one VolumePlan per volume; a never-estimated volume is planned as a
+//   cold solve regardless of how many passes have already run over other volumes. solve_plane
+//   itself consumes only a warm_start flag (cold-start seed vs warm-start seed, and full vs
+//   reduced budget). This is the dominant lever on APC's contribution to run time.
 //
 //   Regularisation strength lambda: the discrepancy criterion (Morozov), realised as
 //   Chambolle's (2004) fixed-point iteration on lambda (their eq. 6) seeded from eq. 7,
@@ -204,14 +214,16 @@ public:
     // Extra primal-dual iterations at the converged lambda, to settle the image before the
     //   phase (its argument) is extracted.
     ssize_t polish_iter = 25;
-    // Reduced iteration budget for warm-started passes: every noise-estimation iteration after
-    //   the first. The first pass solves from a cold start (the data) on a coarse grid; every
-    //   later pass is warm-started at native resolution from the previous iteration's phase,
-    //   which barely moves once the noise map has stabilised, so far fewer sweeps re-settle it.
-    //   Because the solver runs a *fixed* budget (no convergence test drives early exit besides
-    //   lambda_tol), this reduced budget -- not the warm start alone -- is what shortens the
-    //   later passes; the warm start is what keeps that reduction safe. Tunable; validate on the
-    //   denoised rank, not on phase MSE.
+    // Reduced iteration budget for warm-started passes: every pass over a volume after the one
+    //   that first estimated it. That first pass solves from a cold start (the data), on a coarse
+    //   grid where a later pass will refine it; every later pass over that volume is warm-started
+    //   at native resolution from its own previous estimate, which barely moves once the noise map
+    //   has stabilised, so far fewer sweeps re-settle it. Because the solver runs a *fixed* budget
+    //   (no convergence test drives early exit besides lambda_tol), this reduced budget -- not the
+    //   warm start alone -- is what shortens the later passes; the warm start is what keeps that
+    //   reduction safe, which is precisely why it must not be granted to a volume that has no
+    //   previous estimate (see the VolumePlan discussion above). Tunable; validate on the denoised
+    //   rank, not on phase MSE.
     ssize_t cp_iter_warm = 12;
     ssize_t max_lambda_iter_warm = 5;
     ssize_t polish_iter_warm = 12;
@@ -241,6 +253,25 @@ public:
     double min_domain_fraction = 0.02;
   };
 
+  // Per-volume control of a single APC pass: one entry per *serialised* volume index (the
+  //   Casorati column index; for 4D data simply the volume index, for >4D the index assigned by
+  //   the preconditioner's serialisation image). The caller owns the policy -- which volumes this
+  //   iteration needs, which of them have been estimated before, and whether a later pass will
+  //   refine the result -- and expresses it here; this class only executes it.
+  struct VolumePlan {
+    // (Re-)estimate this volume's phase in this pass. False for volumes the current iteration
+    //   does not use (outside the temporal subset): their stored phase is left untouched, whether
+    //   that is an estimate from an earlier pass or the initial unit phase.
+    bool estimate = false;
+    // This volume has a phase estimate from a prior pass: seed the solver from it and use the
+    //   reduced Params ..._warm budget. Must be false for a volume being estimated for the first
+    //   time, however many passes have already run over other volumes.
+    bool warm_start = false;
+    // Solve on a 2x-downsampled grid and upsample the phase. Only meaningful for a cold solve
+    //   (warm_start == false) whose result a later pass will refine at native resolution.
+    bool downsample = false;
+  };
+
   AdaptivePhaseEstimator() = default;
   // Two overloads rather than a defaulted `Params` argument: a `= Params()` default argument
   //   for a member function declared inside the class is a complete-class context that would
@@ -251,8 +282,8 @@ public:
       : inslice_axes(std::move(inslice_axes)), params(params) {}
 
   // Full-image entry point. Re-estimates the background phase for every 2-D in-slice plane
-  //   of every volume, multi-threaded over the outer (slice-normal + volume + any serialised
-  //   supra-volume) axes via MRtrix3 ThreadedLoop; each plane is an independent problem.
+  //   of every planned volume, multi-threaded over the outer (slice-normal + volume + any
+  //   serialised supra-volume) axes via MRtrix3 ThreadedLoop; each plane is an independent problem.
   //   in       : native complex data (empirical input; never variance-stabilised).
   //   sigma    : per-component noise standard-deviation map (the VST scale). May be at a
   //              different resolution to "in"; it is cubic-interpolated at each voxel, exactly
@@ -261,21 +292,25 @@ public:
   //              also be invalid (empty): on the first iteration no noise map exists yet, and
   //              each slice then self-calibrates a global noise level from the data.
   //   io_phase : unit-magnitude Image<cfloat>, same grid as "in". Overwritten in place with
-  //              the new estimate (per-slice: only slices with a usable domain are modified,
-  //              so the incoming phase acts as the fallback for the rest). On a warm-started
-  //              call it is additionally read first as the solver's initial guess.
-  //   warm_start : false on the first pass (cold: seed each slice at the data f, full Params
-  //              budget); true on every later pass (seed at |f| * io_phase, reduced Params
-  //              ..._warm budget).
-  //   downsample : if true, solve each slice on a 2x-downsampled grid and upsample the phase to
-  //              native (~1/4 the cost, near-lossless for a smooth phase). Set only on the first
-  //              pass of a multi-iteration schedule, where a later pass refines at native
-  //              resolution; a single-iteration schedule leaves it false so its sole pass is
-  //              solved natively.
+  //              the new estimate (per-slice: only slices of planned volumes, and of those only
+  //              slices with a usable domain, are modified; the incoming phase acts as the
+  //              fallback for the rest). For a warm-started volume it is additionally read first
+  //              as the solver's initial guess.
+  //   serialise : the preconditioner's serialisation image mapping a >4D volume multi-index to
+  //              its Casorati column, used to look up each plane's entry in "plan". Invalid /
+  //              empty for 4D data, where the column index is the volume index itself.
+  //   plan     : one VolumePlan per serialised volume index (size == the serialised volume
+  //              count), selecting which volumes are estimated in this pass and, for each, the
+  //              cold/warm and native/downsampled regime. Volumes with estimate == false are
+  //              skipped entirely.
   // Only instantiated for complex T (the phase is ill-defined for real data); callers gate
   //   with `if constexpr (is_complex<T>::value)`.
   template <typename T>
-  void operator()(Image<T> &in, Image<float> &sigma, Image<cfloat> &io_phase, bool warm_start, bool downsample) const;
+  void operator()(Image<T> &in,
+                  Image<float> &sigma,
+                  Image<cfloat> &io_phase,
+                  Image<uint32_t> &serialise,
+                  const std::vector<VolumePlan> &plan) const;
 
   // Per-2-D-plane primitive (the reusable, unit-testable core): solves one slice's weighted
   //   vectorial-TV ROF problem by fixed-budget primal-dual with discrepancy-criterion lambda.

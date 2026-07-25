@@ -160,6 +160,10 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
   }
   apc = AdaptivePhaseEstimator(demodulation.axes);
   apc_enabled = (demodulation.mode == demodulation_t::APC);
+  // No volume has a phase estimate yet: every volume's first APC pass is a cold solve, whichever
+  //   iteration of the schedule first draws it into a temporal subset (see update_phase).
+  if (apc_enabled)
+    apc_volume_has_phase.assign(H_out.size(3), false);
 
   // Step 2: Demeaning
   // Here only the structure is established (group indexing and storage allocation);
@@ -232,13 +236,31 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
 //   explicit template instantiations at the foot of this file remain well-formed.
 template <typename T> void Preconditioner<T>::update_phase(Image<T> &input) {
   if constexpr (is_complex<T>::value) {
-    // First pass: cold solve; every pass thereafter: warm-started native refinement. Downsample
-    //   the first pass only when a later pass will refine it (multi-iteration schedule); a
-    //   single-iteration schedule solves its sole pass natively (apc_coarse_first == false).
-    const bool warm_start = !apc_first_pass;
-    const bool downsample = apc_first_pass && apc_coarse_first;
-    apc(input, vst_noise_image, phase_image, warm_start, downsample);
-    apc_first_pass = false;
+    // Plan the pass per volume. Only the volumes of the current temporal subset are estimated
+    //   (no other volume's phase is consumed by this iteration), and each of those is solved
+    //   according to *its own* history: cold if it has never been estimated -- on a 2x-downsampled
+    //   grid iff a later pass will refine it -- and warm-started at native resolution otherwise.
+    //   Tracking this per volume is what prevents a volume that earlier iterations sub-sampled away
+    //   from being handed warm-start parameters (a unit-phase seed with the reduced ..._warm
+    //   budget) for what is in fact its first estimation.
+    const ssize_t num_volumes = H_out.size(3);
+    assert(ssize_t(apc_volume_has_phase.size()) == num_volumes);
+    std::vector<AdaptivePhaseEstimator::VolumePlan> plan(num_volumes);
+    const auto schedule = [&](const ssize_t v) {
+      const bool warm_start = apc_volume_has_phase[v];
+      plan[v] = {true, warm_start, !warm_start && apc_refine_later};
+    };
+    if (temporal_subset.empty()) {
+      for (ssize_t v = 0; v != num_volumes; ++v)
+        schedule(v);
+    } else {
+      for (const ssize_t v : temporal_subset)
+        schedule(v);
+    }
+    apc(input, vst_noise_image, phase_image, serialise_image, plan);
+    for (ssize_t v = 0; v != num_volumes; ++v)
+      if (plan[v].estimate)
+        apc_volume_has_phase[v] = true;
   }
 }
 
