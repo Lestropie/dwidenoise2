@@ -94,11 +94,12 @@ public:
   // Only the volumes of the current temporal subset are re-estimated: the preconditioned data hold
   //   only those volumes, so no other volume's phase is consumed by this iteration, and estimating
   //   them would waste what the sub-sampling is there to save. Consequently a volume's estimation
-  //   history is *its own*: the first pass to estimate a given volume solves it from a cold start,
-  //   on a 2x-downsampled grid if a later pass will refine it at native resolution
-  //   (set_apc_refine_later; a background phase is smooth, so this is near-lossless at ~1/4 the
-  //   cost) and at native resolution otherwise; every later pass over that volume is warm-started
-  //   from its previous estimate with a reduced iteration budget (see AdaptivePhaseEstimator).
+  //   history is *its own*: the first pass to estimate a given volume solves it from a cold start
+  //   on a 2x-downsampled grid (a background phase is smooth, so this is near-lossless at ~1/4 the
+  //   cost), stopping there if a later pass will refine it at native resolution
+  //   (set_apc_refine_later) and otherwise running that native warm refinement immediately, within
+  //   the same pass; every later pass over that volume is warm-started from its previous estimate
+  //   with a reduced iteration budget (see AdaptivePhaseEstimator).
   //   apc_volume_has_phase records which volumes have been estimated, so a volume drawn into a
   //   subset for the first time at a later iteration -- or first reached at the final, full-data
   //   pass -- is correctly solved cold rather than being handed warm-start parameters it cannot
@@ -135,13 +136,14 @@ public:
   bool demean_active() const { return vst_mean_image.valid() && !partitioning_active; }
 
   // Declare whether a subsequent adaptive-phase-correction pass will refine the phase estimated by
-  //   the next update_parameters() call. Only when it will is a *cold* solve worth performing on a
-  //   2x-downsampled grid (its phase upsampled to native): the coarse solve is then a bootstrap
-  //   that a later native pass refines. Set true for the noise-estimation iterations of a
-  //   multi-row schedule and false for the final (reconstruction) pass -- and hence throughout a
-  //   single-row schedule -- so that any volume first estimated in that final, authoritative pass
-  //   is solved natively. Warm-started volumes are always solved natively regardless. No effect
-  //   unless -demodulate apc is active on complex data.
+  //   the next update_parameters() call. Every *cold* solve begins on a 2x-downsampled grid (its
+  //   phase upsampled to native); this flag decides whether it may stop there. Set true for the
+  //   noise-estimation iterations of a multi-row schedule, where a later pass carries out the
+  //   native-resolution refinement, and false for the final (reconstruction) pass -- and hence
+  //   throughout a single-row schedule -- where a volume being estimated for the first time
+  //   instead receives that warm native refinement immediately, within the same pass, so that the
+  //   final estimate is authoritative and at native resolution. Warm-started volumes are solved
+  //   natively regardless. No effect unless -demodulate apc is active on complex data.
   void set_apc_refine_later(const bool enable) { apc_refine_later = enable; }
 
   // Per-(preconditioned/output) row demeaning-group labels for the current data layout (length

@@ -612,8 +612,9 @@ void run(Header &dwi,
   //   recompute the full-data means under the final noise level map.
   preconditioner.set_temporal_subsample(1.0, rng, temporal_min_per_group);
   // No APC pass follows this one, so any volume the noise-estimation iterations sub-sampled away
-  //   (never yet phase-estimated) must be solved cold at native resolution here rather than on the
-  //   coarse bootstrap grid.
+  //   (never yet phase-estimated) must be carried to a native-resolution estimate here: its cold
+  //   coarse solve is followed immediately by the warm native refinement, rather than stopping at
+  //   the coarse bootstrap grid as the iterations above do.
   preconditioner.set_apc_refine_later(false);
   // Resolve partitioning for the reconstruction pass (sized from the full volume count, as the
   //   final row's temporal_subsample is validated to be 1.0). Set before update_parameters

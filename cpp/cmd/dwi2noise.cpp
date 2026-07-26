@@ -366,8 +366,8 @@ void run(Header &dwi,
   //   in expectation. The spatial subsampling follows the final entry of the schedule.
   preconditioner.set_temporal_subsample(iterations.back().temporal_subsample, rng, temporal_min_per_group);
   // No APC pass follows this one: a volume this final subset draws in for the first time (earlier
-  //   iterations having sub-sampled it away) is solved cold at native resolution, not on the
-  //   coarse bootstrap grid.
+  //   iterations having sub-sampled it away) has its cold coarse solve followed immediately by the
+  //   warm native refinement, rather than stopping at the coarse bootstrap grid.
   preconditioner.set_apc_refine_later(false);
   const ssize_t mprime_final = preconditioner.header().size(3);
   const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);

@@ -74,13 +74,16 @@ namespace MR::Denoise::Precondition {
 //
 //   Cost across the iteration loop: the phase changes little once the noise map stabilises, so a
 //   volume is solved from a cold start only on the first pass that estimates it -- and, because a
-//   background phase is smooth (low spatial bandwidth), such a cold solve runs on a 2x-downsampled
-//   grid with the result upsampled (~1/4 the cost, near-lossless for a smooth field) whenever a
-//   later pass will refine it at native resolution. A cold solve with no later refinement to come
-//   (a single-iteration schedule, or the final authoritative pass of any schedule) is instead
-//   solved at native resolution. Every pass after a volume's first is native but warm-started from
-//   that volume's previous estimate (seeded with |f| * the incoming phase), so a much smaller
-//   iteration budget (the Params ..._warm counts) re-settles it.
+//   background phase is smooth (low spatial bandwidth), every cold solve begins on a 2x-downsampled
+//   grid with the result upsampled (~1/4 the cost, near-lossless for a smooth field). Every pass
+//   after a volume's first is native but warm-started from that volume's previous estimate (seeded
+//   with |f| * the incoming phase), so a much smaller iteration budget (the Params ..._warm counts)
+//   re-settles it. Where a later pass will provide that refinement the cold solve stops at the
+//   coarse grid (regime_t::COLD_COARSE); where none will -- the final pass of the schedule, which
+//   must leave an authoritative native-resolution estimate -- the same warm native refinement is
+//   run immediately after the coarse solve within the one call (COLD_COARSE_THEN_WARM), which is
+//   the coarse-then-refine chain of a multi-pass schedule collapsed into a single pass, at roughly
+//   half the cost of solving cold at native resolution outright.
 //
 //   These decisions are made *per volume*, not per pass, because the noise-estimation schedule may
 //   temporally sub-sample: an iteration draws a subset of volumes, preconditions only those, and
@@ -214,11 +217,12 @@ public:
     // Extra primal-dual iterations at the converged lambda, to settle the image before the
     //   phase (its argument) is extracted.
     ssize_t polish_iter = 25;
-    // Reduced iteration budget for warm-started passes: every pass over a volume after the one
-    //   that first estimated it. That first pass solves from a cold start (the data), on a coarse
-    //   grid where a later pass will refine it; every later pass over that volume is warm-started
-    //   at native resolution from its own previous estimate, which barely moves once the noise map
-    //   has stabilised, so far fewer sweeps re-settle it. Because the solver runs a *fixed* budget
+    // Reduced iteration budget for every warm-started solve: each pass over a volume after the one
+    //   that first estimated it, and the native-resolution stage that immediately follows a
+    //   COLD_COARSE_THEN_WARM volume's own coarse solve. A cold solve starts from the data on the
+    //   coarse grid and spends the full budget; a warm-started one starts from an estimate that
+    //   (whether upsampled from the coarse grid or carried over from a previous pass) barely moves,
+    //   so far fewer sweeps re-settle it. Because the solver runs a *fixed* budget
     //   (no convergence test drives early exit besides lambda_tol), this reduced budget -- not the
     //   warm start alone -- is what shortens the later passes; the warm start is what keeps that
     //   reduction safe, which is precisely why it must not be granted to a volume that has no
@@ -253,6 +257,26 @@ public:
     double min_domain_fraction = 0.02;
   };
 
+  // How one volume's phase is solved in a given pass. Which regime applies follows from two facts
+  //   the caller (and only the caller) knows: whether that volume already has an estimate, and
+  //   whether a later pass will refine what this one produces.
+  enum class regime_t {
+    // Warm-started refinement at native resolution, on the reduced Params ..._warm budget: the
+    //   volume has an estimate from a prior pass, which barely moves once the noise map settles.
+    WARM,
+    // Cold solve on the 2x-downsampled grid, its phase upsampled to native. A bootstrap: correct
+    //   only where a later pass will refine this volume at native resolution.
+    COLD_COARSE,
+    // Cold solve on the 2x-downsampled grid, immediately followed by a warm-started
+    //   native-resolution refinement of that upsampled result -- the coarse-then-refine chain of a
+    //   multi-pass schedule, collapsed into a single call. For a volume with no prior estimate
+    //   reached by the final pass of the schedule, where there is no later pass to carry the
+    //   refinement, but whose result must still be native-resolution and authoritative. Roughly
+    //   half the cost of a full cold native solve (~1/4-cost coarse sweeps plus the reduced warm
+    //   budget at native resolution, versus the full budget at native resolution).
+    COLD_COARSE_THEN_WARM
+  };
+
   // Per-volume control of a single APC pass: one entry per *serialised* volume index (the
   //   Casorati column index; for 4D data simply the volume index, for >4D the index assigned by
   //   the preconditioner's serialisation image). The caller owns the policy -- which volumes this
@@ -263,13 +287,9 @@ public:
     //   does not use (outside the temporal subset): their stored phase is left untouched, whether
     //   that is an estimate from an earlier pass or the initial unit phase.
     bool estimate = false;
-    // This volume has a phase estimate from a prior pass: seed the solver from it and use the
-    //   reduced Params ..._warm budget. Must be false for a volume being estimated for the first
-    //   time, however many passes have already run over other volumes.
-    bool warm_start = false;
-    // Solve on a 2x-downsampled grid and upsample the phase. Only meaningful for a cold solve
-    //   (warm_start == false) whose result a later pass will refine at native resolution.
-    bool downsample = false;
+    // The regime in which to solve it. WARM is valid only for a volume that has been estimated
+    //   before, however many passes have already run over other volumes.
+    regime_t regime = regime_t::COLD_COARSE_THEN_WARM;
   };
 
   AdaptivePhaseEstimator() = default;

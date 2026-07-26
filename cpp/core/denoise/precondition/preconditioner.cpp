@@ -236,19 +236,23 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
 //   explicit template instantiations at the foot of this file remain well-formed.
 template <typename T> void Preconditioner<T>::update_phase(Image<T> &input) {
   if constexpr (is_complex<T>::value) {
-    // Plan the pass per volume. Only the volumes of the current temporal subset are estimated
-    //   (no other volume's phase is consumed by this iteration), and each of those is solved
-    //   according to *its own* history: cold if it has never been estimated -- on a 2x-downsampled
-    //   grid iff a later pass will refine it -- and warm-started at native resolution otherwise.
-    //   Tracking this per volume is what prevents a volume that earlier iterations sub-sampled away
-    //   from being handed warm-start parameters (a unit-phase seed with the reduced ..._warm
-    //   budget) for what is in fact its first estimation.
+    // Plan the pass per volume. Only the volumes of the current temporal subset are estimated (no
+    //   other volume's phase is consumed by this iteration), and each of those is solved according
+    //   to *its own* history: warm-started at native resolution if it already has an estimate;
+    //   otherwise cold, on the coarse grid alone where a later pass will refine it, or coarse
+    //   followed immediately by the warm native refinement where this is the final pass and no
+    //   later one will. Tracking this per volume is what prevents a volume that earlier iterations
+    //   sub-sampled away from being handed warm-start parameters (a unit-phase seed with the
+    //   reduced ..._warm budget) for what is in fact its first estimation.
+    using regime_t = AdaptivePhaseEstimator::regime_t;
     const ssize_t num_volumes = H_out.size(3);
     assert(ssize_t(apc_volume_has_phase.size()) == num_volumes);
     std::vector<AdaptivePhaseEstimator::VolumePlan> plan(num_volumes);
     const auto schedule = [&](const ssize_t v) {
-      const bool warm_start = apc_volume_has_phase[v];
-      plan[v] = {true, warm_start, !warm_start && apc_refine_later};
+      const regime_t regime = apc_volume_has_phase[v] ? regime_t::WARM
+                              : apc_refine_later      ? regime_t::COLD_COARSE
+                                                      : regime_t::COLD_COARSE_THEN_WARM;
+      plan[v] = {true, regime};
     };
     if (temporal_subset.empty()) {
       for (ssize_t v = 0; v != num_volumes; ++v)

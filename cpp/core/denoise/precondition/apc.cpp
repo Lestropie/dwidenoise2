@@ -437,13 +437,14 @@ public:
         sig(Nx, Ny),
         phase_r(Nx, Ny),
         phase_i(Nx, Ny) {
-    // Coarse-grid scratch, allocated once per thread if *any* planned volume requests a
-    //   downsampled solve (a 2x-downsampled solve with the phase upsampled: a background phase is
-    //   smooth, so decimation is near-lossless at ~1/4 the cost). Disabled for tiny planes (no
-    //   benefit; avoids over-decimation). Warm-started volumes never request it.
+    // Coarse-grid scratch, allocated once per thread if *any* planned volume is solved cold (every
+    //   cold solve begins on the 2x-downsampled grid with its phase upsampled: a background phase
+    //   is smooth, so decimation is near-lossless at ~1/4 the cost). Disabled for tiny planes (no
+    //   benefit; avoids over-decimation), which then solve cold at native resolution instead.
+    //   Volumes with an existing estimate are refined natively and never need it.
     const bool any_coarse =
-        std::any_of(plan.begin(), plan.end(), [](const AdaptivePhaseEstimator::VolumePlan &vp) { //
-          return vp.estimate && vp.downsample;                                                   //
+        std::any_of(plan.begin(), plan.end(), [](const AdaptivePhaseEstimator::VolumePlan &vp) {   //
+          return vp.estimate && vp.regime != AdaptivePhaseEstimator::regime_t::WARM;               //
         });
     coarse_available = any_coarse && Nx >= 4 && Ny >= 4;
     if (coarse_available) {
@@ -466,8 +467,11 @@ public:
     const AdaptivePhaseEstimator::VolumePlan &vp = (*plan)[size_t(volume_index(pos))];
     if (!vp.estimate)
       return;
-    const bool warm_start = vp.warm_start;
-    const bool use_coarse = vp.downsample && coarse_available;
+    using regime_t = AdaptivePhaseEstimator::regime_t;
+    // A cold volume starts on the coarse grid where the plane is large enough to decimate; a plane
+    //   too small for that falls back to a cold native solve on the full budget, in either cold
+    //   regime.
+    const bool use_coarse = vp.regime != regime_t::WARM && coarse_available;
 
     const size_t ax = inner_axes[0];
     const size_t ay = inner_axes[1];
@@ -494,41 +498,31 @@ public:
     }
 
     if (use_coarse) {
-      // Cold solve that a later pass will refine: solve on the 2x-downsampled grid, then upsample.
-      //   If the coarse slice is degenerate, leave the pre-loaded incoming phase untouched.
+      // Cold solve on the 2x-downsampled grid, then upsample. If the coarse slice is degenerate,
+      //   leave the pre-loaded incoming phase untouched (and skip any refinement below: a slice
+      //   with no estimable noise level is no more tractable at native resolution).
       //   Deliberately self-calibrated even where a noise map exists (a volume first estimated at
       //   iteration 2+ of a schedule that sub-samples): sigma would have to be decimated onto the
       //   coarse grid to be consistent with the decimated data, and this solve is only a bootstrap
-      //   that the volume's next (native, spatially-weighted) pass refines.
+      //   for a native, spatially-weighted refinement -- by a later pass under COLD_COARSE, or
+      //   immediately below under COLD_COARSE_THEN_WARM.
       downsample2x(fr, fr_c);
       downsample2x(fi, fi_c);
-      if (estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false))
+      const bool solved = estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false);
+      if (solved)
         upsample_phase(pr_c, pi_c, phase_r, phase_i);
-    } else {
-      // Native resolution: warm-started from the incoming phase, or cold (the volume's first
-      //   estimate, with no later pass to refine it -- or a plane too small to decimate). Where a
-      //   noise map exists, gather the per-voxel noise level (interpolated at each voxel's scanner
-      //   position; the map may be lower-resolution than the data) for spatially-varying weighting.
-      //   This is keyed on the map's availability rather than on warm_start: a volume drawn into a
-      //   temporal subset for the first time at a later iteration is solved cold, but the noise map
-      //   its neighbours enjoy is equally valid for it, and there is no reason to discard it in
-      //   favour of the self-calibrated global level. Without a map (the very first pass of a
-      //   schedule with no -noise_in), all-unknown sigma routes solve_plane to self-calibration.
-      if (have_sigma) {
-        Interp::Cubic<Image<float>> sigma_interp(sigma);
-        for (auto l = Loop(inner_axes)(in); l; ++l) {
-          const ssize_t ix = in.index(ax);
-          const ssize_t iy = in.index(ay);
-          sigma_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(in.index(0)),   //
-                                                                          double(in.index(1)),   //
-                                                                          double(in.index(2))})); //
-          const double s = double(sigma_interp.value());
-          sig(ix, iy) = std::isfinite(s) ? s : -1.0;
-        }
-      } else {
-        sig.setConstant(-1.0);
+      if (solved && vp.regime == regime_t::COLD_COARSE_THEN_WARM) {
+        // No later pass will refine this volume, so carry out that refinement here: the upsampled
+        //   coarse phase is exactly the warm start a subsequent pass would have used, so the
+        //   reduced ..._warm budget re-settles it at native resolution just as it would there.
+        gather_sigma(ax, ay);
+        estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true);
       }
-      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, warm_start);
+    } else {
+      // Native resolution: warm-started from the incoming phase, or -- on a plane too small to
+      //   decimate -- cold on the full budget.
+      gather_sigma(ax, ay);
+      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, vp.regime == regime_t::WARM);
     }
 
     for (auto l = Loop(inner_axes)(phase); l; ++l) {
@@ -539,6 +533,31 @@ public:
   }
 
 private:
+  // Fill "sig" with the per-voxel noise level for the current native-resolution plane, ready for
+  //   spatially-varying weighting: the noise map interpolated at each voxel's scanner position (it
+  //   may be lower-resolution than the data). Keyed on the map's availability rather than on the
+  //   solve regime: a volume drawn into a temporal subset for the first time at a later iteration
+  //   is solved cold, but the noise map its neighbours enjoy is equally valid for it, and there is
+  //   no reason to discard it in favour of the self-calibrated global level. Without a map (the
+  //   very first pass of a schedule with no -noise_in), all-unknown sigma routes solve_plane to its
+  //   MAD self-calibration.
+  void gather_sigma(const size_t ax, const size_t ay) {
+    if (!have_sigma) {
+      sig.setConstant(-1.0);
+      return;
+    }
+    Interp::Cubic<Image<float>> sigma_interp(sigma);
+    for (auto l = Loop(inner_axes)(in); l; ++l) {
+      const ssize_t ix = in.index(ax);
+      const ssize_t iy = in.index(ay);
+      sigma_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(in.index(0)),   //
+                                                                      double(in.index(1)),   //
+                                                                      double(in.index(2))})); //
+      const double s = double(sigma_interp.value());
+      sig(ix, iy) = std::isfinite(s) ? s : -1.0;
+    }
+  }
+
   // Serialised (Casorati column) index of the volume this outer position belongs to: the axis-3
   //   index for 4D data, otherwise the index the preconditioner's serialisation image assigns to
   //   the supra-spatial multi-index. This is the space in which VolumePlan entries (and the
@@ -593,21 +612,34 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
   //   volumes it touches at all (fewer than all under temporal sub-sampling). Volumes with
   //   estimate == false still cost one no-op functor invocation per plane, so they remain in the
   //   progress total; that dispatch is negligible against a solve.
-  ssize_t num_cold = 0;
   ssize_t num_warm = 0;
+  ssize_t num_bootstrap = 0;
+  ssize_t num_cold_complete = 0;
   for (const VolumePlan &vp : plan) {
     if (!vp.estimate)
       continue;
-    ++(vp.warm_start ? num_warm : num_cold);
+    switch (vp.regime) {
+    case regime_t::WARM:
+      ++num_warm;
+      break;
+    case regime_t::COLD_COARSE:
+      ++num_bootstrap;
+      break;
+    case regime_t::COLD_COARSE_THEN_WARM:
+      ++num_cold_complete;
+      break;
+    }
   }
-  if (num_cold + num_warm == 0)
+  const ssize_t num_estimated = num_warm + num_bootstrap + num_cold_complete;
+  if (num_estimated == 0)
     return;
-  std::string message = std::string(num_cold > 0 ? "estimating" : "updating") +
-                        " background phase (adaptive phase correction)";
-  if (num_cold + num_warm < ssize_t(plan.size()))
-    message += " for " + str(num_cold + num_warm) + " of " + str(plan.size()) + " volumes";
-  INFO("Adaptive phase correction: " + str(num_cold) + " volume(s) estimated from a cold start, " +
-       str(num_warm) + " refined from a prior estimate, " + str(ssize_t(plan.size()) - num_cold - num_warm) +
+  std::string message =
+      std::string(num_warm == num_estimated ? "updating" : "estimating") + " background phase (adaptive phase correction)";
+  if (num_estimated < ssize_t(plan.size()))
+    message += " for " + str(num_estimated) + " of " + str(plan.size()) + " volumes";
+  INFO("Adaptive phase correction: " + str(num_bootstrap) + " volume(s) bootstrapped cold on a coarse grid, " +
+       str(num_cold_complete) + " solved cold and refined at native resolution, " + str(num_warm) +
+       " refined from a prior estimate, " + str(ssize_t(plan.size()) - num_estimated) +
        " skipped (not used by this iteration)");
 
   ThreadedLoop(message, in, outer_axes, inslice_axes)
