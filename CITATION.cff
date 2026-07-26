@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata below.
+  For citation of the underlying MP-PCA denoising method and its
+  various technical enhancements, see the "Citation" and "References"
+  sections of the README.
+title: dwidenoise2
+type: software
+authors:
+  - family-names: Smith
+    given-names: "Robert E."
+    orcid: "https://orcid.org/0000-0003-3636-4642"
+    affiliation: The Florey Institute of Neuroscience and Mental Health
+version: 1.0.0
+license: PolyForm-Noncommercial-1.0.0
+repository-code: "https://github.com/Lestropie/dwidenoise2"
+url: "https://github.com/Lestropie/dwidenoise2"
+abstract: >-
+  A reworked implementation of Marchenko-Pastur (MP) Principal
+  Components Analysis (PCA) based denoising of >3D MRI data, building
+  upon the "dwidenoise" command in MRtrix3.

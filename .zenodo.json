@@ -1,0 +1,21 @@
+{
+    "title": "dwidenoise2",
+    "description": "A reworked implementation of Marchenko-Pastur (MP) Principal Components Analysis (PCA) based denoising of >3D MRI data, building upon the \"dwidenoise\" command in MRtrix3.",
+    "creators": [
+        {
+            "name": "Smith, Robert E.",
+            "orcid": "0000-0003-3636-4642",
+            "affiliation": "The Florey Institute of Neuroscience and Mental Health"
+        }
+    ],
+    "access_right": "open",
+    "license": "polyform-noncommercial-1.0.0",
+    "upload_type": "software",
+    "keywords": [
+        "diffusion MRI",
+        "denoising",
+        "principal component analysis",
+        "random matrix theory",
+        "MRtrix3"
+    ]
+}
