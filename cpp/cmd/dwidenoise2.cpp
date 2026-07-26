@@ -57,10 +57,7 @@ void usage() {
 
   SYNOPSIS = "Improved dMRI denoising using Marchenko-Pastur PCA";
 
-  AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)"
-           " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
-           " and Jelle Veraart (jelle.veraart@nyumc.org)"
-           " and J-Donald Tournier (jdtournier@gmail.com)";
+  AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)";
 
   DESCRIPTION
   + "This command performs DWI data denoising,"

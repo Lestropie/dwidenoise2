@@ -111,10 +111,7 @@ void usage() {
             " and fixes the noise level so that no further data-driven estimation"
             " is performed during denoising.");
 
-  AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)"
-           " and Daan Christiaens (daan.christiaens@kcl.ac.uk)"
-           " and Jelle Veraart (jelle.veraart@nyumc.org)"
-           " and J-Donald Tournier (jdtournier@gmail.com)";
+  AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)";
 
   COPYRIGHT =
   "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"
