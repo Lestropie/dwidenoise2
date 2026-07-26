@@ -10,6 +10,12 @@ since the original derivation of this method and its implementation in *MRtrix3*
 
 ### Citation
 
+The `dwidenoise2` software itself can be [cited as](#smith2026):
+
+Smith, R.E.
+dwidenoise2.
+Zenodo, 2026, doi: 10.5281/zenodo.21601472.
+
 The primary scientific citation for utilising MP-PCA for MRI data denoising is
 [Veraart et al. (2016a)](#veraart2016a).
 For performing noise level estimation one should also cite
@@ -530,6 +536,12 @@ Imaging Neuroscience 2024:2;00060.
 M. Pizzolato, G. Gilbert, J.-P. Thiran, M. Descoteaux, R. Deriche.
 Adaptive phase correction of diffusion-weighted images.
 NeuroImage 2020:206;116274.
+
+<a id="smith2026"></a>
+**Smith (2026)**
+R.E. Smith.
+dwidenoise2.
+Zenodo. https://doi.org/10.5281/zenodo.21601472.
 
 <a id="veraart2016a"></a>
 **Veraart et al. (2016a)**

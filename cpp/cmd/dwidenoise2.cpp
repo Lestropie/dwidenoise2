@@ -205,6 +205,10 @@ void usage() {
   " governing permissions and limitations under the License.";
 
   REFERENCES
+  + "Smith, R.E. "
+    "dwidenoise2. "
+    "Zenodo, 2026, doi: 10.5281/zenodo.21601472"
+
   + "Veraart, J.; Novikov, D.S.; Christiaens, D.; Ades-aron, B.; Sijbers, J. & Fieremans, E. "
     "Denoising of diffusion MRI using random matrix theory. "
     "NeuroImage, 2016, 142, 394-406"

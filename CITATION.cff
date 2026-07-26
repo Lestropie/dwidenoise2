@@ -12,9 +12,18 @@ authors:
     orcid: "https://orcid.org/0000-0003-3636-4642"
     affiliation: The Florey Institute of Neuroscience and Mental Health
 version: 1.0.0
+date-released: "2026-07-26"
+doi: 10.5281/zenodo.21601472
 license: PolyForm-Noncommercial-1.0.0
 repository-code: "https://github.com/Lestropie/dwidenoise2"
 url: "https://github.com/Lestropie/dwidenoise2"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21601472
+    description: The concept DOI, representing all versions of this software.
+  - type: doi
+    value: 10.5281/zenodo.21601473
+    description: The version-specific DOI for version 1.0.0 of this software.
 abstract: >-
   A reworked implementation of Marchenko-Pastur (MP) Principal
   Components Analysis (PCA) based denoising of >3D MRI data, building

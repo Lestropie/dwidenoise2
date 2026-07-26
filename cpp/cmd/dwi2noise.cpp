@@ -128,6 +128,10 @@ void usage() {
   " governing permissions and limitations under the License.";
 
   REFERENCES
+  + "Smith, R.E. "
+    "dwidenoise2. "
+    "Zenodo, 2026, doi: 10.5281/zenodo.21601472"
+
   + "Veraart, J.; Fieremans, E. & Novikov, D.S. "
     "Diffusion MRI noise mapping using random matrix theory. "
     "Magn. Res. Med., 2016, 76(5), 1582-1593"
