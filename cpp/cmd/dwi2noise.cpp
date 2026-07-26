@@ -1,4 +1,4 @@
-/* Required Notice: Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;
+/* Required Notice: Copyright (c) 2026 Robert E. Smith <robert.smith@florey.edu.au>;
  * Required Notice: The Florey Institute of Neuroscience and Mental Health.
  *
  * Licensed under the PolyForm Noncommercial License 1.0.0 (the "License");
@@ -114,7 +114,7 @@ void usage() {
   AUTHOR = "Robert E. Smith (robert.smith@florey.edu.au)";
 
   COPYRIGHT =
-  "Copyright (c) 2025 Robert E. Smith <robert.smith@florey.edu.au>;"
+  "Copyright (c) 2026 Robert E. Smith <robert.smith@florey.edu.au>;"
   " The Florey Institute of Neuroscience and Mental Health."
   " Licensed under the PolyForm Noncommercial License 1.0.0 (the \"License\");"
   " you may not use this file except in compliance with the License."
