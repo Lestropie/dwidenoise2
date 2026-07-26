@@ -481,35 +481,24 @@ the same conditions govern the reference lists printed by the
 L. Cordero-Grande, D. Christiaens, J. Hutter, A.N. Price, J.V. Hajnal.
 Complex diffusion-weighted image estimation via matrix recovery under general noise models.
 NeuroImage 2019:200;391--404.
-*Applicable to*: all default usage of both `dwidenoise2` and `dwi2noise`
-(spherical [kernel shape](#sliding-window-kernel-shape),
-[subsampling](#subsampling),
-and, for `dwidenoise2`, [optimal shrinkage](#optimal-shrinkage));
-additionally `-demodulate linear` and `-estimator exp2`.
 
 <a id="foi2011"></a>
 **Foi (2011)**
 A. Foi.
 Noise estimation and removal in MR imaging: The variance-stabilization approach.
 IEEE International Symposium on Biomedical Imaging (ISBI) 2011;1809--1814.
-*Applicable to*: magnitude (non-complex) input data processed with
-`-vst_method foi` (the default), in either command.
 
 <a id="gavish2014"></a>
 **Gavish & Donoho (2014)**
 M. Gavish, D.L. Donoho.
 The Optimal Hard Threshold for Singular Values is 4/sqrt(3).
 IEEE Transactions on Information Theory 2014:60(8);5040--5053.
-*Applicable to*: `-estimator med` (either command),
-and `-filter optthresh` (`dwidenoise2` only).
 
 <a id="koay2006"></a>
 **Koay & Basser (2006)**
 C.G. Koay, P.J. Basser.
 Analytically exact correction scheme for signal extraction from noisy magnitude MR signals.
 Journal of Magnetic Resonance 2006:179(2);317--322.
-*Applicable to*: magnitude (non-complex) input data processed with
-`-vst_method koay`, in either command.
 
 <a id="ma2020"></a>
 **Ma et al. (2020)**
@@ -517,63 +506,45 @@ X. Ma, K. Ugurbil, X. Wu.
 Denoise magnitude diffusion magnetic resonance images via variance-stabilizing transformation
 and optimal singular-value manipulation.
 NeuroImage 2020:215;116852.
-*Applicable to*: magnitude (non-complex) input data denoised with any non-linear
-variance-stabilising transform (`-vst_method foi` / `koay` / `mom`), in either command.
 
 <a id="manjon2013"></a>
 **Manjon et al. (2013)**
 J.V. Manjon, P. Coupe, L. Concha, A. Buades, D.L. Collins, M. Robles.
 Diffusion Weighted Image Denoising Using Overcomplete Local PCA.
 PLoS ONE 2013:8(9);e73021.
-*Applicable to*: `dwidenoise2` with any aggregator other than `-aggregator exclusive`
-(i.e. all default usage); not applicable to `dwi2noise`, which performs no reconstruction.
 
 <a id="olesen2023"></a>
 **Olesen et al. (2023)**
 J.L. Olesen, A. Ianus, L. Ostergaard, N. Shemesh, S.N. Jespersen.
 Tensor denoising of multidimensional MRI data.
 Magnetic Resonance in Medicine 2023:89(3);1160--1172.
-*Applicable to*: `-estimator mrm2023` (the default) in either command.
 
 <a id="patron2024"></a>
 **Patron et al. (2024)**
 J.P.M. Patron, S. Moeller, J.L.R. Andersson, K. Ugurbil, E. Yacoub, S.N. Sotiropoulos.
 Denoising diffusion MRI: Considerations and implications for analysis.
 Imaging Neuroscience 2024:2;00060.
-*Applicable to*: complex input data processed with `-demodulate hann`,
-in either command.
 
 <a id="pizzolato2020"></a>
 **Pizzolato et al. (2020)**
 M. Pizzolato, G. Gilbert, J.-P. Thiran, M. Descoteaux, R. Deriche.
 Adaptive phase correction of diffusion-weighted images.
 NeuroImage 2020:206;116274.
-*Applicable to*: complex input data processed with `-demodulate apc` (the default),
-in either command.
 
 <a id="veraart2016a"></a>
 **Veraart et al. (2016a)**
 J. Veraart, D. Novikov, D. Christiaens, B. Ades-aron, J. Sijbers, E. Fieremans.
 Denoising of diffusion MRI using random matrix theory.
 NeuroImage 2016:142;394--406.
-*Applicable to*: all usage of `dwidenoise2` (the primary MP-PCA denoising citation);
-additionally `-estimator exp1` in either command.
 
 <a id="veraart2016b"></a>
 **Veraart et al. (2016b)**
 J. Veraart, E. Fieremans, D.S. Novikov.
 Diffusion MRI noise mapping using random matrix theory.
 Magnetic Resonance in Medicine 2016:76(5);1582--1593.
-*Applicable to*: all usage of either command in which the noise level is estimated from the data
-(i.e. all usage of `dwi2noise`, and all usage of `dwidenoise2` other than with `-noise_in`).
 
 <a id="zhu2022"></a>
 **Zhu et al. (2022)**
 W. Zhu, X. Ma, X.-H. Zhu, K. Ugurbil, W. Chen, X. Wu.
 Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis.
 IEEE Transactions on Biomedical Engineering 2022:69(11);3377--3388.
-*Applicable to*: `-estimator tbme2022` in either command.
-
-The MP-PCA method is additionally encumbered by [patent US10698065B2](#patent)
-(see "Permissions" above),
-the scope of which is understood to encompass the `exp1` and `exp2` noise level estimators.

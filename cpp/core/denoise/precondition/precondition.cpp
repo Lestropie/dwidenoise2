@@ -45,14 +45,11 @@ const char *const demodulation_description =
     "from the empirical complex data via a noise-weighted total-variation smoothing, "
     "the strength of which is driven by the current noise level map "
     "(the first iteration, which has no noise map yet, "
-    "instead self-calibrates from a data-derived global noise level with uniform spatial weighting); "
-    "where an iteration draws only a temporal subset of volumes, "
-    "only those volumes' phases are re-estimated in that iteration, "
-    "and each volume's estimate is refined from its own previous estimate where it has one. "
-    "The alternative 'hann' uses a fixed full-extent Hann-window non-linear phase estimated only once; "
+    "instead self-calibrates from a data-derived global noise level with uniform spatial weighting). "
+    "The alternative 'hann' uses a fixed full-extent Hann-window non-linear phase estimated only once. "
     "'linear' instead regresses a strictly linear phase term from each k-space, "
-    "similarly to performed in Cordero-Grande et al. 2019; "
-    "and 'none' disables phase demodulation.";
+    "similarly to performed in Cordero-Grande et al. 2019. "
+    "'none' disables phase demodulation.";
 
 // clang-format off
 OptionGroup precondition_options(const bool include_output)

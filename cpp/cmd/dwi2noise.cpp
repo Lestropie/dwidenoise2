@@ -131,18 +131,39 @@ void usage() {
   " governing permissions and limitations under the License.";
 
   REFERENCES
-  + "Veraart, J.; Fieremans, E. & Novikov, D.S. " // Internal
+  + "Veraart, J.; Fieremans, E. & Novikov, D.S. "
     "Diffusion MRI noise mapping using random matrix theory. "
-    "Magn. Res. Med., 2016, 76(5), 1582-1593, doi: 10.1002/mrm.26059"
+    "Magn. Res. Med., 2016, 76(5), 1582-1593"
 
-  + "Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. " // Internal
+  + "Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. "
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
     "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
 
-  + "* If denoising complex data without changing -demodulate from its default (apc): "
+  + "* If estimating noise from complex data without changing -demodulate from its default (apc): "
     "Pizzolato, M.; Gilbert, G.; Thiran, J.-P.; Descoteaux, M.; Deriche, R. "
     "Adaptive phase correction of diffusion-weighted images. "
     "NeuroImage, 2020, 206, 116274, doi: 10.1016/j.neuroimage.2019.116274"
+
+  + "* If using -demodulate hann: "
+    "Manzano Patron, J.P.; Moeller, S.; Andersson, J.L.R.; Ugurbil, K.; Yacoub, E.; Sotiropoulos, S.N. "
+    "Denoising diffusion MRI: Considerations and implications for analysis. "
+    "Imaging Neuroscience, 2024, 2, 00060"
+
+  + "* If estimating noise from magnitude data with any non-linear variance-stabilising transform:  "
+    "Foi A. "
+    "Noise estimation and removal in MR imaging: The variance-stabilization approach. "
+    "IEEE International Symposium on Biomedical Imaging, 2011, 1809-1814, doi: 10.1109/ISBI.2011.5872758"
+
+  + "* If using -vst koay: "
+    "Koay, C.G.; Basser, P.J. "
+    "Analytically exact correction scheme for signal extraction from noisy magnitude MR signals. "
+    "Journal of Magnetic Resonance, 2006, 179(2), 317-322"
+
+  + "* If estimating noise from magnitude data with any non-linear variance-stabilising transform: "
+    "Ma, X.; Ugurbil, K.; Wu, X. "
+    "Denoise magnitude diffusion magnetic resonance images "
+    "via variance-stabilizing transformation and optimal singular-value manipulation. "
+    "NeuroImage, 2020, 215, 116852"
 
   + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
@@ -213,33 +234,6 @@ void usage() {
   + Option("patchcount",
            "The number of unique patches to which an input image voxel contributes")
     + Argument("image").type_image_out();
-
-  COPYRIGHT =
-      "Copyright (c) 2016 New York University, University of Antwerp, and the MRtrix3 contributors \n \n"
-      "Permission is hereby granted, free of charge, to any non-commercial entity ('Recipient') obtaining a copy of "
-      "this software and "
-      "associated documentation files (the 'Software'), to the Software solely for non-commercial research, including "
-      "the rights to "
-      "use, copy and modify the Software, subject to the following conditions: \n \n"
-      "\t 1. The above copyright notice and this permission notice shall be included by Recipient in all copies or "
-      "substantial portions of "
-      "the Software. \n \n"
-      "\t 2. THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT "
-      "LIMITED TO THE WARRANTIES"
-      "OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR "
-      "COPYRIGHT HOLDERS BE"
-      "LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING "
-      "FROM, OUT OF OR"
-      "IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. \n \n"
-      "\t 3. In no event shall NYU be liable for direct, indirect, special, incidental or consequential damages in "
-      "connection with the Software. "
-      "Recipient will defend, indemnify and hold NYU harmless from any claims or liability resulting from the use of "
-      "the Software by recipient. \n \n"
-      "\t 4. Neither anything contained herein nor the delivery of the Software to recipient shall be deemed to grant "
-      "the Recipient any right or "
-      "licenses under any patents or patent application owned by NYU. \n \n"
-      "\t 5. The Software may only be used for non-commercial research and may not be used for clinical care. \n \n"
-      "\t 6. Any publication by Recipient of research involving the Software shall cite the references listed below.";
 }
 // clang-format on
 

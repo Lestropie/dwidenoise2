@@ -30,7 +30,7 @@ using namespace App;
 
 const char *patent_description =
     "Estimation of the noise level of an image series"
-    " based on the Marchenk--Pastur distribution (-estimator exp1/exp2)"
+    " based on the Marchenko-Pastur distribution (-estimator exp1/exp2)"
     " is protected by the following patent: \n"
     "US10698065B2."
     " System, method and computer accessible medium for noise estimation, noise removal and gibbs ringing removal."

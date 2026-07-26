@@ -208,22 +208,43 @@ void usage() {
   " governing permissions and limitations under the License.";
 
   REFERENCES
-  + "Veraart, J.; Novikov, D.S.; Christiaens, D.; Ades-aron, B.; Sijbers, J. & Fieremans, E. " // Internal
+  + "Veraart, J.; Novikov, D.S.; Christiaens, D.; Ades-aron, B.; Sijbers, J. & Fieremans, E. "
     "Denoising of diffusion MRI using random matrix theory. "
-    "NeuroImage, 2016, 142, 394-406, doi: 10.1016/j.neuroimage.2016.08.016"
+    "NeuroImage, 2016, 142, 394-406"
 
-  + "Veraart, J.; Fieremans, E. & Novikov, D.S. " // Internal
+  + "Veraart, J.; Fieremans, E. & Novikov, D.S. "
     "Diffusion MRI noise mapping using random matrix theory. "
-    "Magn. Res. Med., 2016, 76(5), 1582-1593, doi: 10.1002/mrm.26059"
+    "Magn. Res. Med., 2016, 76(5), 1582-1593"
 
-  + "Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. " // Internal
+  + "Cordero-Grande, L.; Christiaens, D.; Hutter, J.; Price, A.N.; Hajnal, J.V. "
     "Complex diffusion-weighted image estimation via matrix recovery under general noise models. "
-    "NeuroImage, 2019, 200, 391-404, doi: 10.1016/j.neuroimage.2019.06.039"
+    "NeuroImage, 2019, 200, 391-404"
 
   + "* If denoising complex data without changing -demodulate from its default (apc): "
     "Pizzolato, M.; Gilbert, G.; Thiran, J.-P.; Descoteaux, M.; Deriche, R. "
     "Adaptive phase correction of diffusion-weighted images. "
-    "NeuroImage, 2020, 206, 116274, doi: 10.1016/j.neuroimage.2019.116274"
+    "NeuroImage, 2020, 206, 116274"
+
+  + "* If using -demodulate hann: "
+    "Manzano Patron, J.P.; Moeller, S.; Andersson, J.L.R.; Ugurbil, K.; Yacoub, E.; Sotiropoulos, S.N. "
+    "Denoising diffusion MRI: Considerations and implications for analysis. "
+    "Imaging Neuroscience, 2024, 2, 00060"
+
+  + "* If denoising magnitude data with any non-linear variance-stabilising transform:  "
+    "Foi A. "
+    "Noise estimation and removal in MR imaging: The variance-stabilization approach. "
+    "IEEE International Symposium on Biomedical Imaging, 2011, 1809-1814"
+
+  + "* If using -vst koay: "
+    "Koay, C.G.; Basser, P.J. "
+    "Analytically exact correction scheme for signal extraction from noisy magnitude MR signals. "
+    "Journal of Magnetic Resonance, 2006, 179(2), 317-322"
+
+  + "* If denoising magnitude data with any non-linear variance-stabilising transform: "
+    "Ma, X.; Ugurbil, K.; Wu, X. "
+    "Denoise magnitude diffusion magnetic resonance images "
+    "via variance-stabilizing transformation and optimal singular-value manipulation. "
+    "NeuroImage, 2020, 215, 116852"
 
   + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
@@ -233,17 +254,17 @@ void usage() {
   + "* If using -estimator tbme2022: "
     "Zhu, W.; Ma, X.; Zhu, X.-H.; Ugurbil, K.; Chen, W.; Wu, X. "
     "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
-    "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"
-
-  + "* If using anything other than -aggregation exclusive: "
-    "Manjon, J.V.; Coupe, P.; Concha, L.; Buades, A.; D. Collins, D.L.; Robles, M. "
-    "Diffusion Weighted Image Denoising Using Overcomplete Local PCA. "
-    "PLoS ONE, 2013, 8(9), e73021"
+    "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388"
 
   + "* If using -estimator med or -filter optthresh: "
-    "Gavish, M.; Donoho, D.L."
+    "Gavish, M.; Donoho, D.L. "
     "The Optimal Hard Threshold for Singular Values is 4/sqrt(3). "
-    "IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053.";
+    "IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053"
+
+  + "* If using anything other than -aggregator exclusive: "
+    "Manjon, J.V.; Coupe, P.; Concha, L.; Buades, A.; D. Collins, D.L.; Robles, M. "
+    "Diffusion Weighted Image Denoising Using Overcomplete Local PCA. "
+    "PLoS ONE, 2013, 8(9), e73021";
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image.").type_image_in()

@@ -35,7 +35,7 @@ const Option estimator_option =
                "), either: \n"
                "* Exp1: the original estimator used in Veraart et al. (2016); \n"
                "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
-               "* Med: estimate based on the median eigenvalue as in Gavish and Donohue (2014); \n"
+               "* Med: estimate based on the median eigenvalue as in Gavish and Donoho (2014); \n"
                "* MRM2023: the alternative estimator introduced in Olesen et al. (2023); \n"
                "* TBME2022: the multiple-moment generalised-quarter-circle estimator of Zhu et al. (2022).")
       + Argument("algorithm").type_choice<estimator_type>();
