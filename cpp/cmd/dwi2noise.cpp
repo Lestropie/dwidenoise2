@@ -487,7 +487,8 @@ void run() {
   //   coupling between iterations and so reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   if (Schedule::requested()) {
-    iterations = Schedule::load("dwi2noise");
+    // dwi2noise has no -rankpermm_in option and no prior density on its first row.
+    iterations = Schedule::load("dwi2noise", false);
     // Without a variance-stabilising transform there is no coupling between iterations, so the
     //   per-iteration refinement of a multi-row schedule cannot propagate and is wasted
     //   computation; a single-row schedule is, however, perfectly meaningful under
@@ -513,7 +514,7 @@ void run() {
     config.update_noise = true;
     iterations.push_back(config);
   } else {
-    iterations = Schedule::load_default("dwi2noise");
+    iterations = Schedule::load_default("dwi2noise", false);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
   std::shared_ptr<SpatialSubsample> final_subsample =

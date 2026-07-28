@@ -365,7 +365,8 @@ std::string resolve(const std::string &spec, const std::string &command) {
 //   beyond a few hundred volumes a lighter schedule is usually preferable.
 constexpr size_t default_schedule_slow_threshold = 255;
 
-std::vector<Iterative::Iteration> parse(const std::string &path, const std::string &command) {
+std::vector<Iterative::Iteration>
+parse(const std::string &path, const std::string &command, const bool rank_density_supplied) {
   // dwi2noise (re)estimates the noise level in every iteration, so the "update_noise" column
   //   carries no meaning for it and is rejected outright rather than silently ignored.
   const bool permit_update_noise = (command != "dwi2noise");
@@ -478,15 +479,20 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
     throw Exception("Schedule file \"" + path + "\" defines no iterations "
                     "(a column header but no data rows)");
 
-  // The first iteration has no signal-rank density from a prior iteration, so it cannot use a
-  //   rank-dependent kernel ("rank" or "rmse"). All rank-naive kernels (the default "aspect",
-  //   "radius", "voxels", "cuboid" and "rank_fixed") are permitted on the first row.
-  if (result.front().kernel.type == Kernel::kernel_spec_type::RMSE ||
-      result.front().kernel.type == Kernel::kernel_spec_type::RANK)
-    throw Exception("Schedule file \"" + path + "\": the first iteration may not use the \"rmse\" or "
-                    "\"rank\" kernel; these require a signal-rank density from a prior iteration. "
-                    "Use a rank-naive kernel on the first row (e.g. \"aspect=2.0\", \"radius=<mm>\", "
-                    "\"voxels=<count>\" or \"cuboid\")");
+  // The rank-dependent kernels ("rank" and "rmse") are sized from a signal-rank density. The
+  //   first iteration has no prior iteration to obtain one from, so it may use such a kernel only
+  //   when a density is supplied from outside the schedule (dwidenoise2 -rankpermm_in) -- which is
+  //   precisely what the bundled "apriori" schedule is for. All rank-naive kernels (the default
+  //   "aspect", "radius", "voxels", "cuboid" and "rank_fixed") are permitted unconditionally.
+  if (!rank_density_supplied && (result.front().kernel.type == Kernel::kernel_spec_type::RMSE ||
+                                 result.front().kernel.type == Kernel::kernel_spec_type::RANK))
+    throw Exception("Schedule file \"" + path +
+                    "\": the first iteration may not use the \"rmse\" or "
+                    "\"rank\" kernel unless a signal-rank density is supplied, as these kernels are "
+                    "sized from one. Either provide a density on the command line "
+                    "(-rankpermm_in <value/image>, e.g. exported by dwi2noise -rankpermm_out), "
+                    "or use a rank-naive kernel on the first row (e.g. \"aspect=2.0\", "
+                    "\"radius=<mm>\", \"voxels=<count>\" or \"cuboid\")");
 
   // Any iteration that is not the last must (re)estimate the noise level: a non-final
   //   iteration exists precisely to refine the estimate fed to the next iteration, so a
@@ -534,7 +540,7 @@ const char *schedule_description =
 
 bool requested() { return !get_options("schedule").empty(); }
 
-std::vector<Iterative::Iteration> load(const std::string &command) {
+std::vector<Iterative::Iteration> load(const std::string &command, const bool rank_density_supplied) {
   auto opt = get_options("schedule");
   assert(!opt.empty());
   // Inspect the raw argument text before constructing a ParsedArgument from it:
@@ -547,29 +553,30 @@ std::vector<Iterative::Iteration> load(const std::string &command) {
                     available_bundled(command));
   const std::string spec(opt[0][0]);
   const std::string path = resolve(spec, command);
-  std::vector<Iterative::Iteration> schedule = parse(path, command);
+  std::vector<Iterative::Iteration> schedule = parse(path, command, rank_density_supplied);
   INFO("Using noise estimation schedule from \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
 }
 
-std::vector<Iterative::Iteration> load_default(const std::string &command) {
+std::vector<Iterative::Iteration> load_default(const std::string &command, const bool rank_density_supplied) {
   const std::string path = bundled_directory(command) + "/default.txt";
   if (!std::ifstream(path).good())
     throw Exception("Unable to locate the bundled default noise estimation schedule for command \"" + command +
                     "\" (expected at \"" + path + "\"); the software installation may be incomplete");
-  std::vector<Iterative::Iteration> schedule = parse(path, command);
+  std::vector<Iterative::Iteration> schedule = parse(path, command, rank_density_supplied);
   INFO("Using bundled default noise estimation schedule \"" + path + "\" (" + str(schedule.size()) + " iteration" +
        (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;
 }
 
-std::vector<Iterative::Iteration> load_bundled(const std::string &command, const std::string &name) {
+std::vector<Iterative::Iteration>
+load_bundled(const std::string &command, const std::string &name, const bool rank_density_supplied) {
   const std::string path = (std::filesystem::path(bundled_directory(command)) / (name + ".txt")).string();
   if (!std::ifstream(path).good())
     throw Exception("Unable to locate the bundled \"" + name + "\" noise estimation schedule for command \"" +
                     command + "\" (expected at \"" + path + "\"); the software installation may be incomplete");
-  std::vector<Iterative::Iteration> schedule = parse(path, command);
+  std::vector<Iterative::Iteration> schedule = parse(path, command, rank_density_supplied);
   INFO("Using bundled \"" + name + "\" noise estimation schedule \"" + path + "\" (" + str(schedule.size()) +
        " iteration" + (schedule.size() == 1 ? "" : "s") + ")");
   return schedule;

@@ -916,8 +916,11 @@ void run() {
   //   the coupling between iterations and likewise reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   const bool fixed_rank = !get_options("fixed_rank").empty();
+  // A signal-rank density supplied on the command line is what permits a schedule to open
+  //   with a rank-derived kernel (the bundled "apriori" schedule does exactly that).
+  const bool rank_density_supplied = !get_options("rankpermm_in").empty();
   if (Schedule::requested()) {
-    iterations = Schedule::load("dwidenoise2");
+    iterations = Schedule::load("dwidenoise2", rank_density_supplied);
     // Without a variance-stabilising transform there is no coupling between iterations, so the
     //   per-iteration refinement of a multi-row schedule cannot propagate and is wasted
     //   computation; a single-row schedule (e.g. the bundled "legacy" schedule) is, however,
@@ -933,7 +936,7 @@ void run() {
     //   variance-stabilising transform: this is a single denoising pass, not an iterative schedule.
     //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_fixed"
     //   kernel, which reads r from -fixed_rank).
-    iterations = Schedule::load_bundled("dwidenoise2", "fixedrank");
+    iterations = Schedule::load_bundled("dwidenoise2", "fixedrank", rank_density_supplied);
   } else if (vst_none) {
     WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
          "refining the noise level estimate would have no effect on subsequent iterations "
@@ -949,7 +952,7 @@ void run() {
     config.update_noise = true; // a single-pass schedule must estimate the noise level
     iterations.push_back(config);
   } else {
-    iterations = Schedule::load_default("dwidenoise2");
+    iterations = Schedule::load_default("dwidenoise2", rank_density_supplied);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
   std::shared_ptr<SpatialSubsample> final_subsample =

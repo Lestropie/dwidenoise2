@@ -49,10 +49,12 @@
 #  - kernel               : the PCA patch shape and size for this iteration (there are no
 #                            command-line kernel options). One of:
 #                            "aspect=<ratio>" (spherical kernel of ~ratio*m voxels; rank-naive; the
-#                            first iteration must use this); "rmse=<tolerance>" (spherical kernel
-#                            grown until the estimator's predicted relative noise-level RMSE meets
-#                            <tolerance>, e.g. 0.02, requiring a signal-rank density from a prior
-#                            iteration); "radius=<mm>" (fixed-radius sphere, replacing -radius);
+#                            first iteration must use a rank-naive kernel such as this, dwi2noise
+#                            having no means of supplying a prior rank density); "rmse=<tolerance>"
+#                            (spherical kernel grown until the estimator's predicted relative
+#                            noise-level RMSE meets <tolerance>, e.g. 0.02, requiring a signal-rank
+#                            density from a prior iteration); "radius=<mm>" (fixed-radius sphere,
+#                            replacing -radius);
 #                            "voxels=<count>" (fixed absolute voxel count, replacing -minvoxels); or
 #                            the cuboid kernel (replacing -shape cuboid / -extent) as
 #                            "cuboid=<x>,<y>,<z>" (per-axis), "cuboid=<n>" (isotropic), "cuboid=<ratio>x"
@@ -60,7 +62,8 @@
 #                            (= "cuboid=2x").
 #                            Default (column omitted): "aspect=2.0". (Replaces the former
 #                            kernel_multiplier column.) The "rank" and "rank_fixed" kernels are for
-#                            dwidenoise2 reconstruction only and are not used by dwi2noise.
+#                            dwidenoise2 reconstruction only and are not used by dwi2noise; they are
+#                            rejected outright in a dwi2noise schedule, on any row.
 #  - smooth_noise        : whether to smooth the estimated noise map before it is
 #                          passed to the next iteration ("true" or "false").
 #                          Default: false.

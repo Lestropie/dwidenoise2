@@ -49,8 +49,10 @@
 #                          exclusive with partitions.
 #  - kernel               : the PCA patch sizing rule for this iteration. One of:
 #                            * "aspect=<ratio>"  - spherical kernel of ~ratio*m voxels (m = number
-#                              of volumes); naive to signal rank. The first iteration must use this
-#                              (no rank estimate exists yet).
+#                              of volumes); naive to signal rank. The first iteration must use a
+#                              rank-naive kernel such as this, unless a signal-rank density is
+#                              supplied on the command line via -rankpermm_in (as the bundled
+#                              "apriori" schedule requires).
 #                            * "rmse=<tolerance>" - spherical kernel grown until the estimator's
 #                              predicted relative noise-level RMSE meets <tolerance> (e.g. 0.02),
 #                              floored at the square noise block (n >= m + signal_rank) and capped.
