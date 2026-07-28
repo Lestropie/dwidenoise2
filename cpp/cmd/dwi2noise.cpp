@@ -376,8 +376,15 @@ void run(Header &dwi,
   preconditioner.set_partitioning_active(num_partitions > 1);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
-  input_preconditioned =
-      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+  // -preconditioned exports the preconditioned data that are the input to PCA. The final
+  //   iteration's are the ones that correspond to the exported noise map, so those are what is
+  //   written (mirroring dwidenoise2 -preconditioned_input).
+  auto opt_precond = get_options("preconditioned");
+  if (!opt_precond.empty())
+    input_preconditioned = Image<T>::create(opt_precond[0][0], preconditioner.header());
+  else
+    input_preconditioned =
+        Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
   std::vector<ssize_t> volume_group;
   std::shared_ptr<const Partitioning> partitioning; // null ⇒ per-kernel in Estimate
   if (num_partitions > 1)
@@ -586,6 +593,12 @@ void run() {
     if (!final_exports.max_dist.valid())
       final_exports.set_max_dist();
   }
+
+  // -export_grad_mrtrix / -export_grad_fsl are declared by DWI::GradExportOptions(); this is the
+  //   function that consumes them. It reads the "dw_scheme" keyval, which the gradient resolution
+  //   above writes back into the header whenever -grad / -fslgrad was given, and which otherwise
+  //   is the image's own; with neither, it reports that no gradient information is available.
+  DWI::export_grad_commandline(dwi);
 
   int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (complex)
