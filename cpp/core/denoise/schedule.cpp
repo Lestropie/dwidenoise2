@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -144,6 +145,13 @@ Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
   } else if (key == "voxels") {
     spec.type = Kernel::kernel_spec_type::VOXELS;
     spec.param = parse_pos_double("voxel count (e.g. \"voxels=100\")");
+    // A voxel count is an integer: the kernel factory rounds this value, so a fractional
+    //   request would be silently reinterpreted as a different (integral) count.
+    if (spec.param != std::floor(spec.param))
+      throw Exception("Schedule file line " + str(lineno) +
+                      ": "
+                      "kernel voxel count must be a positive integer (got \"" +
+                      value + "\")");
   } else if (key == "cuboid") {
     spec.type = Kernel::kernel_spec_type::CUBOID;
     if (arg.empty()) {
@@ -279,13 +287,14 @@ ssize_t parse_partitions(const std::string &value, const size_t lineno) {
   return result;
 }
 
-// Maximum volumes per partition; "none" / "0" ⇒ no limit (unset). Otherwise must be >= 1.
+// Maximum volumes per partition; "none" ⇒ no limit (unset); any other value must be a positive
+//   integer. "0" is not a synonym for "none": the partition count is derived as
+//   ceil(num_volumes / max_partition_size), which is undefined for zero, and no user-facing
+//   document mentions such a synonym.
 std::optional<ssize_t> parse_max_partition_size(const std::string &value, const size_t lineno) {
   if (value == "none")
     return std::nullopt;
   const ssize_t result = parse_nonneg_int(value, "max_partition_size", lineno);
-  if (result == 0)
-    return std::nullopt;
   if (result < 1)
     throw Exception("Schedule file line " + str(lineno) + ": "
                     "value for column \"max_partition_size\" must be a positive integer or \"none\" "
@@ -360,6 +369,9 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
   // dwi2noise (re)estimates the noise level in every iteration, so the "update_noise" column
   //   carries no meaning for it and is rejected outright rather than silently ignored.
   const bool permit_update_noise = (command != "dwi2noise");
+  // The rank-derived kernels belong to the dwidenoise2 reconstruction pass only;
+  //   see share/dwidenoise2/dwi2noise/default.txt, "kernel" column.
+  const bool permit_rank_kernels = (command != "dwi2noise");
 
   std::ifstream in(path);
   if (!in)
@@ -413,9 +425,23 @@ std::vector<Iterative::Iteration> parse(const std::string &path, const std::stri
       const std::string &value = tokens[column];
       if (key == "spatial_subsample")
         iteration.spatial_subsample_ratios = parse_spatial_subsample(value, lineno);
-      else if (key == "kernel")
+      else if (key == "kernel") {
         iteration.kernel = parse_kernel(value, lineno);
-      else if (key == "smooth_noise")
+        // Per-command kernel admissibility. The "rank" and "rank_fixed" kernels size the
+        //   dwidenoise2 reconstruction patch from a signal rank; dwi2noise has no reconstruction
+        //   pass and no -fixed_rank option, so neither is meaningful for it. Rejecting them here
+        //   also keeps the run-time "rank_fixed requires -fixed_rank" message (kernel.cpp), which
+        //   prescribes an option dwi2noise does not have, from ever reaching a dwi2noise user.
+        if (!permit_rank_kernels && (iteration.kernel.type == Kernel::kernel_spec_type::RANK ||
+                                     iteration.kernel.type == Kernel::kernel_spec_type::RANK_FIXED))
+          throw Exception("Schedule file \"" + path + "\" line " + str(lineno) +
+                          ": "
+                          "kernel \"" +
+                          value + "\" is not permitted in a " + command +
+                          " schedule; "
+                          "the \"rank\" and \"rank_fixed\" kernels size the dwidenoise2 reconstruction "
+                          "patch from a signal rank and are used only by dwidenoise2");
+      } else if (key == "smooth_noise")
         iteration.smooth_noiseout = parse_smooth_noise(value, lineno);
       else if (key == "temporal_subsample")
         iteration.temporal_subsample = parse_temporal_subsample(value, lineno);
@@ -511,6 +537,14 @@ bool requested() { return !get_options("schedule").empty(); }
 std::vector<Iterative::Iteration> load(const std::string &command) {
   auto opt = get_options("schedule");
   assert(!opt.empty());
+  // Inspect the raw argument text before constructing a ParsedArgument from it:
+  //   App::ParsedArgument asserts that the text is non-empty, so "-schedule ''" would otherwise
+  //   trip an assertion inside MRtrix3 core rather than being reported as impermissible usage.
+  if (opt[0].args[0].empty())
+    throw Exception("Option -schedule was provided with an empty argument; "
+                    "it must name either an existing schedule file "
+                    "or a schedule bundled with the software" +
+                    available_bundled(command));
   const std::string spec(opt[0][0]);
   const std::string path = resolve(spec, command);
   std::vector<Iterative::Iteration> schedule = parse(path, command);
