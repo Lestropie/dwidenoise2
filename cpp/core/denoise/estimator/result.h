@@ -28,7 +28,15 @@ public:
       : cutoff_p(-1),
         sigma2(std::numeric_limits<double>::signaling_NaN()),
         lamplus(std::numeric_limits<double>::signaling_NaN()) {}
-  operator bool() const { return cutoff_p >= 0 && std::isfinite(sigma2) && std::isfinite(lamplus); }
+  // A noise level of zero is not a usable threshold: lambda+ = (1 + sqrt(beta))^2 * sigma^2 is then
+  //   zero, so every component is classified as signal, and the optimal-shrinkage weights divide by
+  //   sigma2 (yielding NaN weights, and hence NaN output data in a build without assertions).
+  //   Estimators signal "no boundary could be found" by returning sigma2 == 0 (MRM2023's
+  //   fall-through when the peel-off scan classifies every component as signal;
+  //   Estimator::Rank when the imposed rank equals the available rank), so a strictly positive
+  //   sigma2 is required here. Recon and Estimate then take their documented conservative path
+  //   for an unusable threshold: copy the input data through unchanged.
+  operator bool() const { return cutoff_p >= 0 && std::isfinite(sigma2) && sigma2 > 0.0 && std::isfinite(lamplus); }
   bool operator!() const { return !bool(*this); }
   // From dwidenoise code / estimator::Exp :
   //   cutoff_p is the *number of noise components considered to be part of the MP distribution*.

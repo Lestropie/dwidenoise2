@@ -117,6 +117,10 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
           ++out_rank;
         }
         w[i] = lam > 0.0 ? (nu / y) : 0.0;
+        // Precondition: threshold.sigma2 > 0, guaranteed by Estimator::Result::operator bool()
+        //   under which this branch is entered. A zero sigma2 would give y = inf and hence a NaN
+        //   weight here; that is an unusable threshold, not a shrinkage weight, and is rejected as
+        //   an invalid Result rather than caught by this assertion.
         assert(w[i] >= 0.0 && w[i] <= 1.0);
         sum_weights += w[i];
         sum_variance += w[i] * Estimate<F>::s[i];
