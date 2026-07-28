@@ -79,15 +79,16 @@ public:
 
 template <typename T>
 Preconditioner<T>::Preconditioner(Image<T> &image,
-                              const Demodulation &demodulation,
-                              const demean_type demean,
-                              Image<float> &vst_noise,
-                              std::shared_ptr<NoiseModel::Base> noise_model)
-    : H_in(image),                   //
-      H_out(image),                  //
-      num_volume_groups(1),          //
-      noise_model(noise_model),      //
-      vst_noise_image(vst_noise) {   //
+                                  const Demodulation &demodulation,
+                                  const demean_type demean,
+                                  Image<float> &vst_noise,
+                                  std::shared_ptr<NoiseModel::Base> noise_model,
+                                  const Eigen::MatrixXd &grad)
+    : H_in(image),                 //
+      H_out(image),                //
+      num_volume_groups(1),        //
+      noise_model(noise_model),    //
+      vst_noise_image(vst_noise) { //
 
   for (ssize_t axis = 4; axis != H_in.ndim(); ++axis) {
     num_volume_groups *= H_in.size(axis);
@@ -193,12 +194,10 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
     vst_mean_image = Image<T>::scratch(H_mean, "Scratch image for per-volume-group stabilised-domain mean");
   } break;
   case demean_type::SHELLS: {
-    Eigen::Matrix<default_type, Eigen::Dynamic, Eigen::Dynamic> grad;
-    try {
-      grad = DWI::get_DW_scheme(H_mean);
-    } catch (Exception &e) {
-      throw Exception(e, "Cannot demean by shells as unable to obtain valid gradient table");
-    }
+    // Use the table resolved by the calling command; re-deriving it from H_mean would silently
+    //   misrotate -fslgrad bvecs, H_mean having no transform-realignment metadata (see header).
+    if (grad.rows() == 0)
+      throw Exception("Cannot demean by shells as unable to obtain valid gradient table");
     try {
       DWI::Shells shells(grad);
       index2shell.resize(image.size(3), -1);

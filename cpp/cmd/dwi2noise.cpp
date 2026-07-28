@@ -269,6 +269,7 @@ template <typename T>
 void run(Header &dwi,
          const Demodulation &demodulation,
          const demean_type demean,
+         const Eigen::MatrixXd &grad,
          Image<float> &user_vst_image,
          const decomp_type decomposition,
          std::shared_ptr<Estimator::Base> estimator,
@@ -283,7 +284,7 @@ void run(Header &dwi,
   //   the -noise_dof and -vst_method options (Gaussian for complex data).
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
-  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
+  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model, grad);
   // Cold adaptive-phase-correction solves within the noise-estimation iterations below are
   //   bootstraps: the final iteration re-estimates at native resolution the phase of every volume
   //   it uses, so they may be solved on a 2x-downsampled grid. Cleared before that final iteration
@@ -452,8 +453,29 @@ void run() {
     throw Exception("input image must be non-singleton across non-spatial dimensions");
   bool complex = dwi.datatype().is_complex();
 
+  // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
+  //   that header carries the transform-realignment metadata that -fslgrad import needs in order
+  //   to rotate the bvecs. Headers derived downstream (e.g. the preconditioner's, which is built
+  //   from an Image rather than a Header) lose it, and re-deriving the table from one of those
+  //   would assert in a debug build and silently misrotate the bvecs in a release build.
+  // Resolving it here also means a table supplied on the command line is validated: MRtrix3
+  //   already diagnoses a wrong row count, a non-4-column table, -grad together with -fslgrad, and
+  //   a bvecs/bvals length mismatch, but until now every one of those diagnostics was swallowed by
+  //   the shell-availability probe in select_demean(), and the command silently fell back to
+  //   another demeaning mode. An absent or malformed table *within the image header* remains a
+  //   legitimate reason to fall back; a table the user explicitly supplied is a hard error.
+  Eigen::MatrixXd grad;
+  const bool grad_from_commandline = !get_options("grad").empty() || !get_options("fslgrad").empty();
+  try {
+    grad = DWI::get_DW_scheme(dwi);
+  } catch (Exception &e) {
+    if (grad_from_commandline)
+      throw Exception(e, "Invalid diffusion gradient table provided on the command line");
+    grad.resize(0, 0);
+  }
+
   const Demodulation demodulation = select_demodulation(dwi);
-  const demean_type demean = select_demean(dwi);
+  const demean_type demean = select_demean(dwi, grad);
   const decomp_type decomposition = get_option_choice("decomposition", default_decomposition);
 
   // Resolve the requested variance-stabilising transform up-front:
@@ -572,20 +594,20 @@ void run() {
   case 0:
     assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<float>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 1:
     assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<double>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<cfloat>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<cdouble>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   }
 }

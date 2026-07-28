@@ -233,13 +233,17 @@ Demodulation select_demodulation(const Header &H) {
 //   appears as a single well-separated singular value). Whether explicit demeaning is still
 //   required at all under the default BDCSVD decomposition has not been re-evaluated and
 //   should be investigated; it may be reducible to optional / off-by-default.
-demean_type select_demean(const Header &H) {
+demean_type select_demean(const Header &H, const Eigen::MatrixXd &grad) {
+  // Whether a b-value shell structure can be inferred. The table itself is resolved once by the
+  //   calling command; only the shell decomposition is probed here, and its failure is a
+  //   legitimate reason to fall back to another demeaning mode.
   bool shells_available = false;
-  try {
-    auto grad = DWI::get_DW_scheme(H);
-    auto shells = DWI::Shells(grad);
-    shells_available = true;
-  } catch (Exception &) {
+  if (grad.rows() > 0) {
+    try {
+      auto shells = DWI::Shells(grad);
+      shells_available = true;
+    } catch (Exception &) {
+    }
   }
   const bool volume_groups_available = H.ndim() > 4;
   auto opt = get_options("demean");
