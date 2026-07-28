@@ -17,6 +17,7 @@
 
 #include "denoise/precondition/precondition.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,7 +39,9 @@ const char *const demodulation_description =
     "In the absence of metadata indicating otherwise, "
     "it is inferred that the first two axes correspond to acquired slices, "
     "and different slices / volumes will be demodulated individually; "
-    "this behaviour can be modified using the -demod_axes option. "
+    "this behaviour can be modified using the -demod_axes option; "
+    "the 'apc' estimator is two-dimensional and therefore requires exactly two axes, "
+    "whereas 'linear' and 'hann' accept any number of spatial axes. "
     "The method of phase estimation is selected with -demodulate. "
     "The default 'apc' performs noise-adaptive phase correction (Pizzolato et al. 2020): "
     "the background phase is re-estimated at every noise level estimation iteration "
@@ -104,8 +107,7 @@ OptionGroup precondition_options(const bool include_output)
 
 std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
   auto opt_dof = get_options("noise_dof");
-  const NoiseModel::vst_method_t vst_method =
-      get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
+  const NoiseModel::vst_method_t vst_method = get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
   // -vst_method none: no variance-stabilising transform (identity), for any data type.
   //   The noise distribution and -noise_dof are irrelevant, and the data reach PCA
   //   unmodified (save for any demeaning); see the single-pass fallback / warning in
@@ -135,8 +137,8 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
     return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
   }
   const ssize_t num_channels = opt_dof.empty() ? 1 : ssize_t(opt_dof[0][0]);
-  const NoiseModel::distribution_t distribution = num_channels == 1                          //
-                                                      ? NoiseModel::distribution_t::RICIAN   //
+  const NoiseModel::distribution_t distribution = num_channels == 1                                //
+                                                      ? NoiseModel::distribution_t::RICIAN         //
                                                       : NoiseModel::distribution_t::NONCENTRALCHI; //
   return NoiseModel::make(distribution, num_channels, vst_method);
 }
@@ -189,11 +191,36 @@ Demodulation select_demodulation(const Header &H) {
     }
   } else {
     result.axes = parse_ints<size_t>(opt_axes[0][0]);
+    // A demodulation axis list names the axes along which an FFT is taken; naming an axis twice is
+    //   not a second transform but a malformed request. It must be rejected here: downstream,
+    //   duplicate inner axes make ThreadedLoop() iterate an axis within itself and never terminate.
+    std::vector<size_t> sorted_axes(result.axes);
+    std::sort(sorted_axes.begin(), sorted_axes.end());
+    if (std::adjacent_find(sorted_axes.begin(), sorted_axes.end()) != sorted_axes.end())
+      throw Exception("Option -demod_axes may not name the same axis more than once "
+                      "(got \"" +
+                      std::string(opt_axes[0][0]) + "\")");
     for (auto axis : result.axes) {
       if (axis > 2)
         throw Exception("Phase demodulation implementation not yet robust to non-spatial axes");
     }
   }
+  // The adaptive phase correction solver is structurally two-dimensional (it solves an in-slice
+  //   problem); any other axis count is impermissible usage rather than an implementation fault,
+  //   and must therefore be rejected here rather than reaching the solver's own assertion.
+  //   The linear / Hann demodulators go through Filter::Demodulate, which accepts any number of
+  //   FFT axes, so the constraint is specific to 'apc'.
+  if (result.mode == demodulation_t::APC && result.axes.size() != 2)
+    throw Exception("Option -demod_axes must name exactly two axes "
+                    "when adaptive phase correction is in use "
+                    "(-demodulate apc, the default for complex input data): "
+                    "the adaptive phase estimator solves a two-dimensional in-slice problem "
+                    "(" +
+                    str(result.axes.size()) +
+                    " axes were provided). "
+                    "Either name the two within-slice axes (e.g. -demod_axes 0,1), "
+                    "or select a demodulator that accepts a different number of axes "
+                    "(-demodulate linear or -demodulate hann)");
   return result;
 }
 
