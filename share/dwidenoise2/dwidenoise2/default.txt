@@ -41,12 +41,15 @@
 #                          on large series. The patch voxel count is sized from the
 #                          smallest partition so each partition keeps the target Casorati
 #                          aspect ratio. Default: 1 (no partitioning). Mutually exclusive
-#                          with max_partition_size.
+#                          with max_partition_size. The partition count is capped at half the
+#                          number of volumes available to the iteration (each partition must hold
+#                          at least two volumes); a larger request is reduced, with a warning.
 #  - max_partition_size  : an alternative to "partitions": the maximum number of volumes
 #                          per partition, from which the partition count is derived as
 #                          ceil(num_volumes / max_partition_size) (after any temporal
 #                          sub-sampling). "none" disables it. Default: none. Mutually
-#                          exclusive with partitions.
+#                          exclusive with partitions. The derived count is subject to the same
+#                          cap as "partitions" (at least two volumes per partition).
 #  - kernel               : the PCA patch sizing rule for this iteration. One of:
 #                            * "aspect=<ratio>"  - spherical kernel of ~ratio*m voxels (m = number
 #                              of volumes); naive to signal rank. The first iteration must use a

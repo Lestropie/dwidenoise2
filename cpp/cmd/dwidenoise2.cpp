@@ -575,7 +575,8 @@ void run(Header &dwi,
     //   When partitioning, the preconditioner performs no demeaning (done per partition within
     //   Estimate); set this before update_parameters so it skips the now-unused mean pass.
     const ssize_t mprime = preconditioner.header().size(3);
-    const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
+    const ssize_t num_partitions =
+        Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
     if (num_partitions > 1 && !estimator->supports_partitioning())
       throw Exception("The selected noise level estimator does not support volume partitioning "
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
@@ -642,7 +643,8 @@ void run(Header &dwi,
   //   final row's temporal_subsample is validated to be 1.0). Set before update_parameters
   //   so the (unused) preconditioner-side demeaning pass is skipped when partitioning.
   const ssize_t mprime_final = preconditioner.header().size(3);
-  const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
+  const ssize_t num_partitions =
+      Iterative::resolve_num_partitions(iterations.back(), mprime_final, "The final schedule row");
   preconditioner.set_partitioning_active(num_partitions > 1);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);

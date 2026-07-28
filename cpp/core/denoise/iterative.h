@@ -70,16 +70,30 @@ struct Iteration {
 };
 
 // Resolve the number of partitions P for an iteration given the effective volume count
-//   m_effective (the preconditioned/sub-sampled volume count actually decomposed). P is
-//   clamped to [1, m_effective]; with neither partition control active it is 1.
-inline ssize_t resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective) {
+//   m_effective (the preconditioned/sub-sampled volume count actually decomposed). With neither
+//   partition control active P is 1.
+// P is clamped to [1, m_effective/2]: a partition must hold at least two volumes to have a
+//   Casorati matrix worth decomposing, and partition_volumes() will not populate more partitions
+//   than that. Both partition controls are documented as performance knobs with no stated upper
+//   bound relative to the volume count (the bundled "vlarge" schedules set max_partition_size 384
+//   irrespective of series length), so an over-large request is reduced rather than refused --
+//   but not silently: "context" names the schedule row in the warning.
+// The max_partition_size assertion is an implementation invariant: the schedule parser rejects
+//   any value below 1, so it cannot be reached from the command line.
+inline ssize_t
+resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective, const std::string &context) {
   ssize_t p = iteration.num_partitions;
   if (iteration.max_partition_size.has_value()) {
     const ssize_t maxsize = iteration.max_partition_size.value();
     assert(maxsize >= 1);
     p = (m_effective + maxsize - 1) / maxsize;
   }
-  return std::max<ssize_t>(1, std::min(p, m_effective));
+  const ssize_t result = std::max<ssize_t>(1, std::min(p, std::max<ssize_t>(1, m_effective / 2)));
+  if (result < p)
+    WARN(context + " requests " + str(p) + " volume partitions, but the " + str(m_effective) +
+         " volumes available to that iteration support at most " + str(result) +
+         " (each partition must hold at least two volumes); using " + str(result) + " partitions");
+  return result;
 }
 
 // Internal function covering as much as possible for iterative implementation.

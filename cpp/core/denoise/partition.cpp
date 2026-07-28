@@ -139,6 +139,26 @@ Partitioning partition_volumes(const ssize_t m,
     assert(idx == s);
   }
 
+  // A partition holding no volumes has no Casorati matrix to decompose, and an empty block reaching
+  //   Eigen aborts. The per-stratum spread above uses at most min(P, s/2) partitions per stratum, so
+  //   with several small strata (or with P close to m) partitions can be left unused however the
+  //   caller clamps P. Compact the plan so that the returned Partitioning never contains one.
+  ssize_t populated = 0;
+  std::vector<ssize_t> remap(P, -1);
+  for (ssize_t p = 0; p != P; ++p)
+    if (load[p] > 0)
+      remap[p] = populated++;
+  if (populated != P) {
+    assert(populated >= 1);
+    for (ssize_t &p : v2p)
+      p = remap[p];
+    std::vector<ssize_t> compacted_groups(populated, 0);
+    for (ssize_t p = 0; p != P; ++p)
+      if (remap[p] >= 0)
+        compacted_groups[remap[p]] = groups_present[p];
+    return Partitioning(std::move(v2p), populated, std::move(compacted_groups));
+  }
+
   return Partitioning(std::move(v2p), P, std::move(groups_present));
 }
 

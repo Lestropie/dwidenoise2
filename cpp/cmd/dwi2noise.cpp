@@ -304,7 +304,8 @@ void run(Header &dwi,
     //   map; the preconditioned data then hold only the m' subset volumes.
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
     const ssize_t mprime = preconditioner.header().size(3);
-    const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
+    const ssize_t num_partitions =
+        Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
     if (num_partitions > 1 && !estimator->supports_partitioning())
       throw Exception("The selected noise level estimator does not support volume partitioning "
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
@@ -365,7 +366,8 @@ void run(Header &dwi,
   //   warm native refinement, rather than stopping at the coarse bootstrap grid.
   preconditioner.set_apc_refine_later(false);
   const ssize_t mprime_final = preconditioner.header().size(3);
-  const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
+  const ssize_t num_partitions =
+      Iterative::resolve_num_partitions(iterations.back(), mprime_final, "The final schedule row");
   if (num_partitions > 1 && !estimator->supports_partitioning())
     throw Exception("The selected noise level estimator does not support volume partitioning "
                     "(final schedule row requests " + str(num_partitions) +
