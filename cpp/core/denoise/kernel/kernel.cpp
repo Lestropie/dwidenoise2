@@ -48,7 +48,11 @@ const char *const shape_description =
     "and so for voxels near the image edge a reduced number of voxels will be present in the kernel. "
     "For a cuboid kernel, "
     "the centre of the kernel will be offset from the voxel being processed "
-    "such that the entire volume of the kernel resides within the image FoV.";
+    "such that the entire volume of the kernel resides within the image FoV. "
+    "A requested radius or voxel count larger than the image itself is not an error: "
+    "the spherical search is capped at the extent of the image FoV "
+    "(beyond which no further voxel could be included), "
+    "so such a request simply saturates at the whole image.";
 
 const char *const default_size_description =
     "The following describes the ways in which "
