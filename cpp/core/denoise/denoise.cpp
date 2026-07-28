@@ -22,6 +22,7 @@
 #include "algo/threaded_loop.h"
 #include "axes.h"
 #include "filter/smooth.h"
+#include "mrtrix.h"
 #include "transform.h"
 
 namespace MR::Denoise {
@@ -218,15 +219,21 @@ Image<float> condition_noise_map(Image<float> &in,
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial) {
   // Detect whether a scalar value or an image path was provided,
   //   matching the dispatch used by Estimator::make_imposed().
+  // Interpret the raw argument text rather than converting through ParsedArgument: the latter
+  //   applies the option's declared lower bound and throws when the value is outside it, which
+  //   would be indistinguishable here from "this is not a number at all" and would send an
+  //   out-of-range number to the image loader, to be reported as a filename problem.
   std::optional<default_type> scalar_value;
   try {
-    scalar_value = default_type(arg);
+    scalar_value = to<default_type>(arg.as_text());
   } catch (Exception &) {
   }
   Image<float> in;
   if (scalar_value.has_value()) {
-    if (scalar_value.value() <= 0.0)
-      throw Exception("Noise level provided via -noise_in must be greater than zero");
+    if (!(scalar_value.value() > 0.0))
+      throw Exception("Noise level provided via -noise_in must be greater than zero "
+                      "(got \"" +
+                      arg.as_text() + "\")");
     Header H(H_spatial);
     H.ndim() = 3;
     H.reset_intensity_scaling();
@@ -251,16 +258,19 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 }
 
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial) {
-  // Detect whether a scalar value or an image path was provided, matching import_vst_noise_map().
+  // Detect whether a scalar value or an image path was provided, matching import_vst_noise_map()
+  //   (including its reason for interpreting the raw argument text).
   std::optional<default_type> scalar_value;
   try {
-    scalar_value = default_type(arg);
+    scalar_value = to<default_type>(arg.as_text());
   } catch (Exception &) {
   }
   Image<float> in;
   if (scalar_value.has_value()) {
-    if (scalar_value.value() < 0.0)
-      throw Exception("Rank-per-mm value provided via -rankpermm_in must not be negative");
+    if (!(scalar_value.value() >= 0.0))
+      throw Exception("Rank-per-mm value provided via -rankpermm_in must not be negative "
+                      "(got \"" +
+                      arg.as_text() + "\")");
     Header H(H_spatial);
     H.ndim() = 3;
     H.reset_intensity_scaling();
