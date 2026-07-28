@@ -85,7 +85,9 @@ OptionGroup precondition_options(const bool include_output)
            "e.g. complex or phase-demodulated, data); "
            "'foi', 'koay' and 'mom' construct a non-linear transform with bias-corrected inverse "
            "for magnitude data, differing only in the inverse / debias strategy "
-           "(default: foi for magnitude data; complex data always use the linear transform)")
+           "(default: foi for magnitude data; "
+           "for complex data the noise is Gaussian and the non-linear methods foi/koay/mom "
+           "reduce to 'linear', though 'none' is still honoured)")
     + Argument("method").type_choice<NoiseModel::vst_method_t>();
   if (include_output) {
     result
@@ -124,7 +126,15 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
            "the demodulated noise is Gaussian (one degree of freedom per channel)");
     }
     // The forward transform for Gaussian data is linear, so foi/koay/mom collapse to
-    //   the linear transform; the default is harmless and no warning is emitted.
+    //   the linear transform. The default (foi) is harmless and stays silent, but an explicit
+    //   request for a non-linear method is being discarded and must say so; -vst_method none
+    //   returns above and is genuinely honoured for complex data, hence the two exclusions.
+    if (!get_options("vst_method").empty() && vst_method != NoiseModel::vst_method_t::LINEAR &&
+        vst_method != NoiseModel::vst_method_t::NONE)
+      WARN("Option -vst_method " + Enum::lowercase_name(vst_method) +
+           " has no effect for complex input data: "
+           "the noise is Gaussian-distributed, for which the variance-stabilising transform is "
+           "linear; the linear transform is applied instead");
     return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
   }
   // -vst_method linear: the simple linear transform u = m / sigma for magnitude data too.

@@ -321,7 +321,9 @@ void usage() {
            " independent of the -demean grouping;"
            " 'group_mean' reproduces the prior behaviour, linearising the inverse about the"
            " per-group demeaning mean"
-           " (no effect with -preserve_noise_bias or for complex input data)")
+           " (no effect with -preserve_noise_bias, for complex input data,"
+           " or with -vst_method none/linear;"
+           " with -demean none there is no per-group mean and the anchor degenerates to a global one)")
     + Argument("mode").type_choice<debias_anchor_t>()
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
@@ -931,6 +933,25 @@ void run() {
   //   (see debias_anchor_t); the default inverts the transform at each volume's own denoised
   //   value, so debiasing no longer depends on the demeaning grouping.
   const debias_anchor_t debias_anchor = get_option_choice("debias_anchor", debias_anchor_t::SAMPLE);
+  // -debias_anchor selects the operating point at which the non-linear transform is inverted when
+  //   removing the noise-floor bias. It is inert whenever there is no such inversion: when the bias
+  //   is deliberately retained (-preserve_noise_bias) or when the noise model is linear (complex
+  //   input data, or -vst_method none / linear). Mirrors the -preserve_noise_bias block above; the
+  //   first two conditions are stated in the option's own help text.
+  if (!get_options("debias_anchor").empty()) {
+    const bool complex = dwi.datatype().is_complex();
+    const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
+    if (bias_handling == bias_handling_t::PRESERVE || complex || vst_none || vst_linear) {
+      const std::string reason = bias_handling == bias_handling_t::PRESERVE
+                                     ? "-preserve_noise_bias retains the noise-floor bias rather than removing it" //
+                                 : complex  ? "the input data are complex, for which the noise is Gaussian-distributed "
+                                              "and there is no noise-floor bias"                                     //
+                                 : vst_none ? "-vst_method none applies no variance-stabilising transform to invert" //
+                                            : "-vst_method linear uses a linear (Gaussian) noise model";             //
+      WARN("Option -debias_anchor has no effect: " + reason +
+           ", so there is no non-linear inverse for which to choose an operating point");
+    }
+  }
 
   // Resolve the iteration schedule. When the user supplies -schedule it is the single
   //   source of truth for both the spatial and temporal sub-sampling of each iteration;
