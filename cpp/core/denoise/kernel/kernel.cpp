@@ -65,7 +65,11 @@ const char *const default_size_description =
     "the command will select the smallest near-isotropic patch size "
     "whose voxel count is at least twice the number of DW images in the input data "
     "(the default aspect ratio; a different ratio may be requested as \"cuboid=<ratio>x\", "
-    "e.g. \"cuboid=1x\" for a patch of at least the number of DW images).";
+    "e.g. \"cuboid=1x\" for a patch of at least the number of DW images). "
+    "The auto-selected extent is additionally clamped to the image dimensions, "
+    "so that the patch always resides within the image FoV: "
+    "a thin slab therefore yields a within-plane patch "
+    "(and the requested aspect ratio may not be achievable).";
 
 const char *const cuboid_size_description =
     "Permissible sizes for the cuboid kernel depend on the subsampling factor. "
@@ -213,17 +217,40 @@ make_kernel(const Header &H,
       //   aspect ratio; the bundled default is 2.0, since a near-square Casorati matrix estimates
       //   the noise level imprecisely).
       const default_type cuboid_factor = kernel_spec.param;
-      extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
-      ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
-      while (extent[0] * extent[1] * extent[2] < cuboid_factor * std::max(total_num_volumes, prev_num_voxels)) {
-        prev_num_voxels = extent[0] * extent[1] * extent[2];
+      // Largest per-axis extent that both fits within the image and carries the parity the
+      //   sub-sampling factor demands (odd extents for unity / odd sub-sampling, so that a unique
+      //   voxel lies at the kernel centre; even extents for even sub-sampling). The command is
+      //   choosing the extent here, so it must choose a feasible one: seeding at 3 (or 2) without
+      //   reference to H.size(axis) yields a patch that cannot reside within the image FoV, as
+      //   shape_description requires, and that the growth loop can never repair.
+      std::array<ssize_t, 3> cap;
+      for (ssize_t axis = 0; axis != 3; ++axis) {
+        const bool odd_extents = (subsample_factors[axis] & 1) != 0;
+        cap[axis] = odd_extents ? (H.size(axis) - ((H.size(axis) + 1) & 1)) // largest odd <= size
+                                : (H.size(axis) - (H.size(axis) & 1));      // largest even <= size
+        if (cap[axis] < (odd_extents ? 1 : 2))
+          throw Exception("Cannot construct a cuboid kernel for this image: axis " + str(axis) + " has only " +
+                          str(H.size(axis)) +
+                          " voxel(s), and sub-sampling by an even factor along that axis requires a kernel "
+                          "extent of at least 2 voxels; use unity or odd spatial sub-sampling on that axis, "
+                          "or a spherical kernel");
+        extent[axis] = std::min<ssize_t>(odd_extents ? 3 : 2, cap[axis]);
+      }
+      // Grow the near-isotropic patch until it holds at least cuboid_factor * m voxels, or until no
+      //   axis can grow any further. Terminating on "nothing grew" is what bounds this loop: the
+      //   voxel-count predicate alone cannot, since once every axis has saturated it reduces to
+      //   count < factor * count, permanently true for any factor > 1.
+      while (extent[0] * extent[1] * extent[2] < cuboid_factor * total_num_volumes) {
+        const std::array<ssize_t, 3> extent_before = extent;
         // If multiple axes are tied for spatial extent in mm, increment all of them
         const default_type min_length =
             std::min({extent[0] * H.spacing(0), extent[1] * H.spacing(1), extent[2] * H.spacing(2)});
         for (ssize_t axis = 0; axis != 3; ++axis) {
-          if (extent[axis] * H.spacing(axis) == min_length && extent[axis] + 2 <= H.size(axis))
+          if (extent[axis] * H.spacing(axis) == min_length && extent[axis] + 2 <= cap[axis])
             extent[axis] += 2;
         }
+        if (extent == extent_before)
+          break;
       }
     }
     INFO("selected cuboid patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]));
