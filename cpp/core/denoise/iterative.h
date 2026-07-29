@@ -72,12 +72,12 @@ struct Iteration {
 // Resolve the number of partitions P for an iteration given the effective volume count
 //   m_effective (the preconditioned/sub-sampled volume count actually decomposed). With neither
 //   partition control active P is 1.
-// P is clamped to [1, m_effective/2]: a partition must hold at least two volumes to have a
-//   Casorati matrix worth decomposing, and partition_volumes() will not populate more partitions
-//   than that. Both partition controls are documented as performance knobs with no stated upper
-//   bound relative to the volume count (the bundled "vlarge" schedules set max_partition_size 384
-//   irrespective of series length), so an over-large request is reduced rather than refused --
-//   but not silently: "context" names the schedule row in the warning.
+// A partition must hold at least two volumes to have a Casorati matrix worth decomposing, so
+//   the realisable partition count is bounded by m_effective/2. A request beyond that bound is
+//   refused rather than quietly reduced: silently substituting a different partition count would
+//   change the decomposition actually performed (and hence the noise estimate and the cost model
+//   the user was reaching for) while reporting success, so the run terminates instead.
+//   "context" names the schedule row responsible.
 // The max_partition_size assertion is an implementation invariant: the schedule parser rejects
 //   any value below 1, so it cannot be reached from the command line.
 inline ssize_t
@@ -88,12 +88,17 @@ resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective, co
     assert(maxsize >= 1);
     p = (m_effective + maxsize - 1) / maxsize;
   }
-  const ssize_t result = std::max<ssize_t>(1, std::min(p, std::max<ssize_t>(1, m_effective / 2)));
-  if (result < p)
-    WARN(context + " requests " + str(p) + " volume partitions, but the " + str(m_effective) +
-         " volumes available to that iteration support at most " + str(result) +
-         " (each partition must hold at least two volumes); using " + str(result) + " partitions");
-  return result;
+  const ssize_t capacity = std::max<ssize_t>(1, m_effective / 2);
+  if (p > capacity)
+    throw Exception(
+        context + " requests " + str(p) + " volume partitions, but the " + str(m_effective) +
+        " volumes available to that iteration support at most " + str(capacity) +
+        " (each partition must hold at least two volumes). " +
+        (iteration.max_partition_size.has_value()
+             ? "Raise \"max_partition_size\" (currently " + str(iteration.max_partition_size.value()) + ") or remove it"
+             : "Reduce \"partitions\" to " + str(capacity) + " or fewer") +
+        " in the schedule");
+  return std::max<ssize_t>(1, p);
 }
 
 // Internal function covering as much as possible for iterative implementation.
