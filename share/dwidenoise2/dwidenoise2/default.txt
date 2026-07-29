@@ -20,6 +20,16 @@
 # that was originally hard-coded into the source code.
 # It additionally provides a starting point for authoring bespoke schedules.
 #
+# Caveat: this schedule is NOT what dwidenoise2 selects automatically in every case.
+# It is used only when neither -vst_method none nor -fixed_rank is specified.
+#  - With -vst_method none there is no variance-stabilising transform, so nothing
+#    couples one iteration to the next and the per-iteration refinement below would
+#    be wasted computation; a single pass is performed instead (equivalent to a
+#    one-row schedule using an "aspect=2.0" kernel), and the command reports this.
+#    Passing this file explicitly via "-schedule default" alongside -vst_method none
+#    is therefore an error rather than a no-op: it is a multi-row schedule.
+#  - With -fixed_rank the bundled "fixedrank" schedule is used.
+#
 # Format:
 #  - One row per iteration of the multi-resolution noise level estimation.
 #  - The first non-comment line names the columns; columns may appear in any

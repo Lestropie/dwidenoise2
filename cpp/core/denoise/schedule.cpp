@@ -359,11 +359,19 @@ std::string resolve(const std::string &spec, const std::string &command) {
                   "nor the name of a bundled schedule" + available_bundled(command));
 }
 
+// The largest per-partition volume count prescribed by the bundled "vlarge" schedules
+//   (the "max_partition_size" column of share/dwidenoise2/<command>/vlarge.txt). Those
+//   schedules are the ones intended for large volume counts, so this value is by
+//   construction the point beyond which the embedded default schedule is the wrong choice.
+//   Keep it in step with those files.
+constexpr size_t vlarge_max_partition_size = 384;
+
 // Total volume count above which use of a command's embedded default schedule prompts a
 //   "this may be slow" warning. The default schedule's coarsest passes use large
-//   patches whose PCA cost grows with the volume count;
-//   beyond a few hundred volumes a lighter schedule is usually preferable.
-constexpr size_t default_schedule_slow_threshold = 255;
+//   patches whose PCA cost grows with the volume count; the threshold is tied to the
+//   partition size of the "vlarge" schedules so that the warning fires exactly where those
+//   schedules become the better option, rather than at an unrelated lower value.
+constexpr size_t default_schedule_slow_threshold = vlarge_max_partition_size;
 
 std::vector<Iterative::Iteration>
 parse(const std::string &path, const std::string &command, const bool rank_density_supplied) {
@@ -525,8 +533,13 @@ const Option schedule_option =
            " used for noise level estimation,"
            " in place of the command's default schedule;"
            " the argument is either the name of a schedule bundled with the software"
-           " or the path to a schedule file (see Description for the file format)")
-    + Argument("name/file").type_text();
+           " or the path to a schedule file (see Description for the file format)."
+           " Note that when this option is omitted the schedule selected automatically is not"
+           " always the bundled \"default\" schedule: for dwidenoise2, -vst_method none instead"
+           " selects a single-pass schedule (a multi-row schedule cannot do anything useful"
+           " without a variance-stabilising transform to couple its iterations), and -fixed_rank"
+           " selects the bundled \"fixedrank\" schedule") +
+    Argument("name/file").type_text();
 
 const char *schedule_description =
     "By default the noise level is estimated via an a priori multi-resolution iteration"
