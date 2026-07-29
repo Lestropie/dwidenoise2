@@ -87,10 +87,16 @@ size_t num_volumes(const Header&);
 enum class noise_impute_type{ NAN_TO_ZERO, NONE };
 enum class noise_pad_type{ PAD, NONE };
 enum class noise_smooth_type{ SMOOTH, NONE };
+// When "coverage" is non-null, the padding is widened as necessary so that the returned map's
+//   field of view encloses that header's field of view (plus the interpolation margin). An
+//   externally-supplied map need not share the DWI voxel grid -- the estimator interpolates it --
+//   but it must be sampleable at every patch position the DWI grid can produce, which a map on a
+//   smaller or offset grid otherwise is not. Padded voxels replicate the nearest edge value.
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type impute = noise_impute_type::NAN_TO_ZERO,
                                  const noise_pad_type pad = noise_pad_type::PAD,
-                                 const noise_smooth_type smooth = noise_smooth_type::NONE);
+                                 const noise_smooth_type smooth = noise_smooth_type::NONE,
+                                 const Header *coverage = nullptr);
 
 // Construct the externally-provided noise level map (the variance-stabilising-transform scale)
 //   from a -noise_in command-line argument, which may be either:
