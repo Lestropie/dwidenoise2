@@ -92,12 +92,23 @@ using predicted_rmse_func = std::function<double(ssize_t, ssize_t, double)>;
 //   iteration); predicted_rmse is required by the RMSE kernel (built from the active estimator).
 //   Both may be empty/invalid for the rank-naive kernels (ASPECT_RATIO / RADIUS / VOXELS / CUBOID /
 //   RANK_FIXED).
+// num_null_components is the number of singular values that group-mean demeaning forces to zero
+//   in every partition: the demeaning group count reported by Preconditioner::demean_rank() (0
+//   when -demean none). Note demean_rank(), not null_rank(): the latter reports 0 whenever
+//   partitioning is active, because the preconditioner then performs no demeaning itself and
+//   defers it to Estimate/Recon -- but those directions are still regressed, and still absent
+//   from every partition's Casorati matrix. The kernels that target a square noise block subtract it from the volume
+//   count, because those directions carry neither signal nor noise. Under partitioning each
+//   partition regresses the same group count, so this is simultaneously the common and the
+//   maximal per-partition value -- and the maximum is what the final reconstruction pass needs,
+//   since the kernel must be adequate for every partition individually rather than in aggregate.
 std::shared_ptr<Base> make_kernel(const Header &H,                                 //
                                   const std::array<ssize_t, 3> &subsample_factors, //
                                   const KernelSpec &kernel_spec,                   //
                                   const Image<float> &rank_per_mm_image,           //
                                   const ssize_t full_num_volumes,                  //
                                   const ssize_t num_partitions = 1,                //
-                                  const predicted_rmse_func &predicted_rmse = {}); //
+                                  const predicted_rmse_func &predicted_rmse = {},  //
+                                  const ssize_t num_null_components = 0);          //
 
 } // namespace MR::Denoise::Kernel

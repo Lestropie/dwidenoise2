@@ -133,14 +133,14 @@ void warn_casorati_shape(const ssize_t n,
 }
 } // namespace
 
-std::shared_ptr<Base>
-make_kernel(const Header &H,
-            const std::array<ssize_t, 3> &subsample_factors,
-            const KernelSpec &kernel_spec,
-            const Image<float> &rank_per_mm,
-            const ssize_t full_num_volumes,
-            const ssize_t num_partitions,
-            const predicted_rmse_func &predicted_rmse) {
+std::shared_ptr<Base> make_kernel(const Header &H,
+                                  const std::array<ssize_t, 3> &subsample_factors,
+                                  const KernelSpec &kernel_spec,
+                                  const Image<float> &rank_per_mm,
+                                  const ssize_t full_num_volumes,
+                                  const ssize_t num_partitions,
+                                  const predicted_rmse_func &predicted_rmse,
+                                  const ssize_t num_null_components) {
   std::shared_ptr<Kernel::Base> kernel;
   // Whether the kernel size is derived from the volume count (true for the dynamic
   //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / fixed voxel
@@ -151,6 +151,16 @@ make_kernel(const Header &H,
   //   preserves the target aspect ratio; the SVD then operates on m'/P x ~aspect*(m'/P) blocks.
   assert(num_partitions >= 1);
   const ssize_t volumes_for_sizing = std::max<ssize_t>(1, Denoise::num_volumes(H) / num_partitions);
+  // Volume-space dimensions that actually carry data. Demeaning regresses num_null_components
+  //   group means, so that many directions of the partition's Casorati matrix are identically
+  //   zero (cf. rank_nonzero() = min(m - rp, n)). The kernels below target a square *noise*
+  //   block, and a null direction is neither signal nor noise, so the target must be formed
+  //   from the non-degenerate volume count: n - r == m' - z, i.e. n >= (m' - z) + r. Sizing
+  //   from m' instead overshoots by exactly z. Under partitioning this matters more, not less:
+  //   every partition regresses the same group count out of only m'/P volumes, so z is a larger
+  //   fraction of each partition the more partitions there are.
+  assert(num_null_components >= 0);
+  const ssize_t volumes_nondegenerate = std::max<ssize_t>(1, volumes_for_sizing - num_null_components);
 
   // Every attribute of the kernel (shape and size) is taken from this iteration's schedule row
   //   (kernel_spec); there are no longer any command-line kernel options to override it.
@@ -178,15 +188,15 @@ make_kernel(const Header &H,
     if (!predicted_rmse)
       throw Exception("An RMSE-tolerance kernel requires a noise-level estimator with a "
                       "predicted-RMSE model; the selected estimator does not provide one");
-    kernel = std::make_shared<SphereRMSE>(H, subsample_factors, rank_per_mm, volumes_for_sizing,
-                                          kernel_spec.param, predicted_rmse);
+    kernel = std::make_shared<SphereRMSE>(
+        H, subsample_factors, rank_per_mm, volumes_for_sizing, kernel_spec.param, predicted_rmse, num_null_components);
     break;
   case kernel_spec_type::RANK:
     // Square noise block n >= m + r; reserved for the final reconstruction pass.
     if (!rank_per_mm.valid())
       throw Exception("A rank-adaptive (square noise block) kernel requires a signal-rank density "
                       "map from a prior iteration, but none is available");
-    kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing);
+    kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing, num_null_components);
     break;
   case kernel_spec_type::RANK_FIXED: {
     // n = m + r spherical kernel for the imposed fixed-rank estimator; r is the fixed signal rank
@@ -196,7 +206,9 @@ make_kernel(const Header &H,
       throw Exception("The \"rank_fixed\" kernel (n = m + r) is applicable only when a fixed signal "
                       "rank is imposed via -fixed_rank");
     const ssize_t r = ssize_t(opt[0][0]);
-    kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, volumes_for_sizing + r);
+    // Static counterpart of the SphereRank criterion, with r a constant rather than a per-voxel
+    //   density: n = (m' - z) + r.
+    kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, volumes_nondegenerate + r);
     break;
   }
   case kernel_spec_type::CUBOID: {

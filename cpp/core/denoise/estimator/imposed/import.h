@@ -33,8 +33,21 @@ class Import : public ImposedSigma {
 public:
   Import(const std::string &path, Image<float> &vst_image) //
       : noise_image(Image<float>::open(path)),             //
-        vst_image(vst_image) {}                            //
-  void update_vst_image(Image<float> &new_vst_image) override { vst_image = new_vst_image; }
+        vst_image(vst_image),                              //
+        rescale_by_vst(true) {}                            //
+  // Impose an already-conditioned noise level map directly on unmodified data. Used when
+  //   -vst_method none leaves the data in their native scale: there is then no stabilising
+  //   transform whose parameterisation could absorb the supplied noise level, so the level must
+  //   be applied to the Casorati matrix as-is. Because no rescaling is in play, this form also
+  //   ignores any subsequently-supplied VST image; dividing the noise map by itself would
+  //   collapse sigma to unity.
+  explicit Import(const Image<float> &conditioned_noise_image) //
+      : noise_image(conditioned_noise_image),                  //
+        rescale_by_vst(false) {}                               //
+  void update_vst_image(Image<float> &new_vst_image) override {
+    if (rescale_by_vst)
+      vst_image = new_vst_image;
+  }
 
 protected:
   bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const override {
@@ -64,6 +77,7 @@ protected:
 private:
   Image<float> noise_image;
   Image<float> vst_image;
+  bool rescale_by_vst;
 };
 
 } // namespace MR::Denoise::Estimator

@@ -30,14 +30,16 @@
 #include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
+#include "denoise/estimator/imposed/import.h"
+#include "denoise/estimator/imposed/imposed.h"
 #include "denoise/estimator/imposed/unity.h"
 #include "denoise/exports.h"
 #include "denoise/iterative.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
-#include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/kernel/sphere_radius.h"
 #include "denoise/mask.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
@@ -693,13 +695,18 @@ void run(Header &dwi,
                                     rank_per_mm,
                                     Denoise::num_volumes(input),
                                     num_partitions,
-                                    final_prmse);
+                                    final_prmse,
+                                    preconditioner.demean_rank());
   kernel->set_mask(mask);
 
   // Unless the final schedule row is configured to (re)estimate the noise level, assume the
   //   variance-stabilising transform yields a noise level of 1.0 everywhere (dummy Unity
   //   estimator), carrying through the estimate refined by the preceding iterations.
-  if (!iterations.back().update_noise.value())
+  // An estimator that already imposes a noise level is left alone: substituting Unity would
+  //   discard it. This is what preserves Estimator::Import for -noise_in with -vst_method none,
+  //   where the data are never rescaled to unit noise level and Unity would be wrong.
+  if (!iterations.back().update_noise.value() &&
+      dynamic_cast<const Estimator::ImposedSigma *>(estimator.get()) == nullptr)
     estimator.reset(new Estimator::Unity());
 
   if (num_partitions > 1 && !estimator->supports_partitioning())
@@ -882,11 +889,11 @@ void run() {
   Image<float> user_vst_image;
   auto opt = get_options("noise_in");
   if (!opt.empty()) {
-    if (vst_none)
-      throw Exception("Options -noise_in and -vst_method none are incompatible: "
-                      "a pre-estimated noise level is used to parameterise the variance-stabilising transform, "
-                      "which is disabled by -vst_method none");
-    if (demean == demean_type::NONE) {
+    // Under -vst_method none the supplied level cannot be absorbed into a transform, and is
+    //   instead imposed directly on the data by the Import estimator. Whether that is coherent
+    //   depends on the schedule, which is not yet resolved here, so the decision is deferred
+    //   (see "impose_imported_noise" below) rather than refused outright.
+    if (!vst_none && demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
     }
     user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
@@ -1121,7 +1128,37 @@ void run() {
                     "patch are reconstructed); use unity spatial sub-sampling on the final iteration "
                     "(e.g. the bundled \"legacy\" schedule)");
 
-  auto estimator = Estimator::make_estimator(user_vst_image, true);
+  // Applying a pre-estimated noise level without re-estimating it.
+  //   With a variance-stabilising transform active, -noise_in parameterises that transform: the
+  //   stabilised data then have unit noise level and the dummy Unity estimator (substituted for
+  //   the final row when update_noise is false) carries it through correctly.
+  //   Under -vst_method none there is no such transform, so the data reach PCA in their native
+  //   scale and Unity's sigma == 1 would be wrong. The supplied level must instead be imposed on
+  //   the data directly, which is what Estimator::Import does.
+  bool impose_imported_noise = false;
+  if (!get_options("noise_in").empty() && vst_none) {
+    if (iterations.size() > 1)
+      throw Exception("Options -noise_in and -vst_method none cannot be combined with a -schedule of "
+                      "more than one row: without a variance-stabilising transform there is no "
+                      "coupling between iterations for the additional rows to refine, so the "
+                      "supplied noise level can only be imposed by a single pass; "
+                      "use a single-row schedule");
+    if (iterations.back().update_noise.value())
+      throw Exception("Options -noise_in and -vst_method none require a schedule row that does not "
+                      "re-estimate the noise level (update_noise false): with no "
+                      "variance-stabilising transform for the supplied level to parameterise, a row "
+                      "that re-estimates would discard it entirely");
+    if (!get_options("estimator").empty())
+      throw Exception("Options -noise_in and -vst_method none impose the supplied noise level "
+                      "directly on the data, which is incompatible with the data-driven estimator "
+                      "requested by -estimator; omit -estimator");
+    impose_imported_noise = true;
+    CONSOLE("Imposing the noise level supplied via -noise_in directly on the input data "
+            "(no variance-stabilising transform is active, and the schedule does not re-estimate)");
+  }
+  auto estimator = impose_imported_noise
+                       ? std::static_pointer_cast<Estimator::Base>(std::make_shared<Estimator::Import>(user_vst_image))
+                       : Estimator::make_estimator(user_vst_image, true);
 
   const filter_type filter = get_option_choice(
       "filter", get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE);

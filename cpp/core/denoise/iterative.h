@@ -140,7 +140,8 @@ void estimate(Image<T> &input,
                                     rank_per_mm_image,
                                     Denoise::num_volumes(input),
                                     num_partitions,
-                                    prmse);
+                                    prmse,
+                                    preconditioner.demean_rank());
   kernel->set_mask(mask);
   if (preconditioner.noop())
     threaded_copy(input, input_preconditioned);
