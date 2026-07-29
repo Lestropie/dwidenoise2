@@ -918,11 +918,16 @@ void run() {
   if (bias_handling == bias_handling_t::PRESERVE) {
     const bool complex = dwi.datatype().is_complex();
     const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
-    if (complex || vst_none || vst_linear) {
-      const std::string reason =
-          vst_none    ? "-vst_method none applies no variance-stabilising transform"               //
-          : complex   ? "the input data are complex, for which the noise is Gaussian-distributed"   //
-                      : "-vst_method linear uses a linear (Gaussian) noise model";                  //
+    // For complex data there is no magnitude noise-floor bias in existence, so requesting a
+    //   policy for handling one is an incoherent combination and is refused. Selecting a linear
+    //   transform for magnitude data merely leaves the option inert, which remains a warning.
+    if (complex)
+      throw Exception("Option -preserve_noise_bias cannot be used with complex input data: "
+                      "the noise is Gaussian-distributed, so no magnitude noise-floor bias exists "
+                      "to either preserve or remove");
+    if (vst_none || vst_linear) {
+      const std::string reason = vst_none ? "-vst_method none applies no variance-stabilising transform" //
+                                          : "-vst_method linear uses a linear (Gaussian) noise model";   //
       WARN("Option -preserve_noise_bias has no effect: " + reason + ", "
            "so the noise model is linear and there is no estimated noise bias "
            "to either preserve or remove");
@@ -941,11 +946,15 @@ void run() {
   if (!get_options("debias_anchor").empty()) {
     const bool complex = dwi.datatype().is_complex();
     const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
-    if (bias_handling == bias_handling_t::PRESERVE || complex || vst_none || vst_linear) {
+    // As for -preserve_noise_bias: complex input admits no non-linear inverse at all, so choosing
+    //   its operating point is refused rather than warned about.
+    if (complex)
+      throw Exception("Option -debias_anchor cannot be used with complex input data: "
+                      "the noise is Gaussian-distributed, so the variance-stabilising transform is "
+                      "linear and there is no non-linear inverse for which to choose an operating point");
+    if (bias_handling == bias_handling_t::PRESERVE || vst_none || vst_linear) {
       const std::string reason = bias_handling == bias_handling_t::PRESERVE
                                      ? "-preserve_noise_bias retains the noise-floor bias rather than removing it" //
-                                 : complex  ? "the input data are complex, for which the noise is Gaussian-distributed "
-                                              "and there is no noise-floor bias"                                     //
                                  : vst_none ? "-vst_method none applies no variance-stabilising transform to invert" //
                                             : "-vst_method linear uses a linear (Gaussian) noise model";             //
       WARN("Option -debias_anchor has no effect: " + reason +
@@ -961,6 +970,22 @@ void run() {
   //   the coupling between iterations and likewise reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   const bool fixed_rank = !get_options("fixed_rank").empty();
+  // Catch an unattainable -fixed_rank here, before any multi-threaded processing begins, rather
+  //   than leaving every patch to discover it independently deep inside the PCA loop. A patch's
+  //   Casorati matrix has min(m', n) components, and m' (the volume count reaching the
+  //   decomposition) can only be reduced further by temporal sub-sampling and partitioning, so
+  //   the full volume count is a necessary upper bound and any request exceeding it is
+  //   guaranteed to be violated by every patch. Estimator::Rank enforces the exact per-patch
+  //   bound, which additionally accounts for the demeaning-induced zero components.
+  if (fixed_rank) {
+    const ssize_t r = ssize_t(get_options("fixed_rank")[0][0]);
+    const ssize_t m = ssize_t(Denoise::num_volumes(dwi));
+    if (r > m)
+      throw Exception("Option -fixed_rank " + str(r) + " exceeds the " + str(m) +
+                      " volumes in the input series; the signal rank of a patch cannot exceed its "
+                      "volume count. Specify -fixed_rank " +
+                      str(m) + " or fewer");
+  }
   // A signal-rank density supplied on the command line is what permits a schedule to open
   //   with a rank-derived kernel (the bundled "apriori" schedule does exactly that).
   const bool rank_density_supplied = !get_options("rankpermm_in").empty();
@@ -983,10 +1008,18 @@ void run() {
     //   kernel, which reads r from -fixed_rank).
     iterations = Schedule::load_bundled("dwidenoise2", "fixedrank", rank_density_supplied);
   } else if (vst_none) {
-    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-         "refining the noise level estimate would have no effect on subsequent iterations "
-         "and is therefore wasted computation; performing a single pass instead");
     const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
+    // The bundled "default" schedule is deliberately NOT loaded here. Because the user did not
+    //   choose the schedule that is used instead -- and because it is not any of the bundled
+    //   files, so cannot be inspected -- state its content explicitly rather than merely
+    //   announcing that a single pass is performed.
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively refining "
+         "the noise level estimate cannot influence subsequent iterations and would be wasted "
+         "computation. The bundled \"default\" schedule is therefore NOT used; a single pass is "
+         "performed instead, equivalent to the one-row schedule \"spatial_subsample " +
+         str(f) +
+         "  temporal_subsample 1.0  update_noise true  smooth_noise false  kernel aspect=2.0\". "
+         "Use -schedule to choose a different (single-row) schedule explicitly");
     Iterative::Iteration config;
     config.spatial_subsample_ratios = {f, f, f};
     // Single pass (no prior rank map): aspect ratio n ~ 2m.

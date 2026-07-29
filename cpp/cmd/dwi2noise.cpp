@@ -552,14 +552,14 @@ void run() {
       std::make_shared<SpatialSubsample>(dwi, iterations.back().spatial_subsample_ratios);
 
   // dwi2noise (re)estimates the noise level in every iteration, including the final one
-  //   (its output is the estimate). Resolve any unset update_noise to true and reject a
-  //   schedule that disables estimation in the final iteration.
-  for (auto &it : iterations)
-    if (!it.update_noise.has_value())
-      it.update_noise = true;
-  if (!iterations.back().update_noise.value())
-    throw Exception("dwi2noise requires the final schedule iteration to estimate the noise "
-                    "level (update_noise = true), as that iteration produces the output map");
+  //   (its output is the estimate), so update_noise is unconditionally true here. The schedule
+  //   parser rejects the "update_noise" column outright for dwi2noise whatever its value
+  //   (Schedule::parse(), permit_update_noise), so no iteration can arrive with it already set
+  //   and there is no final-row case left to check.
+  for (auto &it : iterations) {
+    assert(!it.update_noise.has_value());
+    it.update_noise = true;
+  }
 
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1].as_text());
