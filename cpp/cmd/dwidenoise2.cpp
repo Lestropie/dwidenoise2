@@ -934,6 +934,10 @@ void run() {
   if (Denoise::num_volumes(dwi) == 1)
     throw Exception("input image must be non-singleton across non-spatial dimensions");
 
+  // Report any evidence in the image metadata that upstream processing has already invalidated the
+  //   assumptions underpinning Marchenko-Pastur-based denoising.
+  Denoise::warn_if_metadata_precludes_mp(dwi);
+
   // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
   //   that header carries the transform-realignment metadata that -fslgrad import needs in order
   //   to rotate the bvecs. Headers derived downstream (e.g. the preconditioner's, which is built
