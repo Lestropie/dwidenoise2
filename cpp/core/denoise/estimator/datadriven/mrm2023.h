@@ -26,6 +26,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Estimator {
@@ -33,18 +34,14 @@ namespace MR::Denoise::Estimator {
 class MRM2023 : public Base {
 public:
   MRM2023() = default;
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,     //
-                    const ssize_t m,                                  //
-                    const ssize_t n,                                  //
-                    const ssize_t rp,                                 //
-                    const Eigen::Vector3d & /*unused*/) const final { //
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final {
     // MRM2023 article suggests that mprime should subtract z
     //   since it refers to "non-zero singular values";
     //   possible that this is the case for all estimators
-    assert(s.size() == std::min(m, n));
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t mprime = rank_nonzero(m, n, rp);
-    const ssize_t nprime = dimlong_nonzero(m, n, rp);
+    const auto &s = spectrum.eigenvalues;
+    const ssize_t rz = spectrum.rz;
+    const ssize_t mprime = spectrum.rnz;
+    const ssize_t nprime = spectrum.qnz;
     const double sigmasq_to_lamplus = Math::pow2(std::sqrt(nprime) + std::sqrt(mprime));
     double clam = s.segment(rz, mprime).sum();
     // Unlike Exp# code,
@@ -79,20 +76,16 @@ public:
   //   with sigma^2 = (mean of the remaining normalised eigenvalues) * Neff / (Neff - p) (the
   //   pooled analogue of clam / ((m'-p)(n'-p))); the first step at which it falls below the edge
   //   fixes the boundary.
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
+  Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final {
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
     // Pooled, sorted-ascending normalised nonzero eigenvalues across partitions.
-    const std::vector<double> pooled = pool_normalized(s, d);
+    const std::vector<double> pooled = pool_normalized(spectra);
     Result result;
     const ssize_t mtot = ssize_t(pooled.size()); // total nonzero components ("mprime")
     if (mtot == 0)
       return result;
-    const double neff = double(total_qnz(d)); // aggregate long dimension ("nprime")
-    const double beta = mean_beta(d);
+    const double neff = double(total_qnz(spectra)); // aggregate long dimension ("nprime")
+    const double beta = mean_beta(spectra);
     const double edge = Math::pow2(1.0 + std::sqrt(beta));
     double clam = 0.0;
     for (const double lam : pooled)
@@ -122,13 +115,13 @@ public:
       result.cutoff_p = 0;
       result.sigma2 = 0.0;
       result.lamplus = 0.0;
-      result.cutoff_p_partition.assign(d.size(), 0);
-      result.lamplus_partition.assign(d.size(), 0.0);
+      result.cutoff_p_partition.assign(spectra.size(), 0);
+      result.lamplus_partition.assign(spectra.size(), 0.0);
       return result;
     }
     double noise_sum = 0.0;
     ssize_t noise_count = 0;
-    apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+    apply_threshold(spectra, tstar, result, noise_sum, noise_count);
     result.sigma2 = sigma2_found;
     result.lamplus = lamplus_found; // Marchenko-Pastur edge (normalised), as in the single-PCA path
     return result;

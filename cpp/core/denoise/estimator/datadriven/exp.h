@@ -23,6 +23,7 @@
 
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -30,15 +31,9 @@ template <ssize_t version> class Exp : public Base {
 public:
   Exp() {}
   ~Exp() {}
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,    //
-                    const ssize_t m,                                 //
-                    const ssize_t n,                                 //
-                    const ssize_t rp,                                //
+  Result operator()(const Spectrum &spectrum,                        //
                     const Eigen::Vector3d & /*unused*/) const final; //
-  Result operator()(const std::vector<eigenvalues_type> &s,          //
-                    const std::vector<ssize_t> &m,                   //
-                    const std::vector<ssize_t> &n,                   //
-                    const std::vector<ssize_t> &rp,                  //
+  Result operator()(const std::vector<Spectrum> &spectra,            //
                     const Eigen::Vector3d & /*unused*/) const final; //
   bool supports_partitioning() const final { return true; }
 

@@ -37,6 +37,7 @@
 #include "denoise/kernel/voxel.h"
 #include "denoise/partition.h"
 #include "denoise/spatial_subsample.h"
+#include "denoise/spectrum.h"
 #include "header.h"
 #include "image.h"
 #include "transform.h"
@@ -124,9 +125,16 @@ protected:
 
   using RealVectorType = Eigen::Matrix<typename Eigen::NumTraits<F>::Real, Eigen::Dynamic, 1>;
   // Reusable per-partition decomposition storage (sized to P; filled by compute_partitions()).
-  std::vector<MatrixType> Xsub_partition;       // demeaned sub-block (m_p x n) per partition
-  std::vector<eigenvalues_type> s_partition;    // ascending eigenvalues (length r_p) per partition
-  std::vector<ssize_t> part_m, part_n, part_rp; // per-partition (m_p, n, rp_p)
+  std::vector<MatrixType> Xsub_partition;    // demeaned sub-block (m_p x n) per partition
+  std::vector<eigenvalues_type> s_partition; // ascending eigenvalues (length >= r_p) per partition
+  // One Spectrum per partition of the current patch: the eigenvalues of s_partition[p] (truncated
+  //   to that partition's r_p) bound to the dimensions (m_p, n, rp_p) of the decomposition that
+  //   produced them, and to everything derived from those dimensions. Rebuilt by
+  //   compute_partitions(), it is both what is handed to the estimator and what Recon and the
+  //   export code read their per-partition dimensions from, so those consumers cannot fall out of
+  //   correspondence with the spectra themselves. Note that its elements hold views into
+  //   s_partition, which must therefore not be resized while they are live.
+  std::vector<Spectrum> spectra;
   // Populated only when enable_recon (used by Recon to forward-project each partition):
   std::vector<MatrixType> U_partition, V_partition, evec_partition;
   std::vector<RealVectorType> sv_partition;
@@ -149,7 +157,7 @@ protected:
   // Size the per-partition storage vectors to P (called from the constructors).
   void allocate_partition_storage();
   // Split X (already filled by load_data) into the partition sub-blocks, demean each per group,
-  //   and decompose each; fills s_partition / part_* (and the recon outputs when enable_recon).
+  //   and decompose each; fills s_partition / spectra (and the recon outputs when enable_recon).
   //   Returns false if any partition's decomposition failed to converge.
   bool compute_partitions(const ssize_t n);
 

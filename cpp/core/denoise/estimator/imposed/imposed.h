@@ -26,6 +26,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "image.h"
 #include "math/math.h"
 
@@ -46,15 +47,7 @@ namespace MR::Denoise::Estimator {
 //   the per-patch sigma^2 via get_sigma_sq().
 class ImposedSigma : public Base {
 public:
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
-                    const ssize_t m,                              //
-                    const ssize_t n,                              //
-                    const ssize_t rp,                             //
-                    const Eigen::Vector3d &pos) const final {     //
-    assert(s.size() == std::min(m, n));
-    const ssize_t qnz = dimlong_nonzero(m, n, rp);
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t rnz = rank_nonzero(m, n, rp);
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const final {
     Result result;
     double sigma_sq;
     if (!get_sigma_sq(pos, sigma_sq))
@@ -63,10 +56,10 @@ public:
     // From this noise level,
     //   get the upper bound of the MP distribution and rank of signal
     //   given the ordered list of eigenvalues
-    result.lamplus = Math::pow2(1.0 + std::sqrt(double(rnz) / double(qnz))) * result.sigma2;
-    result.cutoff_p = rz;
-    for (ssize_t p = rz; p != s.size(); ++p) {
-      if (s[p] / qnz > result.lamplus)
+    result.lamplus = Math::pow2(1.0 + std::sqrt(spectrum.beta)) * result.sigma2;
+    result.cutoff_p = spectrum.rz;
+    for (ssize_t p = spectrum.rz; p != spectrum.r; ++p) {
+      if (spectrum.normalized(p) > result.lamplus)
         break;
       result.cutoff_p = p + 1;
     }
@@ -76,25 +69,20 @@ public:
   // Partitioned form: a single externally-provided sigma^2 applies to the whole patch; each
   //   partition's signal/noise boundary is the Marchenko-Pastur edge for that partition's own
   //   aspect ratio beta_p (which may differ slightly between partitions).
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
-                    const Eigen::Vector3d &pos) const final {
+  Result operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const final {
     Result result;
     double sigma_sq;
     if (!get_sigma_sq(pos, sigma_sq))
       return result;
     result.sigma2 = sigma_sq;
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
-    std::vector<double> lamplus_p(d.size());
-    for (size_t p = 0; p != d.size(); ++p)
-      lamplus_p[p] = Math::pow2(1.0 + std::sqrt(d[p].beta)) * sigma_sq;
+    std::vector<double> lamplus_p(spectra.size());
+    for (size_t p = 0; p != spectra.size(); ++p)
+      lamplus_p[p] = Math::pow2(1.0 + std::sqrt(spectra[p].beta)) * sigma_sq;
     double noise_sum = 0.0;
     ssize_t noise_count = 0;
-    apply_threshold_per_partition(s, d, lamplus_p, result, noise_sum, noise_count);
+    apply_threshold_per_partition(spectra, lamplus_p, result, noise_sum, noise_count);
     // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
-    result.lamplus = Math::pow2(1.0 + std::sqrt(mean_beta(d))) * sigma_sq;
+    result.lamplus = Math::pow2(1.0 + std::sqrt(mean_beta(spectra))) * sigma_sq;
     return result;
   }
 

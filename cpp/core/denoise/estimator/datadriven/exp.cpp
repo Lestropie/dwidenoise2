@@ -28,30 +28,25 @@
 namespace MR::Denoise::Estimator {
 
 template <ssize_t version>
-Result Exp<version>::operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
-                                const ssize_t m,                              //
-                                const ssize_t n,                              //
-                                const ssize_t rp,                             //
-                                const Eigen::Vector3d & /*unused*/) const {   //
-  assert(s.size() == std::min(m, n));
-  const ssize_t qnz = dimlong_nonzero(m, n, rp);
-  const ssize_t rz = rank_zero(m, n, rp);
-  const double lam_r = s[rz] / qnz;
+Result Exp<version>::operator()(const Spectrum &spectrum,                   //
+                                const Eigen::Vector3d & /*unused*/) const { //
+  const ssize_t rz = spectrum.rz;
+  const double lam_r = spectrum.normalized(rz);
   double clam = 0.0;
   Result result;
   // Note that the paper utilised symbol "p" to refer to the number of signal components;
   //   here "p" is instead the index of the last noise component;
   //   therefore the number of noise compoments is (p + 1 - z)
-  for (ssize_t p = rz; p < s.size(); ++p) {
-    const double lam = s[p] / qnz;
+  for (ssize_t p = rz; p < spectrum.r; ++p) {
+    const double lam = spectrum.normalized(p);
     clam += lam;
     double denominator = std::numeric_limits<double>::signaling_NaN();
     switch (version) {
     case 1:
-      denominator = qnz;
+      denominator = spectrum.qnz;
       break;
     case 2:
-      denominator = qnz - (s.size() - p - 1);
+      denominator = spectrum.qnz - (spectrum.r - p - 1);
       break;
     default:
       assert(false);
@@ -70,14 +65,10 @@ Result Exp<version>::operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
 }
 
 template <ssize_t version>
-Result Exp<version>::operator()(const std::vector<eigenvalues_type> &s, //
-                                const std::vector<ssize_t> &m,          //
-                                const std::vector<ssize_t> &n,          //
-                                const std::vector<ssize_t> &rp,         //
+Result Exp<version>::operator()(const std::vector<Spectrum> &spectra, //
                                 const Eigen::Vector3d & /*unused*/) const {
-  const std::vector<PartitionDims> d = partition_dims(m, n, rp);
   // Pooled, sorted-ascending normalised noise eigenvalues across partitions.
-  const std::vector<double> pooled = pool_normalized(s, d);
+  const std::vector<double> pooled = pool_normalized(spectra);
   Result result;
   if (pooled.empty())
     return result;
@@ -85,10 +76,10 @@ Result Exp<version>::operator()(const std::vector<eigenvalues_type> &s, //
   // Version 1 normalises gamma by the aggregate long dimension sum_p qnz_p; version 2 applies
   //   each partition's finite-size correction, which (summed) is sum_p (qnz_p - rnz_p) plus the
   //   running noise count -- the exact generalisation of the single-PCA "qnz - (size-p-1)".
-  const double Q = double(total_qnz(d));
+  const double Q = double(total_qnz(spectra));
   ssize_t denom_const = 0;
-  for (const auto &x : d)
-    denom_const += (x.qnz - x.rnz);
+  for (const auto &spectrum : spectra)
+    denom_const += (spectrum.qnz - spectrum.rnz);
   double clam = 0.0;
   double best_sigma2 = std::numeric_limits<double>::signaling_NaN();
   double tstar = std::numeric_limits<double>::signaling_NaN();
@@ -121,7 +112,7 @@ Result Exp<version>::operator()(const std::vector<eigenvalues_type> &s, //
     return result;
   double noise_sum = 0.0;
   ssize_t noise_count = 0;
-  apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+  apply_threshold(spectra, tstar, result, noise_sum, noise_count);
   result.sigma2 = best_sigma2;
   result.lamplus = tstar;
   return result;

@@ -20,7 +20,8 @@
 // Shared helpers for partition-aware (pooled) noise level estimation.
 //
 // Each PCA patch is split into P partitions; partition p yields an independent, ascending
-// eigenspectrum eigenvalues[p] of length r_p = min(m_p, n_p). Because raw eigenvalue magnitudes
+// eigenspectrum (a Denoise::Spectrum, which carries with it the dimensions of the
+// decomposition from which it came). Because raw eigenvalue magnitudes
 // scale with the partition's long dimension qnz_p, partitions are pooled only after normalising
 // each eigenvalue by its own qnz_p (lambda = s_p[i] / qnz_p). With the partitions sized so that
 // each shares a comparable aspect ratio beta_p, the pooled normalised noise eigenvalues form a
@@ -28,75 +29,51 @@
 // estimate; the signal/noise boundary (rank) is then resolved per partition.
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 
 namespace MR::Denoise::Estimator {
-
-// Per-partition derived matrix dimensions (mirrors the m,n,rp -> qnz/rnz/rz/beta resolution
-//   used throughout the single-PCA estimators).
-struct PartitionDims {
-  ssize_t r;   // min(m,n): length of the partition's eigenvalue vector
-  ssize_t rz;  // assumed-zero components (from preconditioner demeaning)
-  ssize_t rnz; // nonzero components
-  ssize_t qnz; // long (scaling) dimension
-  double beta; // rnz / qnz
-};
-
-inline std::vector<PartitionDims> partition_dims(const std::vector<ssize_t> &m,
-                                                 const std::vector<ssize_t> &n,
-                                                 const std::vector<ssize_t> &rp) {
-  const size_t P = m.size();
-  std::vector<PartitionDims> d(P);
-  for (size_t p = 0; p != P; ++p) {
-    d[p].r = std::min(m[p], n[p]);
-    d[p].qnz = dimlong_nonzero(m[p], n[p], rp[p]);
-    d[p].rnz = rank_nonzero(m[p], n[p], rp[p]);
-    d[p].rz = rank_zero(m[p], n[p], rp[p]);
-    d[p].beta = double(d[p].rnz) / double(d[p].qnz);
-  }
-  return d;
-}
 
 // rnz-weighted mean of the per-partition aspect ratios; used as the single shape parameter
 //   for the (beta-dependent) Marchenko-Pastur shape constants when pooling. With balanced
 //   partitions every beta_p is close to this value.
-inline double mean_beta(const std::vector<PartitionDims> &d) {
+inline double mean_beta(const std::vector<Spectrum> &spectra) {
   double num = 0.0;
   double den = 0.0;
-  for (const auto &x : d) {
-    num += double(x.rnz) * x.beta;
-    den += double(x.rnz);
+  for (const auto &spectrum : spectra) {
+    num += double(spectrum.rnz) * spectrum.beta;
+    den += double(spectrum.rnz);
   }
   return den > 0.0 ? num / den : 0.0;
 }
 
-inline ssize_t total_rnz(const std::vector<PartitionDims> &d) {
+inline ssize_t total_rnz(const std::vector<Spectrum> &spectra) {
   ssize_t s = 0;
-  for (const auto &x : d)
-    s += x.rnz;
+  for (const auto &spectrum : spectra)
+    s += spectrum.rnz;
   return s;
 }
 
-inline ssize_t total_qnz(const std::vector<PartitionDims> &d) {
+inline ssize_t total_qnz(const std::vector<Spectrum> &spectra) {
   ssize_t s = 0;
-  for (const auto &x : d)
-    s += x.qnz;
+  for (const auto &spectrum : spectra)
+    s += spectrum.qnz;
   return s;
 }
 
 // Sorted-ascending pool of normalised nonzero eigenvalues lambda = s_p[i]/qnz_p over
 //   i in [rz_p, r_p) across all partitions.
-inline std::vector<double> pool_normalized(const std::vector<eigenvalues_type> &s,
-                                           const std::vector<PartitionDims> &d) {
+inline std::vector<double> pool_normalized(const std::vector<Spectrum> &spectra) {
   std::vector<double> pooled;
-  pooled.reserve(size_t(std::max<ssize_t>(0, total_rnz(d))));
-  for (size_t p = 0; p != d.size(); ++p)
-    for (ssize_t i = d[p].rz; i < d[p].r; ++i)
-      pooled.push_back(s[p][i] / double(d[p].qnz));
+  pooled.reserve(size_t(std::max<ssize_t>(0, total_rnz(spectra))));
+  for (const auto &spectrum : spectra)
+    for (ssize_t i = spectrum.rz; i < spectrum.r; ++i)
+      pooled.push_back(spectrum.normalized(i));
   std::sort(pooled.begin(), pooled.end());
   return pooled;
 }
@@ -106,23 +83,20 @@ inline std::vector<double> pool_normalized(const std::vector<eigenvalues_type> &
 //   result.cutoff_p_partition (per-partition noise count), result.lamplus_partition (= t for all),
 //   result.cutoff_p (pooled noise count), and accumulating the pooled normalised noise sum and
 //   nonzero noise count (excluding assumed-zero components, to mirror the single-PCA estimators).
-inline void apply_threshold(const std::vector<eigenvalues_type> &s,
-                            const std::vector<PartitionDims> &d,
-                            const double t,
-                            Result &result,
-                            double &noise_sum,
-                            ssize_t &noise_count) {
-  const size_t P = d.size();
+inline void apply_threshold(
+    const std::vector<Spectrum> &spectra, const double t, Result &result, double &noise_sum, ssize_t &noise_count) {
+  const size_t P = spectra.size();
   result.cutoff_p_partition.assign(P, 0);
   result.lamplus_partition.assign(P, t);
   noise_sum = 0.0;
   noise_count = 0;
   ssize_t total_cutoff = 0;
   for (size_t p = 0; p != P; ++p) {
+    const Spectrum &spectrum = spectra[p];
     // The rz_p assumed-zero (demean) components are always noise, as in the single-PCA path.
-    ssize_t c = d[p].rz;
-    for (ssize_t i = d[p].rz; i < d[p].r; ++i) {
-      const double lam = s[p][i] / double(d[p].qnz);
+    ssize_t c = spectrum.rz;
+    for (ssize_t i = spectrum.rz; i < spectrum.r; ++i) {
+      const double lam = spectrum.normalized(i);
       if (lam > t)
         break;
       ++c;
@@ -138,23 +112,24 @@ inline void apply_threshold(const std::vector<eigenvalues_type> &s,
 // As apply_threshold, but with a per-partition normalised threshold t_p (used by the imposed-
 //   sigma estimators, where the Marchenko-Pastur edge (1+sqrt(beta_p))^2 sigma^2 differs per
 //   partition because beta_p differs).
-inline void apply_threshold_per_partition(const std::vector<eigenvalues_type> &s,
-                                          const std::vector<PartitionDims> &d,
+inline void apply_threshold_per_partition(const std::vector<Spectrum> &spectra,
                                           const std::vector<double> &t,
                                           Result &result,
                                           double &noise_sum,
                                           ssize_t &noise_count) {
-  const size_t P = d.size();
+  const size_t P = spectra.size();
+  assert(t.size() == P);
   result.cutoff_p_partition.assign(P, 0);
   result.lamplus_partition = t;
   noise_sum = 0.0;
   noise_count = 0;
   ssize_t total_cutoff = 0;
   for (size_t p = 0; p != P; ++p) {
+    const Spectrum &spectrum = spectra[p];
     // The rz_p assumed-zero (demean) components are always noise, as in the single-PCA path.
-    ssize_t c = d[p].rz;
-    for (ssize_t i = d[p].rz; i < d[p].r; ++i) {
-      const double lam = s[p][i] / double(d[p].qnz);
+    ssize_t c = spectrum.rz;
+    for (ssize_t i = spectrum.rz; i < spectrum.r; ++i) {
+      const double lam = spectrum.normalized(i);
       if (lam > t[p])
         break;
       ++c;

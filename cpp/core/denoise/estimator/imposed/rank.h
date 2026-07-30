@@ -24,6 +24,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "exception.h"
 #include "mrtrix.h"
 
@@ -32,28 +33,22 @@ namespace MR::Denoise::Estimator {
 class Rank : public Base {
 public:
   Rank(const ssize_t r) : rank(r) {}
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,     //
-                    const ssize_t m,                                  //
-                    const ssize_t n,                                  //
-                    const ssize_t rp,                                 //
-                    const Eigen::Vector3d & /*unused*/) const final { //
-    assert(s.size() == std::min(m, n));
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t rnz = rank_nonzero(m, n, rp);
-    const ssize_t qnz = dimlong_nonzero(m, n, rp);
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final {
+    const auto &s = spectrum.eigenvalues;
+    const ssize_t rz = spectrum.rz;
+    const ssize_t qnz = spectrum.qnz;
     // The imposed rank counts the assumed-zero singular values "rz" that preconditioning ("rp"
     //   regressed means) forces to zero, as the arithmetic below (rank - rz) requires. The
-    //   maximal attainable rank is therefore rz + rnz == min(m, n) == s.size(), NOT rnz: a patch
-    //   whose demeaning removed rz directions still has min(m, n) components in total, rz of
-    //   which are identically zero. Comparing against rnz alone understates the maximum by rz,
-    //   which both mis-classified attainable ranks as no-ops and let unattainable ones fall
-    //   through to a default-constructed Result.
-    const ssize_t max_rank = rz + rnz;
-    assert(max_rank == s.size());
+    //   maximal attainable rank is therefore rz + rnz == min(m, n) == the number of components,
+    //   NOT rnz: a patch whose demeaning removed rz directions still has min(m, n) components in
+    //   total, rz of which are identically zero. Comparing against rnz alone understates the
+    //   maximum by rz, which both mis-classified attainable ranks as no-ops and let unattainable
+    //   ones fall through to a default-constructed Result.
+    const ssize_t max_rank = spectrum.r;
     if (rank > max_rank)
-      throw Exception("Imposed signal rank of " + str(rank) + " cannot be attained: this patch has " + str(m) +
-                      " volumes and " + str(n) + " voxels, giving at most " + str(max_rank) + " components (of which " +
-                      str(rz) +
+      throw Exception("Imposed signal rank of " + str(rank) + " cannot be attained: this patch has " + str(spectrum.m) +
+                      " volumes and " + str(spectrum.n) + " voxels, giving at most " + str(max_rank) +
+                      " components (of which " + str(rz) +
                       " are forced to zero by the demeaning of the preconditioner). "
                       "Reduce -fixed_rank to " +
                       str(max_rank) + " or fewer");
@@ -75,9 +70,9 @@ public:
       result.sigma2 = 0.0;
       return result;
     }
-    result.cutoff_p = s.size() - (rank - rz);
+    result.cutoff_p = spectrum.r - (rank - rz);
     result.sigma2 = s.segment(rz, result.cutoff_p - rz).sum() / (qnz * (result.cutoff_p + 1 - rz));
-    result.lamplus = s[result.cutoff_p - 1] / qnz;
+    result.lamplus = spectrum.normalized(result.cutoff_p - 1);
     return result;
   }
 
@@ -86,16 +81,12 @@ public:
   //   signal/noise boundary; the per-partition rank then follows from each partition's own
   //   eigenvalues (a partition may receive rank 0). Mirrors the single-PCA convention in which
   //   the imposed rank counts the assumed-zero (preconditioner) components.
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
+  Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final {
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
     ssize_t total_rz = 0;
-    for (const auto &x : d)
-      total_rz += x.rz;
-    const ssize_t total_nonzero = total_rnz(d);
+    for (const auto &spectrum : spectra)
+      total_rz += spectrum.rz;
+    const ssize_t total_nonzero = total_rnz(spectra);
     Result result;
     // Number of genuine (nonzero) signal components to retain across the patch.
     const ssize_t signal_nonzero = rank - total_rz;
@@ -124,17 +115,17 @@ public:
       result.cutoff_p = 0;
       result.sigma2 = 0.0;
       result.lamplus = 0.0;
-      result.cutoff_p_partition.assign(d.size(), 0);
-      result.lamplus_partition.assign(d.size(), 0.0);
+      result.cutoff_p_partition.assign(spectra.size(), 0);
+      result.lamplus_partition.assign(spectra.size(), 0.0);
       return result;
     }
-    const std::vector<double> pooled = pool_normalized(s, d); // ascending, length total_nonzero
+    const std::vector<double> pooled = pool_normalized(spectra); // ascending, length total_nonzero
     const ssize_t noise_nonzero = total_nonzero - signal_nonzero; // > 0 here
     // Largest retained-as-noise normalised eigenvalue defines the boundary.
     const double tstar = pooled[noise_nonzero - 1];
     double noise_sum = 0.0;
     ssize_t noise_count = 0;
-    apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+    apply_threshold(spectra, tstar, result, noise_sum, noise_count);
     result.sigma2 = noise_sum / double(noise_count + 1);
     result.lamplus = tstar;
     return result;

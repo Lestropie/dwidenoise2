@@ -26,6 +26,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Estimator {
@@ -64,21 +65,16 @@ class TBME2022 : public Base {
 public:
   TBME2022(const ssize_t max_moment_order = 10) : K(max_moment_order) { assert(K >= 1); }
 
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
-                    const ssize_t m,                              //
-                    const ssize_t n,                              //
-                    const ssize_t rp,                             //
-                    const Eigen::Vector3d & /*unused*/) const final {
-    assert(s.size() == std::min(m, n));
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t rnz = rank_nonzero(m, n, rp);
-    const ssize_t qnz = dimlong_nonzero(m, n, rp);
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final {
+    const auto &s = spectrum.eigenvalues;
+    const ssize_t rz = spectrum.rz;
+    const ssize_t qnz = spectrum.qnz;
     Result result;
     // Need at least two nonzero noise candidates to define a bulk
-    if (rnz < 2)
+    if (spectrum.rnz < 2)
       return result;
 
-    const double beta = double(rnz) / double(qnz);
+    const double beta = spectrum.beta;
     const double sqrtbeta = std::sqrt(beta);
 
     // Moment constants of the generalized quarter-circle law (sigma == 1), C[k] for k = 0..K;
@@ -163,17 +159,13 @@ public:
   //   all partitions, using the rnz-weighted mean aspect ratio for the quarter-circle constants
   //   (valid because the partitions are sized to share a common beta). The pooled signal/noise
   //   boundary is then applied to each partition to obtain its own rank.
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
+  Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final {
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
     Result result;
     // Pooled, sorted-ascending normalised singular values sv = sqrt(s_p[i]/qnz_p).
     std::vector<double> sv;
     {
-      const std::vector<double> pooled_lam = pool_normalized(s, d); // normalised eigenvalues
+      const std::vector<double> pooled_lam = pool_normalized(spectra); // normalised eigenvalues
       sv.reserve(pooled_lam.size());
       for (const double lam : pooled_lam)
         sv.push_back(std::sqrt(lam));
@@ -182,7 +174,7 @@ public:
     if (Ntot < 2)
       return result;
 
-    const double beta = mean_beta(d);
+    const double beta = mean_beta(spectra);
     const double sqrtbeta = std::sqrt(beta);
     std::vector<double> C;
     quarter_circle_moments(beta, K, C);
@@ -241,7 +233,7 @@ public:
     const double tstar = Math::pow2(sv[cutoff_pooled - 1]);
     double noise_sum = 0.0;
     ssize_t noise_count = 0;
-    apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+    apply_threshold(spectra, tstar, result, noise_sum, noise_count);
     result.sigma2 = Math::pow2(sigma);
     result.lamplus = tstar;
     return result;

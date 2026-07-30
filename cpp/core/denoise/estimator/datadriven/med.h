@@ -26,6 +26,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "math/math.h"
 #include "math/median.h"
 
@@ -34,22 +35,18 @@ namespace MR::Denoise::Estimator {
 class Med : public Base {
 public:
   Med() = default;
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,
-                    const ssize_t m,
-                    const ssize_t n,
-                    const ssize_t rp,
-                    const Eigen::Vector3d & /*unused*/) const final {
-    assert(s.size() == std::min(m, n));
-    const ssize_t qnz = dimlong_nonzero(m, n, rp);
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t rnz = rank_nonzero(m, n, rp);
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final {
+    const auto &s = spectrum.eigenvalues;
+    const ssize_t qnz = spectrum.qnz;
+    const ssize_t rz = spectrum.rz;
+    const ssize_t rnz = spectrum.rnz;
     // Eigenvalues should already be sorted;
     //   no need to execute a sort for median calculation
     // Do however need to skip any components assumed to be zero based on preconditioning
-    const double ymed = (s.size() - rz) & 1                                                            //
-                            ? s[rz + (s.size() - rz) / 2]                                              //
-                            : (0.5 * (s[rz + (s.size() - rz) / 2 - 1] + s[rz + (s.size() - rz) / 2])); //
-    const double beta = double(rnz) / double(qnz);
+    const double ymed = rnz & 1                                                //
+                            ? s[rz + rnz / 2]                                  //
+                            : (0.5 * (s[rz + rnz / 2 - 1] + s[rz + rnz / 2])); //
+    const double beta = spectrum.beta;
     // Ratio of the Marchenko-Pastur upper bulk edge lambda+ to the noise level sigma^2.
     const double edge = Math::pow2(1.0 + std::sqrt(beta));
     Result result;
@@ -88,38 +85,34 @@ public:
   // Partitioned form: the median is taken across the pooled (normalised) noise eigenvalues,
   //   giving a single, lower-variance noise level; the resulting threshold is applied to each
   //   partition to obtain its own signal rank.
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
+  Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final {
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
-    const std::vector<double> pooled = pool_normalized(s, d); // ascending, normalised
+    const std::vector<double> pooled = pool_normalized(spectra); // ascending, normalised
     Result result;
     if (pooled.empty())
       return result;
     const size_t np = pooled.size();
     const double ymed = (np & 1) ? pooled[np / 2] : (0.5 * (pooled[np / 2 - 1] + pooled[np / 2]));
-    const double beta = mean_beta(d);
+    const double beta = mean_beta(spectra);
     // Gavish & Donoho (2014) median noise *variance* (pooled values are already normalised, so no
     //   qnz factor). The signal/noise boundary is the MP upper edge sigma^2*(1+sqrt(beta_p))^2,
     //   applied per partition because beta_p differs between partitions.
     double sigma2 = ymed / mu(beta);
-    std::vector<double> t(d.size());
-    const auto set_edges = [&t, &d](const double s2) {
-      for (size_t p = 0; p != d.size(); ++p)
-        t[p] = s2 * Math::pow2(1.0 + std::sqrt(d[p].beta));
+    std::vector<double> t(spectra.size());
+    const auto set_edges = [&t, &spectra](const double s2) {
+      for (size_t p = 0; p != spectra.size(); ++p)
+        t[p] = s2 * Math::pow2(1.0 + std::sqrt(spectra[p].beta));
     };
     set_edges(sigma2);
     double noise_sum = 0.0;
     ssize_t noise_count = 0;
-    apply_threshold_per_partition(s, d, t, result, noise_sum, noise_count);
+    apply_threshold_per_partition(spectra, t, result, noise_sum, noise_count);
     // Refine sigma^2 as the mean of the pooled (normalised) noise eigenvalues, then recompute the
     //   per-partition edges and signal/noise cutoffs from the refined noise level.
     if (noise_count > 0) {
       sigma2 = noise_sum / double(noise_count);
       set_edges(sigma2);
-      apply_threshold_per_partition(s, d, t, result, noise_sum, noise_count);
+      apply_threshold_per_partition(spectra, t, result, noise_sum, noise_count);
     }
     result.sigma2 = sigma2;
     result.lamplus = sigma2 * Math::pow2(1.0 + std::sqrt(beta)); // representative edge (mean beta)
