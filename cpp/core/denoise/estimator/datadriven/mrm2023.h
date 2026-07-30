@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -133,8 +134,6 @@ public:
     result.lamplus = lamplus_found; // Marchenko-Pastur edge (normalised), as in the single-PCA path
     return result;
   }
-
-  bool supports_partitioning() const final { return true; }
 
   // Predicted relative RMSE of the noise level estimate; calibrated by numerical simulation of
   //   log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n). R^2 = 0.93.

@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <vector>
 
@@ -139,8 +140,6 @@ public:
     result.lamplus = tstar;
     return result;
   }
-
-  bool supports_partitioning() const final { return true; }
 
 protected:
   const ssize_t rank;
