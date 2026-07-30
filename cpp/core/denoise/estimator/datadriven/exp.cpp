@@ -17,6 +17,7 @@
 
 #include "denoise/estimator/datadriven/exp.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -30,23 +31,23 @@ namespace MR::Denoise::Estimator {
 template <ssize_t version>
 Result Exp<version>::operator()(const Spectrum &spectrum,                   //
                                 const Eigen::Vector3d & /*unused*/) const { //
-  const ssize_t rz = spectrum.rz;
+  const ssize_t rz = spectrum.rz();
   const double lam_r = spectrum.normalized(rz);
   double clam = 0.0;
   Result result;
   // Note that the paper utilised symbol "p" to refer to the number of signal components;
   //   here "p" is instead the index of the last noise component;
   //   therefore the number of noise compoments is (p + 1 - z)
-  for (ssize_t p = rz; p < spectrum.r; ++p) {
+  for (ssize_t p = rz; p < spectrum.r(); ++p) {
     const double lam = spectrum.normalized(p);
     clam += lam;
     double denominator = std::numeric_limits<double>::signaling_NaN();
     switch (version) {
     case 1:
-      denominator = spectrum.qnz;
+      denominator = spectrum.qnz();
       break;
     case 2:
-      denominator = spectrum.qnz - (spectrum.r - p - 1);
+      denominator = spectrum.qnz() - (spectrum.r() - p - 1);
       break;
     default:
       assert(false);
@@ -64,57 +65,87 @@ Result Exp<version>::operator()(const Spectrum &spectrum,                   //
   return result;
 }
 
+// Partitioned form. The scan walks the concatenated spectrum in standardised order, so that the
+//   next candidate noise component is the one least remarkable within its own partition's bulk
+//   rather than the one with the smallest normalised eigenvalue.
+//
+// Both of the criterion's two noise estimates need partition-aware treatment:
+//
+// - sigsq1, the mean of the candidate noise eigenvalues, becomes the pooled energy per degree of
+//   freedom. Averaging normalised eigenvalues weights each partition by its component count;
+//   weighting by degrees of freedom (k_p qnz_p) is the minimum-variance combination, and the two
+//   differ as soon as the partitions have unequal long dimensions.
+//
+// - sigsq2 estimates sigma^2 from the width of the candidate bulk, using the Marchenko-Pastur
+//   relation width = 4 sigma^2 sqrt(gamma). Here gamma is the aspect ratio of the *pooled*
+//   candidate set, and that is where an unequal split bites: the pool is a mixture of P bulks of
+//   differing width, and the support of a mixture is the support of its widest component alone.
+//   Both extremes of the pooled sample therefore come from the single partition of largest
+//   gamma_p, so the width must be divided by sqrt(max_p gamma_p). The aggregate ratio
+//   sum_p k_p / sum_p qnz_p that this replaces is a weighted mean of the gamma_p, which
+//   under-states the width, inflates sigsq2, and so trips the criterion early -- under-counting
+//   noise components and over-stating the signal rank.
+//   gamma_p increases monotonically with k_p under either version, so the running maximum needs
+//   no rescan.
+//
+// A per-partition sigsq2, averaged over partitions, was considered instead: it would use every
+//   partition's edges rather than only the widest, but it also changes the criterion's finite-size
+//   operating point for equal partitions (a range over k_p samples in place of one over sum_p k_p),
+//   which is a separate change of behaviour from the imbalance correction being made here.
 template <ssize_t version>
 Result Exp<version>::operator()(const std::vector<Spectrum> &spectra, //
                                 const Eigen::Vector3d & /*unused*/) const {
-  // Pooled, sorted-ascending normalised noise eigenvalues across partitions.
-  const std::vector<double> pooled = pool_normalized(spectra);
   Result result;
+  const std::vector<PooledEigenvalue> pooled = pool_standardized(spectra);
   if (pooled.empty())
     return result;
-  const double lam_r = pooled.front(); // smallest normalised nonzero eigenvalue
-  // Version 1 normalises gamma by the aggregate long dimension sum_p qnz_p; version 2 applies
-  //   each partition's finite-size correction, which (summed) is sum_p (qnz_p - rnz_p) plus the
-  //   running noise count -- the exact generalisation of the single-PCA "qnz - (size-p-1)".
-  const double Q = double(total_qnz(spectra));
-  ssize_t denom_const = 0;
-  for (const auto &spectrum : spectra)
-    denom_const += (spectrum.qnz - spectrum.rnz);
-  double clam = 0.0;
+
+  std::vector<ssize_t> k(spectra.size(), 0); // candidate noise components taken from each partition
+  double noise_sum = 0.0;                    // raw energy of the candidate set
+  double noise_dof = 0.0;                    // degrees of freedom of the candidate set
+  double lam_min = std::numeric_limits<double>::max();
+  double lam_max = std::numeric_limits<double>::lowest();
+  double gam_max = 0.0;
   double best_sigma2 = std::numeric_limits<double>::signaling_NaN();
-  double tstar = std::numeric_limits<double>::signaling_NaN();
+  double zstar = std::numeric_limits<double>::signaling_NaN();
   bool found = false;
-  for (ssize_t i = 0; i != ssize_t(pooled.size()); ++i) {
-    const double lam = pooled[i];
-    clam += lam;
-    const ssize_t count = i + 1; // number of pooled noise components considered
+
+  for (const PooledEigenvalue &entry : pooled) {
+    const Spectrum &spectrum = spectra[entry.partition];
+    const ssize_t kp = ++k[entry.partition];
+    noise_sum += spectrum.eigenvalue(entry.index);
+    noise_dof += spectrum.dof(1);
+    lam_min = std::min(lam_min, entry.lambda);
+    lam_max = std::max(lam_max, entry.lambda);
+    // Aspect ratio of this partition's own candidate sub-block; version 2 applies the
+    //   Cordero-Grande finite-size deflation of its long dimension by the components of that same
+    //   partition that lie above the candidate set.
     double denominator = std::numeric_limits<double>::signaling_NaN();
     switch (version) {
     case 1:
-      denominator = Q;
+      denominator = double(spectrum.qnz());
       break;
     case 2:
-      denominator = double(denom_const + count);
+      denominator = double(spectrum.qnz() - (spectrum.rnz() - kp));
       break;
     default:
       assert(false);
     }
-    const double gam = double(count) / denominator;
-    const double sigsq1 = clam / double(count);
-    const double sigsq2 = (lam - lam_r) / (4.0 * std::sqrt(gam));
+    gam_max = std::max(gam_max, double(kp) / denominator);
+    const double sigsq1 = noise_sum / noise_dof;
+    const double sigsq2 = (lam_max - lam_min) / (4.0 * std::sqrt(gam_max));
+    // sigsq2 > sigsq1 if signal else noise
     if (sigsq2 < sigsq1) {
       best_sigma2 = sigsq1;
-      tstar = lam;
+      zstar = entry.z;
       found = true;
     }
   }
   if (!found)
     return result;
-  double noise_sum = 0.0;
-  ssize_t noise_count = 0;
-  apply_threshold(spectra, tstar, result, noise_sum, noise_count);
+  apply_threshold_standardized(spectra, zstar, result);
   result.sigma2 = best_sigma2;
-  result.lamplus = tstar;
+  result.lamplus = zstar * mean_edge(spectra);
   return result;
 }
 

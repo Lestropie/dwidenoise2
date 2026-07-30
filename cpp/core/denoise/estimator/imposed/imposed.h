@@ -55,34 +55,27 @@ public:
     result.sigma2 = sigma_sq;
     // From this noise level,
     //   get the upper bound of the MP distribution and rank of signal
-    //   given the ordered list of eigenvalues
-    result.lamplus = Math::pow2(1.0 + std::sqrt(spectrum.beta)) * result.sigma2;
-    result.cutoff_p = spectrum.rz;
-    for (ssize_t p = spectrum.rz; p != spectrum.r; ++p) {
-      if (spectrum.normalized(p) > result.lamplus)
-        break;
-      result.cutoff_p = p + 1;
-    }
+    //   given the ordered list of eigenvalues.
+    // On the standardised scale the Marchenko-Pastur boundary is the noise level itself, so the
+    //   known sigma^2 doubles as the cut and lambda+ need only be formed for export.
+    result.lamplus = sigma_sq * spectrum.edge();
+    result.cutoff_p = spectrum.noise_count(sigma_sq);
     return result;
   }
 
-  // Partitioned form: a single externally-provided sigma^2 applies to the whole patch; each
-  //   partition's signal/noise boundary is the Marchenko-Pastur edge for that partition's own
-  //   aspect ratio beta_p (which may differ slightly between partitions).
+  // Partitioned form: a single externally-provided sigma^2 applies to the whole patch, but the
+  //   signal/noise boundary it implies is each partition's own Marchenko-Pastur edge
+  //   sigma^2 (1+sqrt(beta_p))^2, since partitions of unequal volume count have unequal beta_p.
+  //   That family of boundaries is exactly the standardised cut z == sigma^2.
   Result operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const final {
     Result result;
     double sigma_sq;
     if (!get_sigma_sq(pos, sigma_sq))
       return result;
     result.sigma2 = sigma_sq;
-    std::vector<double> lamplus_p(spectra.size());
-    for (size_t p = 0; p != spectra.size(); ++p)
-      lamplus_p[p] = Math::pow2(1.0 + std::sqrt(spectra[p].beta)) * sigma_sq;
-    double noise_sum = 0.0;
-    ssize_t noise_count = 0;
-    apply_threshold_per_partition(spectra, lamplus_p, result, noise_sum, noise_count);
+    apply_threshold_standardized(spectra, sigma_sq, result);
     // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
-    result.lamplus = Math::pow2(1.0 + std::sqrt(mean_beta(spectra))) * sigma_sq;
+    result.lamplus = sigma_sq * mean_edge(spectra);
     return result;
   }
 

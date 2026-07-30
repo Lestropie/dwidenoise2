@@ -66,16 +66,16 @@ public:
   TBME2022(const ssize_t max_moment_order = 10) : K(max_moment_order) { assert(K >= 1); }
 
   Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final {
-    const auto &s = spectrum.eigenvalues;
-    const ssize_t rz = spectrum.rz;
-    const ssize_t qnz = spectrum.qnz;
+    const auto &s = spectrum.eigenvalues();
+    const ssize_t rz = spectrum.rz();
+    const ssize_t qnz = spectrum.qnz();
     Result result;
     // Need at least two nonzero noise candidates to define a bulk
-    if (spectrum.rnz < 2)
+    if (spectrum.rnz() < 2)
       return result;
 
-    const double beta = spectrum.beta;
-    const double sqrtbeta = std::sqrt(beta);
+    const double beta = spectrum.beta();
+    const double sqrtbeta = spectrum.sqrt_beta();
 
     // Moment constants of the generalized quarter-circle law (sigma == 1), C[k] for k = 0..K;
     //   C[0] == 1 by construction, and C[2] == 1 reproduces the MPPCA mean-eigenvalue estimate.
@@ -155,87 +155,117 @@ public:
     return result;
   }
 
-  // Partitioned form: the multi-moment scan runs on the pooled (normalised) singular values of
-  //   all partitions, using the rnz-weighted mean aspect ratio for the quarter-circle constants
-  //   (valid because the partitions are sized to share a common beta). The pooled signal/noise
-  //   boundary is then applied to each partition to obtain its own rank.
+  // Partitioned form: the multi-moment scan run over the concatenated spectrum, in standardised
+  //   order so that candidates enter the noise set by significance within their own bulk.
+  //
+  // The two criteria of the method depend on the aspect ratio in fundamentally different ways, and
+  //   unequal partitions therefore demand two different treatments of beta:
+  //
+  // - sigma1(k) is built from a *moment* of the candidate set. Moments of a mixture average
+  //   linearly over its components, so the exact pooled constant is the weight-average
+  //   sum_p (k_p/N) C_k(beta_p) of the per-partition quarter-circle constants. (C_k is nonlinear
+  //   in beta, so evaluating it once at an average beta is not the same thing, and errs by an
+  //   amount that grows with the spread of the partition sizes.) Accumulating the running sums
+  //   sum_p k_p C_k(beta_p) makes the count N cancel entirely.
+  //
+  // - sigma2(k) is built from the *support* of the candidate set. The support of a mixture is
+  //   that of its widest component alone -- (1+sqrt(beta))^k - (1-sqrt(beta))^k is increasing in
+  //   beta -- so the observed singular-value range must be divided by the edge difference of the
+  //   largest beta present, not of an average one.
   Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final {
     Result result;
-    // Pooled, sorted-ascending normalised singular values sv = sqrt(s_p[i]/qnz_p).
-    std::vector<double> sv;
-    {
-      const std::vector<double> pooled_lam = pool_normalized(spectra); // normalised eigenvalues
-      sv.reserve(pooled_lam.size());
-      for (const double lam : pooled_lam)
-        sv.push_back(std::sqrt(lam));
-    }
-    const ssize_t Ntot = ssize_t(sv.size());
+    const std::vector<PooledEigenvalue> pooled = pool_standardized(spectra);
+    const ssize_t Ntot = ssize_t(pooled.size());
+    // Need at least two nonzero noise candidates to define a bulk
     if (Ntot < 2)
       return result;
 
-    const double beta = mean_beta(spectra);
-    const double sqrtbeta = std::sqrt(beta);
-    std::vector<double> C;
-    quarter_circle_moments(beta, K, C);
+    // Quarter-circle moment constants of each partition's own law.
+    std::vector<std::vector<double>> C(spectra.size());
+    for (size_t p = 0; p != spectra.size(); ++p)
+      quarter_circle_moments(spectra[p].beta(), K, C[p]);
+
+    // Bulk-edge denominators of Eq. (10) at the widest aspect ratio among the partitions
+    //   represented in the candidate set so far; beta_running rises monotonically as partitions
+    //   are drawn in, so these need rebuilding only when it does.
+    double beta_running = 0.0;
     std::vector<double> edge_denom(K + 1, 0.0);
-    for (ssize_t k = 1; k <= K; ++k)
-      edge_denom[k] = std::pow(1.0 + sqrtbeta, double(k)) - std::pow(1.0 - sqrtbeta, double(k));
 
-    const double sv_min = sv.front();
+    std::vector<ssize_t> k(spectra.size(), 0); // candidates taken from each partition
+    std::vector<double> Csum(K + 1, 0.0);      // sum_p k_p C_k(beta_p)
+    std::vector<double> Pk(K + 1, 0.0);        // empirical power sums over the candidate set
     std::vector<double> svmin_pow(K + 1, 1.0);
-    for (ssize_t k = 1; k <= K; ++k)
-      svmin_pow[k] = svmin_pow[k - 1] * sv_min;
-
     std::vector<ssize_t> cutoff_k(K + 1, -1);
-    std::vector<double> P(K + 1, 0.0);
+    double sv_min = std::numeric_limits<double>::max();
+    double sv_max = 0.0;
+
     for (ssize_t i = 0; i != Ntot; ++i) {
-      const double sv_max = sv[i];
-      double svk = 1.0;
-      for (ssize_t k = 0; k <= K; ++k) {
-        P[k] += svk;
-        svk *= sv_max;
+      const PooledEigenvalue &entry = pooled[i];
+      const Spectrum &spectrum = spectra[entry.partition];
+      ++k[entry.partition];
+      const double sv = std::sqrt(entry.lambda);
+      if (sv < sv_min) {
+        sv_min = sv;
+        double svk = 1.0;
+        for (ssize_t j = 0; j <= K; ++j) {
+          svmin_pow[j] = svk;
+          svk *= sv_min;
+        }
       }
-      const ssize_t N = i + 1;
-      double svmaxk = sv_max;
-      for (ssize_t k = 1; k <= K; ++k) {
-        const double sigma1pow = P[k] / (C[k] * double(N));
-        const double sigma2pow = (svmaxk - svmin_pow[k]) / edge_denom[k];
+      if (spectrum.beta() > beta_running) {
+        beta_running = spectrum.beta();
+        const double sqrtbeta = std::sqrt(beta_running);
+        for (ssize_t j = 1; j <= K; ++j)
+          edge_denom[j] = std::pow(1.0 + sqrtbeta, double(j)) - std::pow(1.0 - sqrtbeta, double(j));
+      }
+      double svk = 1.0;
+      for (ssize_t j = 0; j <= K; ++j) {
+        Pk[j] += svk;
+        Csum[j] += C[entry.partition][j];
+        svk *= sv;
+      }
+      // The candidate set's largest singular value: standardised order is not singular-value
+      //   order once the bulks differ, so this is a running maximum rather than the current entry.
+      sv_max = std::max(sv_max, sv);
+      double svmaxk = sv_max; // (sv_max)^k, starting at k == 1
+      for (ssize_t j = 1; j <= K; ++j) {
+        // sigma1(k)^k vs sigma2(k)^k; the >= test is invariant to the common 1/k root
+        const double sigma1pow = Pk[j] / Csum[j];
+        const double sigma2pow = (svmaxk - svmin_pow[j]) / edge_denom[j];
         if (sigma1pow >= sigma2pow)
-          cutoff_k[k] = i + 1;
+          cutoff_k[j] = i + 1;
         svmaxk *= sv_max;
       }
     }
+
     ssize_t cutoff_pooled = std::numeric_limits<ssize_t>::max();
-    for (ssize_t k = 1; k <= K; ++k) {
-      if (cutoff_k[k] >= 0)
-        cutoff_pooled = std::min(cutoff_pooled, cutoff_k[k]);
+    for (ssize_t j = 1; j <= K; ++j) {
+      if (cutoff_k[j] >= 0)
+        cutoff_pooled = std::min(cutoff_pooled, cutoff_k[j]);
     }
     if (cutoff_pooled == std::numeric_limits<ssize_t>::max())
       return result;
 
-    const ssize_t Nnoise = cutoff_pooled;
+    // Noise level from the selected noise set, with the same per-partition moment constants.
     std::vector<double> Pn(K + 1, 0.0);
+    std::vector<double> Cn(K + 1, 0.0);
     for (ssize_t j = 0; j != cutoff_pooled; ++j) {
-      const double svj = sv[j];
+      const double sv = std::sqrt(pooled[j].lambda);
       double svk = 1.0;
-      for (ssize_t k = 0; k <= K; ++k) {
-        Pn[k] += svk;
-        svk *= svj;
+      for (ssize_t q = 0; q <= K; ++q) {
+        Pn[q] += svk;
+        Cn[q] += C[pooled[j].partition][q];
+        svk *= sv;
       }
     }
     double sigma = 0.0;
-    for (ssize_t k = 1; k <= K; ++k)
-      sigma = std::max(sigma, std::pow(Pn[k] / (C[k] * double(Nnoise)), 1.0 / double(k)));
+    for (ssize_t j = 1; j <= K; ++j)
+      sigma = std::max(sigma, std::pow(Pn[j] / Cn[j], 1.0 / double(j)));
 
-    // Boundary in normalised eigenvalue units = (largest noise singular value)^2; classify each
-    //   partition against it to reproduce the pooled rank with monotone per-partition cutoffs.
-    const double tstar = Math::pow2(sv[cutoff_pooled - 1]);
-    double noise_sum = 0.0;
-    ssize_t noise_count = 0;
-    apply_threshold(spectra, tstar, result, noise_sum, noise_count);
+    apply_threshold_standardized(spectra, pooled[cutoff_pooled - 1].z, result);
     result.sigma2 = Math::pow2(sigma);
-    result.lamplus = tstar;
+    result.lamplus = result.sigma2 * mean_edge(spectra);
     return result;
   }
 

@@ -249,7 +249,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
       // Pooled count of nonzero components across partitions.
       ssize_t total = 0;
       for (const auto &spectrum : spectra)
-        total += spectrum.rnz;
+        total += spectrum.rnz();
       exports.rank_pcanonzero.value() = total;
     } else {
       exports.rank_pcanonzero.value() = rank_nonzero(m, n, null_rank);
@@ -268,7 +268,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
       //   divided by the partition count when forming rank_per_mm for the next iteration's kernel.
       ssize_t total_r = 0;
       for (const auto &spectrum : spectra)
-        total_r += spectrum.r;
+        total_r += spectrum.r();
       exports.rank_input.value() = bool(threshold) ? (total_r - threshold.cutoff_p) : total_r;
     } else if (bool(threshold))
       exports.rank_input.value() = r - threshold.cutoff_p;
@@ -297,11 +297,11 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
         //   per-partition eigenvalues are on incommensurable scales).
         ssize_t total = 0;
         for (const auto &spectrum : spectra)
-          total += spectrum.r;
+          total += spectrum.r();
         eigenvalues_type pooled(total);
         ssize_t idx = 0;
         for (const auto &spectrum : spectra) {
-          for (ssize_t i = 0; i != spectrum.r; ++i)
+          for (ssize_t i = 0; i != spectrum.r(); ++i)
             pooled[idx++] = spectrum.normalized(i);
         }
         std::sort(pooled.data(), pooled.data() + pooled.size(), std::greater<double>());
