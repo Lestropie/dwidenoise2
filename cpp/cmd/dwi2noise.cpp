@@ -441,10 +441,10 @@ void run(Header &dwi,
   }
 
   // Add the regressed group-mean components back to the reported (signal-only) input rank, on the
-  //   final output map only. demean_rank() yields the group count whether the demeaning was applied
+  //   final output map only. partition_null_rank() yields the group count whether the demeaning was applied
   //   by the preconditioner or per partition within Estimate, so the contribution matches the
   //   non-partitioned case. Clamp to the available rank (max_rank).
-  const uint16_t null_rank = uint16_t(preconditioner.demean_rank());
+  const uint16_t null_rank = uint16_t(preconditioner.partition_null_rank());
   const uint16_t max_rank = Denoise::num_volumes(dwi);
   if (null_rank > 0 && final_exports.rank_input.valid()) {
     ThreadedLoop(final_exports.rank_input)

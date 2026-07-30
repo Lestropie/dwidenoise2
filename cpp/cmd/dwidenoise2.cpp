@@ -30,6 +30,7 @@
 #include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
+#include "denoise/estimator/imposed/constant.h"
 #include "denoise/estimator/imposed/import.h"
 #include "denoise/estimator/imposed/imposed.h"
 #include "denoise/estimator/imposed/unity.h"
@@ -696,7 +697,7 @@ void run(Header &dwi,
                                     Denoise::num_volumes(input),
                                     num_partitions,
                                     final_prmse,
-                                    preconditioner.demean_rank());
+                                    preconditioner.partition_null_rank());
   kernel->set_mask(mask);
 
   // Unless the final schedule row is configured to (re)estimate the noise level, assume the
@@ -734,7 +735,7 @@ void run(Header &dwi,
                 aggregator,
                 aggregator_fwhm,
                 final_exports,
-                preconditioner.null_rank(),
+                preconditioner.partition_null_rank(),
                 partitioning,
                 volume_group,
                 num_partitions);
@@ -787,10 +788,10 @@ void run(Header &dwi,
   // Modify some optional outputs to better reflect utilisation of preconditioning. The
   //   group-mean components regressed out by demeaning are added back to the reported ranks here,
   //   on the final maps only (the per-iteration rank_input fed to the kernel sizing is kept
-  //   mean-free). demean_rank() gives the group count whether the demeaning was applied by the
+  //   mean-free). partition_null_rank() gives the group count whether the demeaning was applied by the
   //   preconditioner (no partitioning) or per partition within Estimate/Recon (partitioning), so
   //   the demean-induced rank contribution is identical in both regimes.
-  const ssize_t preconditioner_null_rank = preconditioner.demean_rank();
+  const ssize_t preconditioner_null_rank = preconditioner.partition_null_rank();
   if (preconditioner_null_rank > 0) {
     if (final_exports.rank_input.valid()) {
       ThreadedLoop(final_exports.rank_input)
@@ -887,16 +888,29 @@ void run() {
   //   noise level estimation, yielding sigma^2 ~ 1 on the stabilised data
   //   (equivalent to -estimator unity); see vst_plan.md section 6.2.
   Image<float> user_vst_image;
+  // A scalar -noise_in is imposed by Estimator::Constant rather than by materialising a
+  //   constant-valued image and interpolating it per patch.
+  std::optional<default_type> noise_in_scalar;
   auto opt = get_options("noise_in");
   if (!opt.empty()) {
+    noise_in_scalar = Denoise::imposed_scalar_value(opt[0][0]);
+    // The option's declared bound is inclusive and so admits zero, which is not a usable noise
+    //   level. import_vst_noise_map() rejects it, but that is bypassed on the path below where no
+    //   image is built, so the check has to be made here too.
+    if (noise_in_scalar.has_value() && noise_in_scalar.value() == 0.0)
+      throw Exception("Noise level provided via -noise_in must be greater than zero");
     // Under -vst_method none the supplied level cannot be absorbed into a transform, and is
-    //   instead imposed directly on the data by the Import estimator. Whether that is coherent
-    //   depends on the schedule, which is not yet resolved here, so the decision is deferred
-    //   (see "impose_imported_noise" below) rather than refused outright.
+    //   instead imposed directly on the data (see "impose_imported_noise" below). Whether that is
+    //   coherent depends on the schedule, which is not yet resolved here, so the decision is
+    //   deferred rather than refused outright.
     if (!vst_none && demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
     }
-    user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
+    // With no transform to parameterise, a scalar needs no image at all; the estimator holds the
+    //   value directly. Every other combination still needs the map (to parameterise the VST, or
+    //   because the level varies over space).
+    if (!(vst_none && noise_in_scalar.has_value()))
+      user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
   }
 
   const aggregator_type aggregator = get_option_choice("aggregator", aggregator_type::GAUSSIAN);
@@ -1156,9 +1170,17 @@ void run() {
     CONSOLE("Imposing the noise level supplied via -noise_in directly on the input data "
             "(no variance-stabilising transform is active, and the schedule does not re-estimate)");
   }
-  auto estimator = impose_imported_noise
-                       ? std::static_pointer_cast<Estimator::Base>(std::make_shared<Estimator::Import>(user_vst_image))
-                       : Estimator::make_estimator(user_vst_image, true);
+  std::shared_ptr<Estimator::Base> estimator;
+  if (impose_imported_noise) {
+    // A scalar level is held by the estimator itself; only a spatially-varying level needs a map,
+    //   and the per-patch interpolation that comes with it.
+    if (noise_in_scalar.has_value())
+      estimator = std::make_shared<Estimator::Constant>(noise_in_scalar.value());
+    else
+      estimator = std::make_shared<Estimator::Import>(user_vst_image);
+  } else {
+    estimator = Estimator::make_estimator(user_vst_image, true);
+  }
 
   const filter_type filter = get_option_choice(
       "filter", get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE);

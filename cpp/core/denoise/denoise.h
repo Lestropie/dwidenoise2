@@ -106,6 +106,13 @@ Image<float> condition_noise_map(Image<float> &in,
 // The returned map is conditioned (padded) for safe cubic interpolation.
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
+// Decide whether a value-or-image argument (-noise_in, -rankpermm_in) was given as a plain
+//   number rather than an image path, returning the value if so. The raw text decides only which
+//   interpretation applies; the conversion then goes through ParsedArgument::as_float(), so the
+//   range declared on the option is what rejects an out-of-range value (and that exception
+//   propagates rather than being downgraded into an attempt to open the value as a filename).
+std::optional<default_type> imposed_scalar_value(const App::ParsedArgument &arg);
+
 // Per-voxel signal-rank density (estimated signal rank per mm of kernel radius), used to size the
 //   rank-adaptive spherical kernel (Kernel::SphereRankAdaptive). Computed as
 //   rank_input / (num_partitions * max_dist), the scalar quantity accumulated across iterations in

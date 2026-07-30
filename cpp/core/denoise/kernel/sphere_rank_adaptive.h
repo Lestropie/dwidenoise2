@@ -38,7 +38,7 @@ public:
   //   sized; with no partitioning it equals the full volume count Denoise::num_volumes(voxel_grid).
   //   Sizing to the smallest partition leaves that partition's noise block ~square.
   // num_nulls is the number of volume-space directions that preconditioning's group-mean
-  //   demeaning forces to zero within a partition (Preconditioner::demean_rank()). They carry
+  //   demeaning forces to zero within a partition (Preconditioner::partition_null_rank()). They carry
   //   neither signal nor noise, so the square-noise-block target is formed from
   //   (effective_num_volumes - num_nulls); see make_kernel().
   SphereRankAdaptive(const Header &voxel_grid,

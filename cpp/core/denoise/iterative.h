@@ -141,15 +141,24 @@ void estimate(Image<T> &input,
                                     Denoise::num_volumes(input),
                                     num_partitions,
                                     prmse,
-                                    preconditioner.demean_rank());
+                                    preconditioner.partition_null_rank());
   kernel->set_mask(mask);
   if (preconditioner.noop())
     threaded_copy(input, input_preconditioned);
   else
     preconditioner(input, input_preconditioned, false);
   {
-    Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports,
-                     preconditioner.null_rank(), false, partitioning, volume_group, num_partitions);
+    Estimate<T> func(input_preconditioned,
+                     subsample,
+                     kernel,
+                     decomposition,
+                     estimator,
+                     exports,
+                     preconditioner.partition_null_rank(),
+                     false,
+                     partitioning,
+                     volume_group,
+                     num_partitions);
     ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
     func.report_warnings();
   }
