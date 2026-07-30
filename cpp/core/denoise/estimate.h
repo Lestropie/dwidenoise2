@@ -58,6 +58,7 @@ public:
            const bool enable_recon = false,
            std::shared_ptr<const Partitioning> level_partitioning = nullptr,
            std::vector<ssize_t> volume_group = {},
+           const demean_site_t demean_site = demean_site_t::NONE,
            const ssize_t kernel_num_partitions = 1);
 
   Estimate(const Estimate &);
@@ -115,12 +116,19 @@ protected:
   ssize_t kernel_num_partitions;        // P for per-kernel mode (1 ⇒ not per-kernel)
   Partitioning patch_partition;         // per-kernel scratch, rebuilt per patch
   const Partitioning *active_part;      // partitioning in force for the current patch (or nullptr)
-  // Per-(output) volume demeaning-group label (length m'); empty ⇒ no demeaning. Drives the
-  //   per-partition per-group mean subtraction (kept orthogonal to each partition's PCA) and
-  //   the per-partition preconditioner rank rp_p. (Under partitioning the preconditioner itself
-  //   performs no demeaning; see Preconditioner::set_partitioning_active.)
+  // Per-(output) volume demeaning-group label (length m'), as reported by
+  //   Precondition::Preconditioner::output_volume_to_group(). Also stratifies the per-kernel volume partitioning
+  //   so each group is balanced across partitions, so it may be populated whether or not this class
+  //   is the one that demeans; demean_site, not this vector, decides that.
   std::vector<ssize_t> volume_group;
   ssize_t num_demean_groups; // max(volume_group)+1, or 0 when volume_group is empty
+  // Where the group-mean demeaning is applied, as resolved for this iteration by
+  //   Precondition::resolve_demean_site() and imposed identically on the preconditioner. This class performs
+  //   the per-partition per-group mean subtraction (kept orthogonal to each partition's PCA), and
+  //   accounts for the rank rp_p it regresses, if and only if this is ESTIMATOR; otherwise the
+  //   preconditioner has already subtracted the means over the whole series, or there are none.
+  //   ESTIMATOR requires the group labels it names, which the constructor asserts.
+  demean_site_t demean_site;
 
   using RealVectorType = Eigen::Matrix<typename Eigen::NumTraits<F>::Real, Eigen::Dynamic, 1>;
   // Reusable per-partition decomposition storage (sized to P; filled by compute_partitions()).

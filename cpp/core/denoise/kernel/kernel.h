@@ -95,8 +95,8 @@ using predicted_rmse_func = std::function<double(ssize_t, ssize_t, double)>;
 // num_null_components is the number of singular values that group-mean demeaning forces to zero
 //   in every partition: Preconditioner::partition_null_rank() (0 when -demean none). It is a
 //   property of the matrix being decomposed, so it holds regardless of whether the demeaning was
-//   applied by the preconditioner or per partition inside Estimate/Recon
-//   (Preconditioner::demean_site()). The kernels that target a square noise block subtract it
+//   applied by the preconditioner or per partition inside Estimate/Recon (see demean_site_t).
+//   The kernels that target a square noise block subtract it
 //   from the volume count, because those directions carry neither signal nor noise. Under
 //   partitioning each
 //   partition regresses the same group count, so this is simultaneously the common and the

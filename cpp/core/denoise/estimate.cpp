@@ -38,6 +38,7 @@ Estimate<F>::Estimate(const Image<F> &image,
                       const bool enable_recon,
                       std::shared_ptr<const Partitioning> level_partitioning,
                       std::vector<ssize_t> volume_group,
+                      const demean_site_t demean_site,
                       const ssize_t kernel_num_partitions)
     : m(Denoise::num_volumes(image)),
       subsample(subsample),
@@ -61,9 +62,14 @@ Estimate<F>::Estimate(const Image<F> &image,
       num_demean_groups(this->volume_group.empty()
                             ? 0
                             : (*std::max_element(this->volume_group.begin(), this->volume_group.end()) + 1)),
+      demean_site(demean_site),
       exports(exports) {
   // If input image is > 4D, should have been preconditioned into 4D
   assert(image.ndim() == 4);
+  // Being told to demean here presupposes the group labels that define the means to subtract;
+  //   the converse does not hold (the labels also stratify the partitioning, so they are supplied
+  //   whenever partitioning is active, including when the preconditioner did the demeaning).
+  assert(demean_site != demean_site_t::ESTIMATOR || !this->volume_group.empty());
   pca_failure_counter.store(0, std::memory_order_release);
   allocate_partition_storage();
 }
@@ -90,6 +96,7 @@ Estimate<F>::Estimate(const Estimate<F> &that)
       active_part(nullptr),
       volume_group(that.volume_group),
       num_demean_groups(that.num_demean_groups),
+      demean_site(that.demean_site),
       exports(that.exports) {
   allocate_partition_storage();
 }
@@ -341,7 +348,8 @@ template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
     //   contributes one regressed-out / assumed-zero component). The means are retained for
     //   Recon to re-add to the reconstructed data.
     ssize_t rp_p = 0;
-    if (!volume_group.empty()) {
+    if (demean_site == demean_site_t::ESTIMATOR) {
+      assert(!volume_group.empty());
       MatrixType &means = means_partition[p];
       means.setZero(num_demean_groups, n);
       std::vector<ssize_t> counts(num_demean_groups, 0);

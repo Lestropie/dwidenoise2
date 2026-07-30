@@ -63,6 +63,24 @@ enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
 //   variance reduction without imprinting the sub-sampling grid or over-blurring the reconstruction.
 constexpr default_type default_aggregator_fwhm = 2.0;
 
+// Which component actually subtracts the group means, and hence which one is responsible for
+//   accounting for the rank they regress out. It is declared here, rather than alongside the other
+//   preconditioning enumerations, because it is the contract *between* the preconditioner and the
+//   Estimate/Recon classes: both sides key their own behaviour on it.
+// The rank removed is the same in either case -- Precondition::Preconditioner::partition_null_rank()
+//   -- because the same group count is regressed from each Casorati matrix that is decomposed. What
+//   differs is where it happens, and that must be stated rather than inferred from the partition
+//   count: reading a zero from a "how much rank did the preconditioner remove" query is
+//   indistinguishable from "no demeaning was performed at all" unless the caller already knows the
+//   partitioning state.
+// - NONE          : -demean none; no group means are regressed anywhere.
+// - PRECONDITIONER: subtracted once over the whole volume series by Preconditioner::operator(),
+//                     so the data reaching PCA are already mean-free.
+// - ESTIMATOR     : subtracted per partition inside Estimate/Recon, keeping each partition's mean
+//                     subtraction orthogonal to that partition's own decomposition. Used whenever
+//                     volume partitioning is active.
+enum class demean_site_t { NONE, PRECONDITIONER, ESTIMATOR };
+
 // These functions resolve dimensions of the matrix decomposition
 //   in the presence of precoditioning that make the data rank-deficient
 // - m = number of volumes

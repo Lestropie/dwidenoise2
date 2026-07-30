@@ -311,7 +311,10 @@ void run(Header &dwi,
       throw Exception("The selected noise level estimator does not support volume partitioning "
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
                       " partitions); choose a different -estimator or remove partitioning from the schedule");
-    preconditioner.set_partitioning_active(num_partitions > 1);
+    // With partitioning the demeaning moves into Estimate (per partition); impose the resolved site
+    //   before update_parameters() so the preconditioner skips the then-unused mean pass.
+    const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+    preconditioner.set_demean_site(demean_site);
     preconditioner.update_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
@@ -345,7 +348,8 @@ void run(Header &dwi,
                         iteration_exports,
                         num_partitions,
                         partitioning,
-                        volume_group);
+                        volume_group,
+                        demean_site);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
@@ -373,7 +377,8 @@ void run(Header &dwi,
     throw Exception("The selected noise level estimator does not support volume partitioning "
                     "(final schedule row requests " + str(num_partitions) +
                     " partitions); choose a different -estimator or remove partitioning from the schedule");
-  preconditioner.set_partitioning_active(num_partitions > 1);
+  const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+  preconditioner.set_demean_site(demean_site);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
   // -preconditioned exports the preconditioned data that are the input to PCA. The final
@@ -404,7 +409,8 @@ void run(Header &dwi,
                       final_exports,
                       num_partitions,
                       partitioning,
-                      volume_group);
+                      volume_group,
+                      demean_site);
 
   // Smooth the exported noise map if (and only if) the final schedule row requests it. The non-final
   //   iterations have their smoothing applied by condition_noise_map when propagating the estimate to
