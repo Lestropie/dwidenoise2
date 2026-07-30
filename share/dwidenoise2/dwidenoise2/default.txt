@@ -53,7 +53,7 @@
 #                          aspect ratio. Default: 1 (no partitioning). Mutually exclusive
 #                          with max_partition_size. The partition count is capped at half the
 #                          number of volumes available to the iteration (each partition must hold
-#                          at least two volumes); a larger request is reduced, with a warning.
+#                          at least two volumes); a larger request is an error, not silently reduced.
 #  - max_partition_size  : an alternative to "partitions": the maximum number of volumes
 #                          per partition, from which the partition count is derived as
 #                          ceil(num_volumes / max_partition_size) (after any temporal
@@ -82,7 +82,7 @@
 #                              n x n x n), "cuboid=<ratio>x" (auto-size to >= ratio*m voxels, e.g.
 #                              "cuboid=2x"), or bare "cuboid" (= "cuboid=2x").
 #                          The sliding-window kernel (shape and size) is configured entirely here;
-#                          there are no command-line kernel options. ("rank_fixed", an n=m+r kernel,
+#                          there are no command-line kernel options. ("rank_imposed", an n=m+r kernel,
 #                          also exists but is specific to dwidenoise2 -fixed_rank.)
 #                          Default (column omitted): "aspect=2.0". (Replaces the former
 #                          kernel_multiplier column; a larger patch is now requested directly via

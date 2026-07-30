@@ -15,13 +15,13 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/kernel/sphere_rank.h"
+#include "denoise/kernel/sphere_rank_adaptive.h"
 
 #include "interp/linear.h"
 
 namespace MR::Denoise::Kernel {
 
-Data SphereRank::operator()(const Voxel::index_type &pos) const {
+Data SphereRankAdaptive::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
   const Eigen::Vector3d realpos(voxel2real(pos));
   // For thread-safety

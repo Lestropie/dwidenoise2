@@ -1011,7 +1011,7 @@ void run() {
     // -fixed_rank selects the imposed (constant) fixed-rank estimator. A fixed rank does not yield
     //   a robust data-driven noise level, so its estimate is not used to refine the
     //   variance-stabilising transform: this is a single denoising pass, not an iterative schedule.
-    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_fixed"
+    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_imposed"
     //   kernel, which reads r from -fixed_rank).
     iterations = Schedule::load_bundled("dwidenoise2", "fixedrank", rank_density_supplied);
   } else if (vst_none) {
@@ -1068,9 +1068,9 @@ void run() {
     throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
                     "volumes (temporal_subsample = 1); sub-sample only the noise-estimation iterations");
   // -fixed_rank is a single denoising pass with the imposed fixed-rank estimator, sized to the
-  //   n = m + r ("rank_fixed") kernel. Its noise level estimate is not robust enough to drive the
+  //   n = m + r ("rank_imposed") kernel. Its noise level estimate is not robust enough to drive the
   //   variance-stabilising transform, so multi-row (iterative) schedules are disallowed; and every
-  //   row must use the "rank_fixed" kernel (the default bundled "fixedrank" schedule satisfies
+  //   row must use the "rank_imposed" kernel (the default bundled "fixedrank" schedule satisfies
   //   both when -fixed_rank is given without -schedule).
   if (fixed_rank) {
     if (iterations.size() > 1)
@@ -1079,15 +1079,15 @@ void run() {
                       "be combined with a multi-row schedule; use the bundled single-row \"fixedrank\" "
                       "schedule (the default when -fixed_rank is given without -schedule)");
     for (const auto &it : iterations)
-      if (it.kernel.type != Kernel::kernel_spec_type::RANK_FIXED)
-        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_fixed\" (n = m + r) "
+      if (it.kernel.type != Kernel::kernel_spec_type::RANK_IMPOSED)
+        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_imposed\" (n = m + r) "
                         "kernel; use the bundled \"fixedrank\" schedule (the default when -fixed_rank "
                         "is given without -schedule)");
   } else {
-    // The "rank_fixed" kernel (n = m + r) has no defined r without an imposed fixed rank.
+    // The "rank_imposed" kernel (n = m + r) has no defined r without an imposed fixed rank.
     for (const auto &it : iterations)
-      if (it.kernel.type == Kernel::kernel_spec_type::RANK_FIXED)
-        throw Exception("A schedule uses the \"rank_fixed\" kernel (n = m + r) but no fixed signal rank "
+      if (it.kernel.type == Kernel::kernel_spec_type::RANK_IMPOSED)
+        throw Exception("A schedule uses the \"rank_imposed\" kernel (n = m + r) but no fixed signal rank "
                         "was provided; supply -fixed_rank <value> (or use a different kernel)");
   }
   // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.

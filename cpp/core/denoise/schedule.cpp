@@ -101,7 +101,7 @@ noise_smooth_type parse_smooth_noise(const std::string &value, const size_t line
 //                                e.g. "cuboid=2x", distinguishing it from a voxel count);
 //       * "cuboid"             : shorthand for "cuboid=2x".
 //     Extent-vs-subsampling parity is validated at run time, not here.
-//   - "rank_fixed": spherical kernel of exactly n=m+r voxels for the imposed fixed-rank estimator;
+//   - "rank_imposed": spherical kernel of exactly n=m+r voxels for the imposed fixed-rank estimator;
 //                   r comes from dwidenoise2 -fixed_rank (so this kernel is meaningful only with
 //                   that option). No parameter.
 Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
@@ -199,14 +199,17 @@ Kernel::KernelSpec parse_kernel(const std::string &value, const size_t lineno) {
           throw Exception("Schedule file line " + str(lineno) + ": "
                           "cuboid extent values must be positive integers (got \"" + value + "\")");
     }
-  } else if (key == "rank_fixed") {
-    reject_arg("rank_fixed");
-    spec.type = Kernel::kernel_spec_type::RANK_FIXED;
+  } else if (key == "rank_imposed") {
+    reject_arg("rank_imposed");
+    spec.type = Kernel::kernel_spec_type::RANK_IMPOSED;
   } else {
-    throw Exception("Schedule file line " + str(lineno) + ": "
-                    "unrecognised kernel \"" + value + "\"; valid kernels are "
+    throw Exception("Schedule file line " + str(lineno) +
+                    ": "
+                    "unrecognised kernel \"" +
+                    value +
+                    "\"; valid kernels are "
                     "\"aspect=<ratio>\", \"rmse=<tolerance>\", \"rank\", \"radius=<mm>\", "
-                    "\"voxels=<count>\", \"cuboid\"[=<extent>] and \"rank_fixed\"");
+                    "\"voxels=<count>\", \"cuboid\"[=<extent>] and \"rank_imposed\"");
   }
   return spec;
 }
@@ -436,19 +439,19 @@ parse(const std::string &path, const std::string &command, const bool rank_densi
         iteration.spatial_subsample_ratios = parse_spatial_subsample(value, lineno);
       else if (key == "kernel") {
         iteration.kernel = parse_kernel(value, lineno);
-        // Per-command kernel admissibility. The "rank" and "rank_fixed" kernels size the
+        // Per-command kernel admissibility. The "rank" and "rank_imposed" kernels size the
         //   dwidenoise2 reconstruction patch from a signal rank; dwi2noise has no reconstruction
         //   pass and no -fixed_rank option, so neither is meaningful for it. Rejecting them here
-        //   also keeps the run-time "rank_fixed requires -fixed_rank" message (kernel.cpp), which
+        //   also keeps the run-time "rank_imposed requires -fixed_rank" message (kernel.cpp), which
         //   prescribes an option dwi2noise does not have, from ever reaching a dwi2noise user.
         if (!permit_rank_kernels && (iteration.kernel.type == Kernel::kernel_spec_type::RANK ||
-                                     iteration.kernel.type == Kernel::kernel_spec_type::RANK_FIXED))
+                                     iteration.kernel.type == Kernel::kernel_spec_type::RANK_IMPOSED))
           throw Exception("Schedule file \"" + path + "\" line " + str(lineno) +
                           ": "
                           "kernel \"" +
                           value + "\" is not permitted in a " + command +
                           " schedule; "
-                          "the \"rank\" and \"rank_fixed\" kernels size the dwidenoise2 reconstruction "
+                          "the \"rank\" and \"rank_imposed\" kernels size the dwidenoise2 reconstruction "
                           "patch from a signal rank and are used only by dwidenoise2");
       } else if (key == "smooth_noise")
         iteration.smooth_noiseout = parse_smooth_noise(value, lineno);
@@ -491,7 +494,7 @@ parse(const std::string &path, const std::string &command, const bool rank_densi
   //   first iteration has no prior iteration to obtain one from, so it may use such a kernel only
   //   when a density is supplied from outside the schedule (dwidenoise2 -rankpermm_in) -- which is
   //   precisely what the bundled "apriori" schedule is for. All rank-naive kernels (the default
-  //   "aspect", "radius", "voxels", "cuboid" and "rank_fixed") are permitted unconditionally.
+  //   "aspect", "radius", "voxels", "cuboid" and "rank_imposed") are permitted unconditionally.
   if (!rank_density_supplied && (result.front().kernel.type == Kernel::kernel_spec_type::RMSE ||
                                  result.front().kernel.type == Kernel::kernel_spec_type::RANK))
     throw Exception("Schedule file \"" + path +

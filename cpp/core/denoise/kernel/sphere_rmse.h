@@ -30,14 +30,14 @@ namespace MR::Denoise::Kernel {
 
 // Spherical kernel grown until the noise-level estimate is predicted to be precise enough.
 //
-// Unlike SphereRank (which stops at the square noise block n = m + r), this kernel keeps growing
+// Unlike SphereRankAdaptive (which stops at the square noise block n = m + r), this kernel keeps growing
 //   past the square block, while the noise block is too small / the Marchenko-Pastur bulk too wide
 //   to estimate sigma accurately, until the active estimator's predicted relative RMSE of the
 //   noise level (predicted_rmse(m, n, r), with r = rank_per_mm * radius) falls to the requested
 //   tolerance. Growth is floored at the square block (n >= m + r, so it is never smaller than
-//   SphereRank) and capped at cap_multiplier * m (the tolerance may be unattainable for very small
+//   SphereRankAdaptive) and capped at cap_multiplier * m (the tolerance may be unattainable for very small
 //   m / high rank density). For large m the square block already meets the tolerance, so the kernel
-//   stops at n = m + r and this reduces to SphereRank behaviour.
+//   stops at n = m + r and this reduces to SphereRankAdaptive behaviour.
 class SphereRMSE : public SphereBase {
 
 public:

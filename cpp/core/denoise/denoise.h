@@ -107,7 +107,7 @@ Image<float> condition_noise_map(Image<float> &in,
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
 // Per-voxel signal-rank density (estimated signal rank per mm of kernel radius), used to size the
-//   rank-adaptive spherical kernel (Kernel::SphereRank). Computed as
+//   rank-adaptive spherical kernel (Kernel::SphereRankAdaptive). Computed as
 //   rank_input / (num_partitions * max_dist), the scalar quantity accumulated across iterations in
 //   the dwidenoise2 / dwi2noise run() loops and (optionally) exported via -rankpermm_out. The
 //   returned scratch image shares the grid of max_dist (the subsample grid); voxels with a

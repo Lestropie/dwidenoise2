@@ -23,9 +23,9 @@
 #include "denoise/denoise.h"
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/cuboid.h"
-#include "denoise/kernel/sphere_radius.h"
-#include "denoise/kernel/sphere_rank.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/kernel/sphere_radius.h"
+#include "denoise/kernel/sphere_rank_adaptive.h"
 #include "denoise/kernel/sphere_rmse.h"
 #include "math/math.h"
 
@@ -196,17 +196,18 @@ std::shared_ptr<Base> make_kernel(const Header &H,
     if (!rank_per_mm.valid())
       throw Exception("A rank-adaptive (square noise block) kernel requires a signal-rank density "
                       "map from a prior iteration, but none is available");
-    kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing, num_null_components);
+    kernel = std::make_shared<SphereRankAdaptive>(
+        H, subsample_factors, rank_per_mm, volumes_for_sizing, num_null_components);
     break;
-  case kernel_spec_type::RANK_FIXED: {
+  case kernel_spec_type::RANK_IMPOSED: {
     // n = m + r spherical kernel for the imposed fixed-rank estimator; r is the fixed signal rank
     //   supplied via dwidenoise2 -fixed_rank (a constant, not a per-voxel data-driven density).
     auto opt = get_options("fixed_rank");
     if (opt.empty())
-      throw Exception("The \"rank_fixed\" kernel (n = m + r) is applicable only when a fixed signal "
+      throw Exception("The \"rank_imposed\" kernel (n = m + r) is applicable only when a fixed signal "
                       "rank is imposed via -fixed_rank");
     const ssize_t r = ssize_t(opt[0][0]);
-    // Static counterpart of the SphereRank criterion, with r a constant rather than a per-voxel
+    // Static counterpart of the SphereRankAdaptive criterion, with r a constant rather than a per-voxel
     //   density: n = (m' - z) + r.
     kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, volumes_nondegenerate + r);
     break;

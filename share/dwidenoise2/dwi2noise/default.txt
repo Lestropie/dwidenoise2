@@ -42,7 +42,7 @@
 #                          aspect ratio. Default: 1 (no partitioning). Mutually exclusive
 #                          with max_partition_size. The partition count is capped at half the
 #                          number of volumes available to the iteration (each partition must hold
-#                          at least two volumes); a larger request is reduced, with a warning.
+#                          at least two volumes); a larger request is an error, not silently reduced.
 #  - max_partition_size  : an alternative to "partitions": the maximum number of volumes
 #                          per partition, from which the partition count is derived as
 #                          ceil(num_volumes / max_partition_size) (after any temporal
@@ -64,7 +64,7 @@
 #                            (auto-size to >= ratio*m voxels, e.g. "cuboid=2x") or bare "cuboid"
 #                            (= "cuboid=2x").
 #                            Default (column omitted): "aspect=2.0". (Replaces the former
-#                            kernel_multiplier column.) The "rank" and "rank_fixed" kernels are for
+#                            kernel_multiplier column.) The "rank" and "rank_imposed" kernels are for
 #                            dwidenoise2 reconstruction only and are not used by dwi2noise; they are
 #                            rejected outright in a dwi2noise schedule, on any row.
 #  - smooth_noise        : whether to smooth the estimated noise map before it is
