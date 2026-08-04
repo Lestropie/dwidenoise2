@@ -114,8 +114,17 @@ void estimate(Image<T> &input,
   //   stabilised data is a unit-less correction factor; multiplying by the noise
   //   level used for stabilisation (sigma_{k-1}) yields the first-order refinement
   //   sigma_k = sigma_{k-1} * (post-VST sigma) (vst_plan.md section 5).
+  // Any exported lambda+ needs the same treatment, but by the SQUARE of the noise level: it is an
+  //   eigenvalue (sigma^2 * edge), not a noise level. Done here rather than only in the commands so
+  //   that dwi2noise's map, whose final iteration is this one, is on the native scale as
+  //   dwidenoise2's is; dwidenoise2's own reconstruction pass does not run through this function
+  //   and rescales its exports itself. A no-op for the iterations that export no lambda+ map.
   if (vst_image.valid()) {
-    ThreadedLoop(exports.noise_out).run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), exports.noise_out);
+    ThreadedLoop(exports.noise_out)
+        .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), exports.noise_out);
+    if (exports.lamplus.valid()) {
+      ThreadedLoop(exports.lamplus).run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), exports.lamplus);
+    }
   }
 }
 

@@ -104,13 +104,23 @@ namespace MR::Denoise::Precondition {
 //   background phase, its slight bias toward over-smoothing is the safe direction (it will
 //   not fit tissue contrast or noise into the phase).
 //
-// Noise-map convention (verified; see dwidenoise2_dephase.md section 3).
+// Noise-map convention (see dwidenoise2_dephase.md section 3).
 //   dwidenoise2's noise level map holds, per voxel, exactly Pizzolato's per-component
 //   (real == imaginary) noise standard deviation sigma(x,y), in the native complex intensity
 //   units in which APC operates. The mapping is the identity: no sqrt(2) or 1/2 rescaling.
 //   APC must run on the *native* complex data with spatially-varying weighting; it must NOT
 //   run on variance-stabilised data (the phase is scale-invariant, so nothing is gained,
 //   while dividing by sigma(x,y) would inject spurious sigma-gradients into the TV term).
+//
+//   That contract is now guaranteed by construction: the eigenvalues from which the map is derived
+//   are divided by the number of channels each Casorati entry carries as soon as they are computed
+//   (Denoise::casorati_entry_channels(), Estimate::to_per_channel()). It previously was not. The
+//   map handed here for complex data was the aggregate level across the two channels, larger by
+//   sqrt(2), which inflated both the eq. 7 seed and the eq. 11 residual target and so over-smoothed
+//   the phase. It also put the two calibration branches of solve_plane() on different scales, since
+//   estimate_sigma_mad() below has always returned a per-component sigma: the first iteration, which
+//   has no map and self-calibrates, regularised more weakly than every iteration after it. Both are
+//   fixed, and testing/unit_tests/noise_convention.cpp asserts the two branches now agree.
 //
 // ---------------------------------------------------------------------------------------
 // Other prospective techniques for solving the background phase given a noise-map estimate.

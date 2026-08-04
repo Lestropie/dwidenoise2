@@ -89,9 +89,18 @@ void usage() {
     " the relevant fields seldom survive conversion from DICOM,"
     " and processing applied after that conversion leaves no trace in the image header at all."
 
-  + "Note that on complex input data,"
-    " the output will be the total noise level across real and imaginary channels,"
-    " so a scale factor sqrt(2) applies."
+  + "The estimated noise level is always that of a single real-valued channel,"
+    " for complex input data as much as for magnitude."
+    " The value estimated from a complex series is therefore that which would be estimated"
+    " from the corresponding magnitude series at high SNR,"
+    " and the two are interchangeable:"
+    " a noise level map estimated from one may be used to denoise the other"
+    " (via the \"-noise_in\" option of the dwidenoise2 command) without rescaling."
+    " Note that this differs from the \"dwidenoise\" command in MRtrix3,"
+    " whose noise map for complex input data is instead"
+    " the aggregate level across the real and imaginary channels,"
+    " and is therefore larger by a factor of sqrt(2);"
+    " such a map must be divided by sqrt(2) before being supplied to this software."
 
   + "By default, the noise map estimate is derived through an iterative multi-resolution pyramid."
     " In the earlier iterations, there are fewer PCAs performed"
@@ -206,7 +215,10 @@ void usage() {
            "provide a pre-estimated noise level (scalar value or 3D image) to seed the"
            " variance-stabilising transform for the first iteration of the schedule;"
            " the schedule then refines the estimate (for a multi-stage schedule the supplied"
-           " image is only an initial seed, not the final estimated output)")
+           " image is only an initial seed, not the final estimated output)."
+           " The value or map must be the noise level of a single real-valued channel,"
+           " which is the convention in which this command's own output is expressed"
+           " (see the description above)")
     + Argument("value/image").type_float(0.0).type_image_in()
   + Schedule::schedule_option
   + precondition_options(false)
@@ -219,7 +231,9 @@ void usage() {
            "The (non-zero) rank of the PCA decomposition prior to any noise level estimation")
     + Argument("image").type_image_out()
   + Option("lamplus",
-           "The estimated upper bound of the noise portion of the eigenspectrum (\"lambda-plus\")")
+           "The estimated upper bound of the noise portion of the eigenspectrum (\"lambda-plus\"). "
+           "This is an eigenvalue, and is therefore in units of the SQUARE of the noise level"
+           " reported by -noise_out; as for that map, the noise level in question is per-channel")
     + Argument("image").type_image_out()
   + Option("rank_input",
            "The estimated rank of the input data for each denoising patch")

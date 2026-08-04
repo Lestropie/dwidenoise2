@@ -18,6 +18,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <cassert>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,23 @@ constexpr ssize_t default_spatial_subsample_ratio = 2;
 
 using eigenvalues_type = Eigen::Matrix<double, Eigen::Dynamic, 1>;
 using vector_type = Eigen::Array<double, Eigen::Dynamic, 1>;
+
+// Number of statistically independent real Gaussian noise components carried by one entry of the
+//   Casorati matrix: one for real-valued input, two (real and imaginary) for complex.
+//
+// A complex patch's eigenvalues are accordingly twice those a real patch at the same *per-channel*
+//   noise level would produce, since E[|x|^2] == 2 sigma^2 where the real and imaginary parts each
+//   carry variance sigma^2. Dividing the eigenvalues by this factor as soon as they are computed
+//   (Estimate::to_per_channel) is what makes every eigenvalue -- and hence every noise level derived
+//   from one, anywhere downstream -- a per-channel quantity, so that a scalar noise level means one
+//   thing whatever the type of the input data. Nothing downstream undoes it, and nothing needs to:
+//   the eigenspectrum filter depends only on the ratio of an eigenvalue to sigma^2, and
+//   reconstruction is projected through the singular values / eigenvectors rather than through the
+//   eigenvalues.
+//
+// This is the point at which dwidenoise2 departs from MRtrix3 dwidenoise, whose noise level for
+//   complex input is the aggregate across the two channels and is therefore larger by sqrt(2).
+template <typename F> constexpr double casorati_entry_channels() { return is_complex<F>::value ? 2.0 : 1.0; }
 
 extern const char *patent_description;
 extern const char *first_step_description;
@@ -144,7 +162,7 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 //   (NaN->0 and padded) so it can be safely interpolated to size the reconstruction kernel.
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
-// Multiply a 3-D map in place by the noise level (variance-stabilising-transform scale)
+// Multiply a 3-D map in place by a power of the noise level (variance-stabilising-transform scale)
 //   interpolated at each voxel's scanner position. When the data were stabilised with a noise
 //   map, an estimate derived on the stabilised data is a unit-less correction factor; multiplying
 //   by the noise level recovers the first-order refinement on the native scale (see
@@ -152,14 +170,25 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
 //   copies the functor per thread, giving each thread its own interpolator; the map being scaled
 //   is the looped image, so writes are voxel-disjoint. "grid" is the header defining the map's
 //   voxel-to-scanner transform (the sub-sample grid).
+//
+// "power" is the power of sigma in which the map being rescaled is expressed, and must be stated by
+//   every caller rather than assumed: a noise level map carries sigma (power 1), whereas a map of
+//   eigenvalue units carries sigma^2 (power 2). Estimator::Result::lamplus is sigma^2 * edge(), so
+//   removing the effect of the stabilisation from an exported lambda+ map requires the square of the
+//   noise level; using the first power leaves a map that is neither the stabilised quantity nor the
+//   native one, and does so silently, differing only in magnitude.
 class NoiseMapVSTRescaleFunctor {
 public:
-  NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid) : vst_interp(vst_image), transform(grid) {}
+  NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid, const int power)
+      : vst_interp(vst_image), transform(grid), power(power) {
+    assert(power == 1 || power == 2);
+  }
   void operator()(Image<float> &map);
 
 private:
   Interp::Cubic<Image<float>> vst_interp;
   Transform transform;
+  int power;
 };
 
 } // namespace MR::Denoise

@@ -188,6 +188,17 @@ protected:
   //   Returns false if any partition's decomposition failed to converge.
   bool compute_partitions(const ssize_t n);
 
+  // Bring the leading "count" entries of a freshly-computed eigenvalue block onto the per-channel
+  //   scale, dividing by the number of real noise components each Casorati matrix entry carries
+  //   (casorati_entry_channels<F>(): one for real input, two for complex).
+  // This is the single point in the software at which the aggregate / per-channel distinction is
+  //   resolved. Everything downstream of it -- the estimators, the eigenspectrum filter, the
+  //   exported noise level and eigenspectra, the variance-stabilising transform it parameterises,
+  //   and adaptive phase correction -- is per-channel by construction, so no consumer needs to know
+  //   whether the data were complex. Both decomposition paths reach it, which is why it is called
+  //   after the decomp_type switch rather than within either branch.
+  static void to_per_channel(eigenvalues_type &s, const ssize_t count);
+
   // Export images
   // Note: One instance created per thread,
   //   so that when possible output image data can be written without mutex-locking

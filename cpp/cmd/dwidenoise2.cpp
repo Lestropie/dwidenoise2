@@ -355,12 +355,21 @@ void usage() {
   + Option("noise_out",
            "The output noise map,"
            " i.e., the estimated noise level 'sigma' in the data. "
-           "Note that on complex input data,"
-           " this will be the total noise level across real and imaginary channels,"
-           " so a scale factor sqrt(2) applies.")
+           "This is always the noise level of a single real-valued channel,"
+           " for complex input data as much as for magnitude:"
+           " the value estimated from a complex series is that which would be estimated"
+           " from the corresponding magnitude series at high SNR,"
+           " and the map may therefore be exchanged freely between the two"
+           " (via -noise_in) without rescaling. "
+           "Note that this differs from the \"dwidenoise\" command in MRtrix3,"
+           " whose noise map for complex input data is instead"
+           " the aggregate level across the real and imaginary channels,"
+           " and is therefore larger by a factor of sqrt(2).")
     + Argument("image").type_image_out()
   + Option("lamplus",
-           "The estimated upper bound of the noise portion of the eigenspectrum (\"lambda-plus\")")
+           "The estimated upper bound of the noise portion of the eigenspectrum (\"lambda-plus\"). "
+           "This is an eigenvalue, and is therefore in units of the SQUARE of the noise level"
+           " reported by -noise_out; as for that map, the noise level in question is per-channel")
     + Argument("image").type_image_out()
   + Option("rank_pcanonzero",
            "The (non-zero) rank of the PCA decomposition for each patch absent any denoising")
@@ -417,7 +426,11 @@ void usage() {
     + Argument("file").type_file_out()
   + Option("residual_statistics",
            "export images containing statistics of the residuals between input and denoised data,"
-          " with image paths in order representing: mean, standard deviation, maxabs")
+          " with image paths in order representing: mean, standard deviation, maxabs."
+          " The standard deviation is that of a single real-valued channel,"
+          " matching the convention of the -noise_out map,"
+          " and is therefore directly comparable to it"
+          " wherever the residual consists of noise alone")
     + Argument("mean_image").type_image_out()
     + Argument("std_image").type_image_out()
     + Argument("maxabs_image").type_image_out()
@@ -557,19 +570,41 @@ private:
   float max_rank;
 };
 
+// Second-moment increment of Welford's accumulation, for real and complex data alike.
+//
+// The product must be CONJUGATED. For complex T the unconjugated sum(x - xbar)^2 is the
+//   pseudo-variance, whose expectation vanishes for circularly-symmetric noise: accumulating it and
+//   then taking its modulus reports a residual standard deviation of approximately zero however
+//   large the residuals actually are. The conjugated form is the sum of squared moduli, which is
+//   what a variance is. For real T the conjugation is the identity and this reduces exactly to
+//   delta * delta2.
+template <typename T> default_type welford_increment(const T &delta, const T &delta2) {
+  if constexpr (is_complex<T>::value)
+    return (default_type(delta.real()) * default_type(delta2.real())) +
+           (default_type(delta.imag()) * default_type(delta2.imag()));
+  else
+    return default_type(delta) * default_type(delta2);
+}
+
 // Per-voxel residual summary statistics. ThreadedLoop copies the functor per thread, so each thread
 //   holds its own (private) Image accessors for the 4-D input and denoised output. At each spatial
 //   voxel the functor runs an inner Welford accumulation across all supra-spatial (volume) axes, so
 //   the mean and variance are aggregated per voxel over that voxel's own volumes only: the sample
 //   count is the number of volumes at the voxel, not the whole-image element count. maxabs is the
 //   largest residual magnitude across that voxel's volumes.
+//
+// The exported standard deviation is PER CHANNEL, matching the convention of the noise level map
+//   (see Denoise::casorati_entry_channels()): for complex data the summed squared moduli carry both
+//   the real and the imaginary channel, so the mean square is divided by two. The residual standard
+//   deviation of a voxel whose residual is pure noise is then directly comparable to that voxel's
+//   value in the -noise_out map, whatever the type of the input data.
 template <typename T> class ResidualStatsFunctor {
 public:
   ResidualStatsFunctor(const Image<T> &input, const Image<T> &output) : input(input), output(output) {}
   void operator()(Image<T> &residuals_mean, Image<float> &residuals_std, Image<float> &residuals_maxabs) {
     assign_pos_of(residuals_mean, 0, 3).to(input, output);
     T mean(0.0);
-    T m2(0.0);
+    default_type m2 = 0.0;
     default_type maxabs = 0.0;
     size_t count = 0;
     for (auto l = Loop(3)(input, output); l; ++l) {
@@ -578,11 +613,11 @@ public:
       const T delta = diff - mean;
       mean += T(delta / default_type(count));
       const T delta2 = diff - mean;
-      m2 += delta * delta2;
+      m2 += welford_increment(delta, delta2);
       maxabs = std::max(maxabs, default_type(std::abs(diff)));
     }
     residuals_mean.value() = mean;
-    residuals_std.value() = std::sqrt(std::abs(m2) / default_type(count));
+    residuals_std.value() = std::sqrt(m2 / (default_type(count) * Denoise::casorati_entry_channels<T>()));
     residuals_maxabs.value() = maxabs;
   }
 
@@ -898,14 +933,16 @@ void run(Header &dwi,
   if (vst_image.valid()) {
     if (final_exports.noise_out.valid()) {
       ThreadedLoop(final_exports.noise_out)
-          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), final_exports.noise_out);
+          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), final_exports.noise_out);
     }
     if (final_exports.lamplus.valid()) {
       // Note: each lamplus voxel is scaled by the noise level interpolated at *its own* scanner
       //   position (the looped image's index), correcting a prior copy-paste that sampled
       //   final_exports.noise_out's index here.
+      // The SQUARE of the noise level: lambda+ is an eigenvalue (sigma^2 * edge), not a noise
+      //   level, so the stabilisation of the data is removed from it by sigma^2 and not by sigma.
       ThreadedLoop(final_exports.lamplus)
-          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), final_exports.lamplus);
+          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), final_exports.lamplus);
     }
   }
 

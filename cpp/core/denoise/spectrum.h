@@ -58,6 +58,13 @@ namespace MR::Denoise {
 //   Estimator::Base needs only two overloads distinguished by arity of partitioning, each
 //   taking two arguments.
 //
+// The eigenvalues are on the PER-CHANNEL scale, whatever the type of the input data: for complex
+//   input they have already been halved by Estimate::to_per_channel(), so that E[normalized(i)] is
+//   the variance of one real noise channel rather than that of a whole complex sample. Every noise
+//   level derived from them therefore has the same meaning for magnitude and complex data, which is
+//   what permits one noise map to be estimated from either and consumed by the other (and what
+//   distinguishes this software from MRtrix3 dwidenoise; see casorati_entry_channels()).
+//
 // The eigenvalues are held as a non-owning view of externally-managed storage (in practice the
 //   reusable per-patch buffers of Denoise::Estimate); that storage must outlive the Spectrum,
 //   and must not be resized while a Spectrum referencing it is alive. It may legitimately be
@@ -93,10 +100,10 @@ public:
   double edge() const { return edge_; }
 
   // Eigenvalue i on the normalised scale lambda = s[i] / qnz. This removes the dependence on the
-  //   long dimension -- E[lambda] = sigma^2 whatever beta may be -- and is the scale on which
-  //   noise levels and signal/noise boundaries are expressed. It is necessary but not sufficient
-  //   for comparing partitions: two partitions at one noise level still have differently-shaped
-  //   bulks, so equal lambda does not mean equal significance.
+  //   long dimension -- E[lambda] = sigma^2 whatever beta may be, with sigma the per-channel noise
+  //   level -- and is the scale on which noise levels and signal/noise boundaries are expressed. It
+  //   is necessary but not sufficient for comparing partitions: two partitions at one noise level
+  //   still have differently-shaped bulks, so equal lambda does not mean equal significance.
   double normalized(const ssize_t i) const { return s[i] / double(qnz_); }
 
   // Eigenvalue i as a fraction of this partition's own upper bulk edge, z = lambda / edge(). This
@@ -125,9 +132,11 @@ public:
   double raw_sum(const ssize_t first, const ssize_t count) const;
 
   // Degrees of freedom carried by "count" of this partition's noise components: under Gaussian
-  //   noise of variance sigma^2 each carries qnz, so the sum of count raw eigenvalues has
-  //   expectation sigma^2 * dof(count). Pairing raw_sum() with dof() across partitions weights
-  //   each by its information content (its number of matrix entries), which is the
+  //   noise of per-channel variance sigma^2 each carries qnz, so the sum of count raw eigenvalues
+  //   has expectation sigma^2 * dof(count). That the relation holds for complex data too is a
+  //   consequence of the per-channel rescaling described above; what the rescaling does not alter
+  //   is the *fluctuation* of that sum, which is smaller for complex entries than for real ones. Pairing raw_sum() with
+  //   dof() across partitions weights each by its information content (its number of matrix entries), which is the
   //   minimum-variance combination; averaging normalised eigenvalues instead weights by component
   //   count alone, and the two agree only when every qnz is equal.
   double dof(const ssize_t count) const { return double(count) * double(qnz_); }
