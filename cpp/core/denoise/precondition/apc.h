@@ -36,9 +36,9 @@ namespace MR::Denoise::Precondition {
 //   *empirical* complex data at every noise-estimation iteration, with the regularisation
 //   strength driven by the current noise level map. This class implements that estimation.
 //   The first iteration has no noise map yet: rather than falling back to a fixed Hann-window
-//   phase, the estimator self-calibrates a single global noise level from the data (robust
-//   MAD of finite differences) and applies uniform spatial weighting, so the same APC solver
-//   is used throughout. The phase is estimated per 2-D in-slice plane of each volume
+//   phase, the estimator self-calibrates a single global noise level from the data (a
+//   blockwise-robust root mean square of finite differences) and applies uniform spatial
+//   weighting, so the same APC solver is used throughout. The phase is estimated per 2-D in-slice plane of each volume
 //   (diffusion MRI is a stack of 2-D acquisitions; phase coherence between slices is not
 //   assumed).
 //
@@ -123,7 +123,7 @@ namespace MR::Denoise::Precondition {
 //   map handed here for complex data was the aggregate level across the two channels, larger by
 //   sqrt(2), which inflated both the eq. 7 seed and the eq. 11 residual target and so over-smoothed
 //   the phase. It also put the two calibration branches of solve_plane() on different scales, since
-//   estimate_sigma_mad() below has always returned a per-component sigma: the first iteration, which
+//   the self-calibration has always returned a per-component sigma: the first iteration, which
 //   has no map and self-calibrates, regularised more weakly than every iteration after it. Both are
 //   fixed, and testing/unit_tests/noise_convention.cpp asserts the two branches now agree.
 //
@@ -305,25 +305,24 @@ public:
     //   order 10% in either direction from sources unrelated to the phase. R = 1 is the target
     //   but agreement to a few percent is the resolution of the measurement, not exactness.
     //
-    // KNOWN LIMITATION, and the reason this is calibrated only for schedules that build a noise
-    //   map. It is calibrated where solve_plane() takes its sigmabar from the noise level map.
-    //   Where no map exists -- the first iteration of any schedule, and *every* solve under a
-    //   single-row schedule (-vst_method none, -fixed_rank, apriori) -- sigmabar instead comes
-    //   from estimate_sigma_mad(), and on data with strong parallel-imaging noise amplification
-    //   the two are not the same quantity at all. On one slice of the reference dataset the map
-    //   branch yields sqrt(mean(sigma^2)) = 130 while the MAD branch yields 35 at native
-    //   resolution and 24 on the coarse grid a cold solve actually uses: a factor of 3.7 to 5.5.
-    //   They differ because the map is heavily right-skewed by the g-factor (its *median* is 30,
-    //   which the MAD branch reproduces well) and the discrepancy criterion needs the RMS, not a
-    //   robust centre. A self-calibrated solve is therefore regularised several-fold too weakly,
-    //   which discrepancy_scale near unity cannot offset: under -vst_method none, APC returns a
-    //   noise level of ~132 against 165 for -demodulate hann, 181 for the magnitude pathway and
-    //   199 for -demodulate linear, at every scale and budget tried. Under the default
-    //   multi-iteration schedules this is masked -- the self-calibrated solve is only the
-    //   bootstrap pass, and the map-driven passes that follow correct it -- which is why the
-    //   figures above are clean there. Fixing it means making estimate_sigma_mad() estimate the
-    //   same functional the map branch does (an RMS over the plane, not a robust centre), after
-    //   which discrepancy_scale should be re-derived.
+    // WHERE THIS IS CALIBRATED, AND WHAT REMAINS UNCALIBRATED. The table above was measured where
+    //   solve_plane() takes its sigmabar from the noise level map. Where no map exists -- the first
+    //   iteration of any schedule, and *every* solve under a single-row schedule (-vst_method none,
+    //   -fixed_rank, apriori) -- sigmabar is self-calibrated from the plane's own data instead.
+    //   Both branches estimate the same functional, the root mean square of the per-voxel noise
+    //   level (see estimate_sigma_rms() in apc.cpp), so the two are on one scale. What the
+    //   self-calibration cannot do is see past the anatomy where tissue contrast within a
+    //   neighbourhood exceeds the noise, which on low b-value images it does: on the reference slab
+    //   the self-calibrated level runs about 1.8 times the map's RMS at native resolution and 3.7
+    //   times it on the coarse grid a cold solve uses. That errs toward a smoother phase, which is
+    //   the harmless direction -- an over-smoothed phase approaches the rigid-phase limit, while an
+    //   under-smoothed one absorbs noise into the phase and biases the estimated level down.
+    //
+    //   End to end on that slab at sigma_add = 149: the single-pass regime (-vst_method none)
+    //   reaches R = 1.02 with an estimated noise level of 183, against 166 for -demodulate hann,
+    //   181 for the magnitude pathway and 200 for -demodulate linear; the default multi-iteration
+    //   schedule, where the self-calibrated solve is only the bootstrap pass and the map-driven
+    //   passes that follow correct it, reaches R = 0.96.
     double discrepancy_scale = 1.05;
     // Chambolle-Pock primal-dual iterations run between successive lambda updates. The
     //   solver is warm-started across lambda updates, so this need not fully converge each

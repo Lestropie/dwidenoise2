@@ -33,46 +33,116 @@
 namespace MR::Denoise::Precondition {
 
 namespace {
-// Robust global per-component noise standard deviation from the finite differences of a
-//   complex plane (Immerkaer 1996; Donoho & Johnstone MAD). The difference of two i.i.d.
-//   N(0,sigma^2) samples is N(0, 2*sigma^2); the median of |differences| (a robust proxy for
-//   the MAD, as the noise differences are ~zero-median) divided by 0.6745 estimates that
-//   difference's std, and dividing by sqrt(2) recovers the per-component sigma. Sparse tissue
-//   edges are large-value outliers the median ignores. Used only on the first iteration (or a
-//   slice with no usable noise map) to calibrate the discrepancy criterion in the absence of a
-//   noise level estimate. Returns -1 if no differences are available (degenerate slice).
-double estimate_sigma_mad(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
+// Global per-component noise standard deviation of a complex plane, estimated from the plane's
+//   own finite differences. Used where no usable noise level map is available, to calibrate the
+//   discrepancy criterion below.
+//
+// The functional. With uniform fidelity weights the criterion targets a residual energy of
+//   Npix * sigmabar^2, which is the plane's noise energy sum_x sigma^2(x) only if sigmabar^2 is
+//   the *mean* of sigma^2. So what has to be estimated is the root mean square of the per-voxel
+//   noise level -- exactly what the noise-map branch of solve_plane() computes -- and not a robust
+//   centre of it. The two are the same only for stationary noise: parallel-imaging amplification
+//   makes sigma(x) strongly right-skewed (on 3T 64-channel diffusion data used to develop this,
+//   sigma spans ~6 to ~400 within one slice, with an RMS four times its own median), and reading
+//   the criterion off a robust centre then regularises several-fold too weakly.
+//
+// The estimator. The plane is partitioned into small blocks; a robust scale is estimated within
+//   each; the blocks are then combined in quadrature, which is the mean of sigma^2 the noise map
+//   branch forms. Within a block the noise level is near-constant, so the classical robust scale
+//   applies (Immerkaer 1996; Donoho & Johnstone MAD): the difference of two i.i.d. N(0,sigma^2)
+//   samples is N(0, 2*sigma^2), so the median of |differences| -- a robust proxy for the MAD, the
+//   noise differences having ~zero median -- divided by 0.6745 = Phi^{-1}(0.75) and by sqrt(2)
+//   recovers the per-component sigma, ignoring the sparse large differences of a tissue edge. A
+//   plain root mean square of every difference in the plane estimates the same functional but has
+//   no resistance to edges whatsoever, and a globally trimmed second moment is worse still: its
+//   trimming threshold is set by the bulk of the distribution and discards the high-sigma minority
+//   that the RMS is made of.
+//
+// Block size trades the two error sources against each other: large blocks span a varying noise
+//   level, so the block's robust centre falls below its own RMS; small blocks make the median
+//   itself noisy. Eight voxels yields 224 differences per block and was measured to be unbiased
+//   on synthetic planes whose noise level varies over a realistic range.
+//
+// Limitation. Where anatomical texture within a block genuinely exceeds the noise -- low b-value
+//   diffusion images, in which tissue contrast is strong and every local difference is
+//   signal-dominated -- no estimator of this form can separate the two, and the noise level is
+//   overestimated. That errs toward a smoother phase, which is the harmless direction: an
+//   over-smoothed phase approaches the rigid-phase limit, whereas an under-smoothed one absorbs
+//   noise into the phase and biases the noise level estimate down.
+//
+// Returns -1 if no usable differences are available (degenerate plane).
+double estimate_sigma_rms(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
                           const Eigen::Ref<const Eigen::ArrayXXd> &fi) {
   const ssize_t Nx = fr.rows();
   const ssize_t Ny = fr.cols();
+  constexpr ssize_t block = 8;
+  // Whole blocks only; any remainder is absorbed into the last block of each axis, so a block is
+  //   between "block" and 2*block-1 voxels wide and a plane smaller than that is one block.
+  const ssize_t nbx = std::max<ssize_t>(1, Nx / block);
+  const ssize_t nby = std::max<ssize_t>(1, Ny / block);
   std::vector<double> d;
-  d.reserve(size_t(std::max<ssize_t>(0, 2 * (Nx - 1) * Ny) + std::max<ssize_t>(0, 2 * Nx * (Ny - 1))));
-  for (ssize_t j = 0; j != Ny; ++j)
-    for (ssize_t i = 0; i != Nx; ++i) {
-      if (i + 1 < Nx) {
-        d.push_back(std::abs(fr(i + 1, j) - fr(i, j)));
-        d.push_back(std::abs(fi(i + 1, j) - fi(i, j)));
-      }
-      if (j + 1 < Ny) {
-        d.push_back(std::abs(fr(i, j + 1) - fr(i, j)));
-        d.push_back(std::abs(fi(i, j + 1) - fi(i, j)));
-      }
+  std::vector<double> sigma_block;
+  std::vector<ssize_t> npix_block;
+  sigma_block.reserve(size_t(nbx * nby));
+  npix_block.reserve(size_t(nbx * nby));
+  for (ssize_t bj = 0; bj != nby; ++bj) {
+    const ssize_t j0 = bj * block;
+    const ssize_t j1 = (bj + 1 == nby) ? Ny : (bj + 1) * block;
+    for (ssize_t bi = 0; bi != nbx; ++bi) {
+      const ssize_t i0 = bi * block;
+      const ssize_t i1 = (bi + 1 == nbx) ? Nx : (bi + 1) * block;
+      d.clear();
+      // Differences are taken within a block only: one that straddled a block boundary would
+      //   couple two different local noise levels.
+      for (ssize_t j = j0; j != j1; ++j)
+        for (ssize_t i = i0; i != i1; ++i) {
+          if (i + 1 != i1) {
+            d.push_back(std::abs(fr(i + 1, j) - fr(i, j)));
+            d.push_back(std::abs(fi(i + 1, j) - fi(i, j)));
+          }
+          if (j + 1 != j1) {
+            d.push_back(std::abs(fr(i, j + 1) - fr(i, j)));
+            d.push_back(std::abs(fi(i, j + 1) - fi(i, j)));
+          }
+        }
+      if (d.empty())
+        continue;
+      const size_t mid = d.size() / 2;
+      std::nth_element(d.begin(), d.begin() + mid, d.end());
+      sigma_block.push_back(d[mid] / 0.6744897501960817 / Math::sqrt2);
+      npix_block.push_back((i1 - i0) * (j1 - j0));
     }
-  if (d.empty())
+  }
+  if (sigma_block.empty())
     return -1.0;
-  const size_t mid = d.size() / 2;
-  std::nth_element(d.begin(), d.begin() + mid, d.end());
-  const double median_abs_diff = d[mid];
-  return median_abs_diff / 0.6744897501960817 / Math::sqrt2; // 0.6745 = Phi^{-1}(0.75)
+  // Blocks carrying no measurable noise (a zero-padded or otherwise empty corner of the field of
+  //   view) are excluded rather than averaged in as zeros, matching the noise map branch, which
+  //   forms its mean over voxels whose level exceeds 1e-3 of the plane's maximum.
+  const double floor = 1e-3 * (*std::max_element(sigma_block.begin(), sigma_block.end()));
+  double sum_sigma2 = 0.0;
+  ssize_t sum_npix = 0;
+  for (size_t b = 0; b != sigma_block.size(); ++b) {
+    if (!(sigma_block[b] > floor))
+      continue;
+    sum_sigma2 += double(npix_block[b]) * Math::pow2(sigma_block[b]);
+    sum_npix += npix_block[b];
+  }
+  if (sum_npix == 0)
+    return -1.0;
+  return std::sqrt(sum_sigma2 / double(sum_npix));
 }
 
 // 2x box-downsample of a plane (2x2 average, clamped at the far edge for odd sizes). The first
 //   iteration solves the phase on the resulting coarse grid: a background phase is low-bandwidth,
 //   so decimation is near-lossless, at ~1/4 the voxel count (hence ~1/4 the per-sweep cost). The
 //   coarse-grid noise level after 2x2 averaging is lower than native, but the first pass
-//   self-calibrates its noise level from that same coarse data (robust MAD), so the discrepancy
-//   criterion stays self-consistent; the coarse solve is only a bootstrap the later native passes
-//   refine.
+//   self-calibrates its noise level from that same coarse data, so the discrepancy criterion stays
+//   self-consistent. Exactly so, for the root mean square the self-calibration estimates: averaging
+//   four independent voxels gives a coarse variance of one quarter their mean variance, so the RMS
+//   over the coarse grid is exactly half the RMS over the native one. Averaging does not, however,
+//   attenuate the anatomical structure that the estimate has to see past, so the coarse grid is the
+//   harder of the two to self-calibrate on; the coarse solve is only a bootstrap the later native
+//   passes refine.
 void downsample2x(const Eigen::Ref<const Eigen::ArrayXXd> &src, Eigen::Ref<Eigen::ArrayXXd> dst) {
   const ssize_t Nx = src.rows();
   const ssize_t Ny = src.cols();
@@ -152,9 +222,10 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   //      weight, but excluded from the statistics -- so the returned phase is defined
   //      everywhere.
   //  (b) self-calibrated: too few (or, on the first iteration, no) local estimates. A single
-  //      global per-component noise level is estimated from the data (robust MAD of finite
-  //      differences) and uniform weighting is applied over the whole slice. This is what lets
-  //      APC run from the first iteration without a Hann bootstrap.
+  //      global per-component noise level is estimated from the data (blockwise-robust root mean
+  //      square of finite differences, on the same functional case (a) forms from the map) and
+  //      uniform weighting is applied over the whole slice. This is what lets APC run from the
+  //      first iteration without a Hann bootstrap.
   double sigma_max = 0.0;
   for (ssize_t j = 0; j != Ny; ++j)
     for (ssize_t i = 0; i != Nx; ++i) {
@@ -200,7 +271,7 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
         }
       }
   } else {
-    const double sigma_hat = estimate_sigma_mad(fr, fi);
+    const double sigma_hat = estimate_sigma_rms(fr, fi);
     if (!(sigma_hat > 0.0))
       return false; // fully degenerate slice (constant / empty): keep the incoming phase
     sigmabar2 = Math::pow2(sigma_hat);
@@ -457,7 +528,7 @@ public:
       fr_c.resize(cNx, cNy);
       fi_c.resize(cNx, cNy);
       // A cold solve self-calibrates its noise level from the (coarse) data, so no map is consumed
-      //   here; all-unknown sigma routes solve_plane to its MAD self-calibration branch.
+      //   here; all-unknown sigma routes solve_plane to its self-calibration branch.
       sig_c = Eigen::ArrayXXd::Constant(cNx, cNy, -1.0);
       pr_c.resize(cNx, cNy);
       pi_c.resize(cNx, cNy);
@@ -544,7 +615,7 @@ private:
   //   is solved cold, but the noise map its neighbours enjoy is equally valid for it, and there is
   //   no reason to discard it in favour of the self-calibrated global level. Without a map (the
   //   very first pass of a schedule with no -noise_in), all-unknown sigma routes solve_plane to its
-  //   MAD self-calibration.
+  //   self-calibration branch.
   void gather_sigma(const size_t ax, const size_t ay) {
     if (!have_sigma) {
       sig.setConstant(-1.0);
