@@ -656,7 +656,8 @@ public:
              Image<cfloat> &phase,
              Image<uint32_t> &serialise,
              const std::vector<AdaptivePhaseEstimator::VolumePlan> &plan,
-             std::vector<double> *lambda_store)
+             std::vector<double> *lambda_store,
+             ssize_t cascade_depth)
       : estimator(&estimator),
         outer_axes(outer_axes),
         inner_axes(inner_axes),
@@ -677,26 +678,36 @@ public:
         sig(Nx, Ny),
         phase_r(Nx, Ny),
         phase_i(Nx, Ny) {
-    // Coarse-grid scratch, allocated once per thread if *any* planned volume is solved cold (every
-    //   cold solve begins on the 2x-downsampled grid with its phase upsampled: a background phase
-    //   is smooth, so decimation is near-lossless at ~1/4 the cost). Disabled for tiny planes (no
-    //   benefit; avoids over-decimation), which then solve cold at native resolution instead.
-    //   Volumes with an existing estimate are refined natively and never need it.
+    // Coarsened-grid scratch, allocated once per thread if *any* planned volume is solved cold
+    //   (every cold solve begins on a downsampled grid with its phase carried back up: a background
+    //   phase is smooth, so decimation is near-lossless at ~1/4 the cost per level). Every level's
+    //   arrays are sized here and reused by every plane this thread visits, so a plane's solve
+    //   allocates nothing. Volumes with an existing estimate are refined natively and never need
+    //   any of it.
     const bool any_coarse =
         std::any_of(plan.begin(), plan.end(), [](const AdaptivePhaseEstimator::VolumePlan &vp) {   //
           return vp.estimate && vp.regime != AdaptivePhaseEstimator::regime_t::WARM;               //
         });
-    coarse_available = any_coarse && Nx >= 4 && Ny >= 4;
-    if (coarse_available) {
-      const ssize_t cNx = (Nx + 1) / 2;
-      const ssize_t cNy = (Ny + 1) / 2;
-      fr_c.resize(cNx, cNy);
-      fi_c.resize(cNx, cNy);
-      // A cold solve self-calibrates its noise level from the (coarse) data, so no map is consumed
-      //   here; all-unknown sigma routes solve_plane to its self-calibration branch.
-      sig_c = Eigen::ArrayXXd::Constant(cNx, cNy, -1.0);
-      pr_c.resize(cNx, cNy);
-      pi_c.resize(cNx, cNy);
+    if (any_coarse) {
+      // Descent stops once a plane is too small to halve usefully, so the stack may be shallower
+      //   than asked for -- and empty for a plane under 4 voxels across, which is then solved cold
+      //   at native resolution instead (no benefit from decimating it, and over-decimation to a
+      //   handful of voxels would leave nothing to estimate a noise level from).
+      ssize_t lNx = Nx;
+      ssize_t lNy = Ny;
+      for (ssize_t level = 1; level < std::max<ssize_t>(1, cascade_depth) && lNx >= 4 && lNy >= 4; ++level) {
+        lNx = (lNx + 1) / 2;
+        lNy = (lNy + 1) / 2;
+        CascadeLevel entry;
+        entry.fr.resize(lNx, lNy);
+        entry.fi.resize(lNx, lNy);
+        // Every coarsened level self-calibrates its noise level from its own data, so no map is
+        //   consumed there; all-unknown sigma routes solve_plane to its self-calibration branch.
+        entry.sig = Eigen::ArrayXXd::Constant(lNx, lNy, -1.0);
+        entry.pr.resize(lNx, lNy);
+        entry.pi.resize(lNx, lNy);
+        cascade.push_back(std::move(entry));
+      }
     }
   }
 
@@ -720,10 +731,10 @@ public:
 #ifdef DWIDENOISE2_APC_PROFILE
     const double lambda_in = lambda_slot == nullptr ? 0.0 : *lambda_slot;
 #endif
-    // A cold volume starts on the coarse grid where the plane is large enough to decimate; a plane
-    //   too small for that falls back to a cold native solve on the full budget, in either cold
-    //   regime.
-    const bool use_coarse = vp.regime != regime_t::WARM && coarse_available;
+    // A cold volume starts on the coarsened grids where the plane is large enough to decimate; a
+    //   plane too small for that falls back to a cold native solve on the full budget, in either
+    //   cold regime.
+    const bool use_coarse = vp.regime != regime_t::WARM && !cascade.empty();
 
     const size_t ax = inner_axes[0];
     const size_t ay = inner_axes[1];
@@ -750,25 +761,50 @@ public:
     }
 
     if (use_coarse) {
-      // Cold solve on the 2x-downsampled grid, then upsample. If the coarse slice is degenerate,
-      //   leave the pre-loaded incoming phase untouched (and skip any refinement below: a slice
-      //   with no estimable noise level is no more tractable at native resolution).
-      //   Deliberately self-calibrated even where a noise map exists (a volume first estimated at
-      //   iteration 2+ of a schedule that sub-samples): sigma would have to be decimated onto the
-      //   coarse grid to be consistent with the decimated data, and this solve is only a bootstrap
-      //   for a native, spatially-weighted refinement -- by a later pass under COLD_COARSE, or
-      //   immediately below under COLD_COARSE_THEN_WARM.
-      downsample2x(fr, fr_c);
-      downsample2x(fi, fi_c);
-      // The coarse solve is deliberately excluded from the carried state: its fidelity weight is
-      //   the answer to the decimated, self-calibrated problem, whose noise level -- and hence
-      //   whose weight -- is on a different scale from the native grid's.
-      const bool solved = estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false, nullptr);
+      // Restriction: decimate the data down the stack, each level from the one above it. Every
+      //   level is deliberately self-calibrated even where a noise map exists (a volume first
+      //   estimated at iteration 2+ of a schedule that sub-samples): sigma would have to be
+      //   decimated onto each coarsened grid to be consistent with the decimated data there, and
+      //   these solves are only a bootstrap for a native, spatially-weighted refinement -- by a
+      //   later pass under COLD_COARSE, or immediately below under COLD_COARSE_THEN_WARM.
+      downsample2x(fr, cascade[0].fr);
+      downsample2x(fi, cascade[0].fi);
+      for (size_t level = 1; level != cascade.size(); ++level) {
+        downsample2x(cascade[level - 1].fr, cascade[level].fr);
+        downsample2x(cascade[level - 1].fi, cascade[level].fi);
+      }
+      // Cold solve on the coarsest grid, then prolongation: each finer level is warm-started from
+      //   the level below it upsampled, so it inherits the long-wavelength phase already recovered
+      //   there and has only the detail that grid could not represent left to add. If a level is
+      //   degenerate, leave the pre-loaded incoming phase untouched and stop (a slice with no
+      //   estimable noise level is no more tractable at a finer resolution).
+      // None of these solves takes part in the carried state: their fidelity weights answer the
+      //   decimated, self-calibrated problems, whose noise levels -- and hence whose weights -- are
+      //   on different scales from the native grid's.
+      size_t level = cascade.size() - 1;
+      bool solved = estimator->solve_plane(cascade[level].fr,   //
+                                           cascade[level].fi,   //
+                                           cascade[level].sig,  //
+                                           cascade[level].pr,   //
+                                           cascade[level].pi,   //
+                                           false,               //
+                                           nullptr);
+      while (solved && level != 0) {
+        upsample_phase(cascade[level].pr, cascade[level].pi, cascade[level - 1].pr, cascade[level - 1].pi);
+        --level;
+        solved = estimator->solve_plane(cascade[level].fr,   //
+                                        cascade[level].fi,   //
+                                        cascade[level].sig,  //
+                                        cascade[level].pr,   //
+                                        cascade[level].pi,   //
+                                        true,                //
+                                        nullptr);
+      }
       if (solved)
-        upsample_phase(pr_c, pi_c, phase_r, phase_i);
+        upsample_phase(cascade[0].pr, cascade[0].pi, phase_r, phase_i);
       if (solved && vp.regime == regime_t::COLD_COARSE_THEN_WARM) {
         // No later pass will refine this volume, so carry out that refinement here: the upsampled
-        //   coarse phase is exactly the warm start a subsequent pass would have used, so the
+        //   coarsened phase is exactly the warm start a subsequent pass would have used, so the
         //   reduced ..._warm budget re-settles it at native resolution just as it would there.
         gather_sigma(ax, ay);
         estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true, lambda_slot);
@@ -851,15 +887,18 @@ private:
   size_t slice_axis;
   ssize_t num_slices;
   bool have_sigma;
-  // Whether coarse-grid scratch was allocated for this thread: false if no planned volume requests
-  //   a downsampled solve, or if the planes are too small to decimate.
-  bool coarse_available = false;
   Transform transform;
   ssize_t Nx, Ny;
   Eigen::ArrayXXd fr, fi, sig, phase_r, phase_i;
-  // Coarse-grid scratch, allocated only where some planned volume takes the 2x-downsampled
-  //   cold-solve path.
-  Eigen::ArrayXXd fr_c, fi_c, sig_c, pr_c, pi_c;
+  // One coarsened level of a cold solve: the decimated data, the (absent) noise level that routes
+  //   it to self-calibration, and the phase solved there.
+  struct CascadeLevel {
+    Eigen::ArrayXXd fr, fi, sig, pr, pi;
+  };
+  // The coarsened levels, finest first, so the cold solve starts at the back and works forward.
+  //   The native grid is not among them; it is the members above. Empty where no planned volume
+  //   takes a downsampled cold-solve path, or where the plane is too small to decimate.
+  std::vector<CascadeLevel> cascade;
 };
 
 } // namespace
@@ -917,7 +956,8 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
        " skipped (not used by this iteration)");
 
   ThreadedLoop(message, in, outer_axes, inslice_axes)
-      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan, io_lambda));
+      .run_outer(APCFunctor<T>(
+          *this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan, io_lambda, params.cascade_depth));
 }
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and

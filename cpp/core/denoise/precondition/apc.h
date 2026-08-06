@@ -74,8 +74,10 @@ namespace MR::Denoise::Precondition {
 //
 //   Cost across the iteration loop: the phase changes little once the noise map stabilises, so a
 //   volume is solved from a cold start only on the first pass that estimates it -- and, because a
-//   background phase is smooth (low spatial bandwidth), every cold solve begins on a 2x-downsampled
-//   grid with the result upsampled (~1/4 the cost, near-lossless for a smooth field). Every pass
+//   background phase is smooth (low spatial bandwidth), every cold solve begins on a downsampled
+//   grid with the result upsampled (~1/4 the cost per level of decimation, near-lossless for a
+//   smooth field; Params::cascade_depth sets how many such levels there are, two in total by
+//   default -- one coarse and the native one). Every pass
 //   after a volume's first is native but warm-started from that volume's previous estimate (seeded
 //   with |f| * the incoming phase), so a much smaller iteration budget (the Params ..._warm counts)
 //   re-settles it. Where a later pass will provide that refinement the cold solve stops at the
@@ -374,6 +376,28 @@ public:
     ssize_t cp_iter_warm = 48;
     ssize_t max_lambda_iter_warm = 20;
     ssize_t polish_iter_warm = 48;
+    // Number of resolution levels a cold solve passes through, the native grid included: 1 solves
+    //   cold at native resolution outright; 2 solves cold on the 2x-downsampled grid and upsamples
+    //   that phase to native; 3 places a 4x-downsampled level below that, and so on. Each level
+    //   below native carries the data 2x2 box-decimated from the level above it and self-calibrates
+    //   its own noise level from those data. Only the coarsest level is solved cold, on the full
+    //   iteration budget; every finer level is warm-started from the level beneath it upsampled and
+    //   so costs only the reduced ..._warm budget, as does the final native refinement where the
+    //   regime asks for one.
+    //
+    // Why more than one coarsening can pay for itself. Chambolle-Pock propagates information one
+    //   voxel per sweep, so a cold solve needs sweeps of the order of its plane's width while each
+    //   sweep costs its area: halving the width halves the sweeps needed and quarters the cost of
+    //   each. The long-wavelength content those sweeps are chasing is exactly what a background
+    //   phase is made of and exactly what survives decimation, so it can be recovered where it is
+    //   cheapest, leaving each finer level only the shorter-wavelength correction that a warm start
+    //   settles in few sweeps.
+    //
+    // Descent stops at any level whose plane is under 4 voxels along either axis, so this is an
+    //   upper bound and not an exact count; a plane too small to decimate at all is solved cold at
+    //   native resolution whatever the value. Volumes refined from a prior estimate are solved at
+    //   native resolution only and take no part.
+    ssize_t cascade_depth = 2;
     // How lambda is chosen to satisfy the discrepancy criterion.
     //
     // The criterion asks for the lambda at which the weighted residual over the calibration
@@ -536,10 +560,11 @@ public:
     // Warm-started refinement at native resolution, on the reduced Params ..._warm budget: the
     //   volume has an estimate from a prior pass, which barely moves once the noise map settles.
     WARM,
-    // Cold solve on the 2x-downsampled grid, its phase upsampled to native. A bootstrap: correct
-    //   only where a later pass will refine this volume at native resolution.
+    // Cold solve on the downsampled grid (the coarsest of Params::cascade_depth levels), its phase
+    //   carried up to native. A bootstrap: correct only where a later pass will refine this volume
+    //   at native resolution.
     COLD_COARSE,
-    // Cold solve on the 2x-downsampled grid, immediately followed by a warm-started
+    // Cold solve on the downsampled grid, immediately followed by a warm-started
     //   native-resolution refinement of that upsampled result -- the coarse-then-refine chain of a
     //   multi-pass schedule, collapsed into a single call. For a volume with no prior estimate
     //   reached by the final pass of the schedule, where there is no later pass to carry the
