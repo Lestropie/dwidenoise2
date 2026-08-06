@@ -324,37 +324,34 @@ public:
     //   depleting the imaginary channel of the Casorati matrix and biasing the estimated noise
     //   level DOWN -- the failure mode this factor exists to prevent.
     //
-    // How the value was fixed (2026-08-05, real 3T data, 128x128x105 complex, two separate
-    //   slabs). Add complex Gaussian noise of known per-component sigma_add to the data, run
-    //   the noise level estimation on both the original and the noisier copy, and form
+    // How the value was fixed (real 3T data, 128x128x105 complex, two separate slabs). Add complex
+    //   Gaussian noise of known per-component sigma_add to the data, run the noise level estimation
+    //   on both the original and the noisier copy, and form
     //     R = median over the brain of (sigma_noisy^2 - sigma_orig^2) / sigma_add^2 ,
-    //   the fraction of a *known* added noise variance the estimator still sees. Provided the
-    //   estimator's multiplicative bias is stable across the two noise levels -- which two
-    //   values of sigma_add an octave apart confirm here -- R IS that bias: R = 1 is unbiased,
-    //   R < 1 is noise absorbed by the phase estimate. Nothing about the phase is simulated;
-    //   the anatomy, the background phase and the native noise are all empirical, and only the
-    //   increment is synthetic (and white, matching the measured background autocorrelation of
-    //   these data: 0.06 along readout, 0.12 along phase-encode, at unit lag).
+    //   the fraction of a *known* added noise variance the estimator still sees. Where the
+    //   estimator's multiplicative bias does not itself depend on the noise level, R IS that bias:
+    //   R = 1 is unbiased, R < 1 is noise absorbed by the phase estimate. Nothing about the phase
+    //   is simulated; the anatomy, the background phase and the native noise are all empirical, and
+    //   only the increment is synthetic (and white, matching the measured background
+    //   autocorrelation of these data: 0.06 along readout, 0.12 along phase-encode, at unit lag).
     //
-    // The value cannot be chosen without simultaneously choosing the iteration budgets, because
-    //   the lambda fixed point is never reached (see the DWIDENOISE2_APC_PROFILE findings above)
-    //   and the two therefore jointly determine the achieved smoothing. Writing M for a common
-    //   multiplier on all six budgets below (M = 1 being the counts this file shipped with until
-    //   2026-08-05, i.e. 25/10/25 : 12/5/12), R over slab A at sigma_add = 149 behaves thus:
-    //         scale \ M      1       2       4       8
-    //           1.0        0.85            0.92
-    //           1.05                       1.00    0.96
-    //           1.1        0.90    0.90    1.02    1.04
-    //           1.8        1.00    1.09    1.12    1.14
-    //   Two things follow. First, at any fixed scale more iterations means more smoothing, so R
-    //   is a function of where the iteration is stopped. Second, R does settle: by M = 4 it moves
-    //   by only a few percent for a further doubling. A scale tuned at M = 1 is therefore tuned
-    //   to a truncation -- scale 1.8 reads R = 1.00 at M = 1 but drifts to 1.14, the rigid-phase
-    //   limit, once the iteration is allowed to run -- whereas a scale tuned at M = 4 is tuned to
-    //   the settled answer. The latter is what is configured here, at roughly 5x the APC cost
-    //   (2.5-4x end to end). Over slab A at sigma_add = 149, slab B at sigma_add = 149 and slab A
-    //   at sigma_add = 75, these values give R = 1.00 / 0.96 / 0.98, and doubling the budgets
-    //   again moves the first to 0.96.
+    // This value and the iteration counts below were derived together, and must be. The counts
+    //   decide how nearly the inner solve reaches the fidelity weight the criterion asks for, and
+    //   this scale decides which weight that is. At the counts and step ratio configured here the
+    //   lambda iteration does reach it -- to within about 2e-4 of the exact root on every plane
+    //   measured, on the cold chain and on the steady-state warm pass alike -- so the achieved
+    //   smoothing is now a function of this scale alone; but that is a property of those counts and
+    //   of cp_step_ratio, and changing either re-couples the two and obliges a re-derivation.
+    //
+    // Measured over the default multi-iteration schedule at sigma_add = 149, slab A:
+    //         scale    1.05   1.15   1.20   1.26   1.35   1.60
+    //         R        0.81   0.97   1.01   1.04   1.07   1.12
+    //   Slab B reads 1.01 at scale 1.20. Interpolating, R = 1 falls at about 1.19; 1.20 is used
+    //   because a third digit would claim a precision the measurement does not have (see the
+    //   anchors below). The response is steep at the calibration point -- roughly 0.04 in R per
+    //   0.05 in scale -- and saturates above it: by 1.60 it has reached the 1.12 that
+    //   -demodulate linear gives on these data, which is the rigid-phase limit and the most any
+    //   amount of extra smoothing can buy.
     //
     // Anchors for reading R: -demodulate linear -- a three-degree-of-freedom phase that cannot
     //   absorb noise at all -- gives R = 1.13-1.16 on these data, and the magnitude pathway,
@@ -362,34 +359,50 @@ public:
     //   order 10% in either direction from sources unrelated to the phase. R = 1 is the target
     //   but agreement to a few percent is the resolution of the measurement, not exactness.
     //
-    // WHERE THIS IS CALIBRATED, AND WHAT REMAINS UNCALIBRATED. The table above was measured where
-    //   solve_plane() takes its sigmabar from the noise level map. Where no map exists -- the first
-    //   iteration of any schedule, and *every* solve under a single-row schedule (-vst_method none,
-    //   -fixed_rank, apriori) -- sigmabar is self-calibrated from the plane's own data instead.
-    //   Both branches estimate the same functional, the root mean square of the per-voxel noise
-    //   level (see estimate_sigma_rms() in apc.cpp), so the two are on one scale. What the
-    //   self-calibration cannot do is see past the anatomy where tissue contrast within a
-    //   neighbourhood exceeds the noise, which on low b-value images it does: on the reference slab
-    //   the self-calibrated level runs about 1.8 times the map's RMS at native resolution and 3.7
-    //   times it on the coarse grid a cold solve uses. That errs toward a smoother phase, which is
-    //   the harmless direction -- an over-smoothed phase approaches the rigid-phase limit, while an
-    //   under-smoothed one absorbs noise into the phase and biases the estimated level down.
-    //
-    //   End to end on that slab at sigma_add = 149: the single-pass regime (-vst_method none)
-    //   reaches R = 1.02 with an estimated noise level of 183, against 166 for -demodulate hann,
-    //   181 for the magnitude pathway and 200 for -demodulate linear; the default multi-iteration
-    //   schedule, where the self-calibrated solve is only the bootstrap pass and the map-driven
-    //   passes that follow correct it, reaches R = 0.96.
-    double discrepancy_scale = 1.05;
+    // WHAT THIS CALIBRATION DOES NOT COVER. Each of the three is measured, not suspected.
+    //   1. R is not independent of sigma_add on these data, so the premise under which R equals the
+    //      estimator's bias holds only near the level it was calibrated at. At sigma_add = 75 --
+    //      one octave down, where the added variance is 15% of the total and the statistic
+    //      magnifies a given error in the estimated level about 2.6-fold -- the same runs read
+    //      R = 0.80 (slab A) and 0.85 (slab B). This is a property of the noise level estimation
+    //      rather than of these settings: at these same iteration counts with zero step ratio, the
+    //      looser lambda tolerance that preceded this one and scale 1.05, the identical measurement
+    //      reads 0.87 and 0.83. Read R at a much smaller increment as a consistency check that does
+    //      not currently close, not as a bias.
+    //   2. Where no noise level map exists -- the first iteration of any schedule, and *every*
+    //      solve under a single-row schedule (-vst_method none, -fixed_rank, apriori) -- sigmabar
+    //      is self-calibrated from the plane's own data. Both branches estimate the same
+    //      functional, the root mean square of the per-voxel noise level (see estimate_sigma_rms()
+    //      in apc.cpp), so the two are on one scale. What the self-calibration cannot do is see
+    //      past the anatomy where tissue contrast within a neighbourhood exceeds the noise, which
+    //      on low b-value images it does: on the reference slab it runs about 1.8 times the map's
+    //      RMS. A solve that stops short of its minimiser truncates that inflation away; one that
+    //      does not expresses it in full, and the single-row regime consequently lands at R = 1.10
+    //      at sigma_add = 149 where the multi-iteration schedule lands at 1.01. The error is toward
+    //      a smoother phase, which is the harmless direction -- an over-smoothed phase approaches
+    //      the rigid-phase limit, while an under-smoothed one absorbs noise into the phase and
+    //      biases the estimated level down -- but one value of this scale cannot place both regimes
+    //      at unity, and this one is placed on the multi-iteration schedule.
+    //   3. The value was derived on a single acquisition (3T Prisma, MB4, PF 0.75, 64-channel
+    //      head-neck coil). It holds across in-plane widths 128, 96 and 64 (R = 1.01 / 0.98 / 1.03)
+    //      and is very nearly invariant to the intensity units of the data, R agreeing to four
+    //      significant figures over six orders of magnitude of rescaling. No other vendor, field
+    //      strength or in-plane matrix size has been tested, and no matrix size above 128.
+    double discrepancy_scale = 1.20;
     // Chambolle-Pock primal-dual iterations run between successive lambda updates. The
     //   solver is warm-started across lambda updates, so this need not fully converge each
     //   time -- it interleaves image and lambda refinement (a standard, efficient scheme).
-    // These three counts, and the ..._warm counts below, were quadrupled on 2026-08-05 (from
-    //   25/10/25 : 12/5/12) so that the estimate is read where the noise-recovery figure R has
-    //   settled rather than mid-transient; see discrepancy_scale, with which they must be
-    //   re-calibrated jointly if either is changed.
+    // These three counts, and the ..._warm counts below, are placed where the lambda iteration
+    //   reaches the root of the discrepancy condition rather than stopping short of it: measured
+    //   against exactly minimised references, the weight located here is within about 2e-4 of that
+    //   root. What places it there is not the size of these counts but the step sizes
+    //   cp_step_ratio selects: at these same counts with the classical balanced steps the search
+    //   stops at about 0.3 of the correct weight, and the counts would have to grow by orders of
+    //   magnitude to close that gap. They are nevertheless not a free speed knob -- see
+    //   discrepancy_scale, with which they must be re-derived jointly if either is changed.
     ssize_t cp_iter = 100;
-    // Discrepancy-criterion (Morozov) fixed-point updates of lambda (their eqs. 6-7, 11).
+    // Discrepancy-criterion (Morozov) fixed-point updates of lambda (their eqs. 6-7, 11). This is
+    //   an upper bound and not a count: lambda_tol usually stops the search first.
     ssize_t max_lambda_iter = 40;
     // Extra primal-dual iterations at the converged lambda, to settle the image before the
     //   phase (its argument) is extracted.
@@ -410,10 +423,11 @@ public:
     //   reduced warm budget costs 1.1% RMS in the denoised series, and sweeping the ratio from
     //   a quarter of these counts to parity with the cold budget moves that by under 0.2% --
     //   the warm start really is sticky enough for the reduction to be nearly free. What these
-    //   counts are NOT is a free speed knob: since the lambda fixed point is never reached, they
-    //   co-determine the achieved regularisation with discrepancy_scale, and moving them moves
-    //   the noise-recovery figure R defined there. Validate any change on R first, with the
-    //   denoised rank as a secondary check; never on phase MSE.
+    //   counts are NOT is a free speed knob: they decide how nearly the lambda search reaches the
+    //   weight the criterion asks for, so they co-determine the achieved regularisation with
+    //   discrepancy_scale, and moving them moves the noise-recovery figure R defined there.
+    //   Validate any change on R first, with the denoised rank as a secondary check; never on
+    //   phase MSE.
     ssize_t cp_iter_warm = 48;
     ssize_t max_lambda_iter_warm = 20;
     ssize_t polish_iter_warm = 48;
@@ -433,6 +447,18 @@ public:
     //   phase is made of and exactly what survives decimation, so it can be recovered where it is
     //   cheapest, leaving each finer level only the shorter-wavelength correction that a warm start
     //   settles in few sweeps.
+    //
+    // Why that argument no longer decides how *accurate* the result is, only how cheap. It is an
+    //   argument about how far a truncated iterate travels, so it settles the outcome only while
+    //   the iterate is truncated. With the step sizes cp_step_ratio selects, a cold solve reaches
+    //   its minimiser at native resolution within the budget above whether or not it is bootstrapped
+    //   from a coarse grid: measured against exactly minimised references at in-plane widths 64, 96
+    //   and 128, over a sixteenfold range of iteration budgets spanning the counts above, the gap
+    //   between depths 1 and 2 falls from a factor of 3.9 in the phase error under truncation to
+    //   14%, and at the settings configured here the two are indistinguishable in the phase they
+    //   return. What survives is the cost argument: the coarse level does most of the travelling on
+    //   a grid a quarter the area, so two levels reach that same phase for about a quarter fewer
+    //   voxel-updates than one, which is why two remains the default.
     //
     // Descent stops at any level whose plane is under 4 voxels along either axis, so this is an
     //   upper bound and not an exact count; a plane too small to decimate at all is solved cold at
@@ -470,7 +496,11 @@ public:
     //   cascade_lambda_t::RESTRICTED_MAP and cascade_lambda_t::COARSEST_ONLY only.
     cascade_restriction_t cascade_restriction = cascade_restriction_t::SIGMA_SQUARED_MEAN;
     // How a level's solution is carried to the finer level above it: as a unit-magnitude phase, or
-    //   as the image iterate itself.
+    //   as the image iterate itself. Carrying the iterate hands the finer level a warm start for
+    //   both the primal variable and its magnitude rather than for the phase alone, which is worth
+    //   a clear margin wherever the finer level's solve is truncated -- but with the step sizes
+    //   cp_step_ratio selects that level converges either way, and the two choices then differ by
+    //   under 1% in cost and not at all in the phase returned.
     cascade_prolongation_t cascade_prolongation = cascade_prolongation_t::PHASE;
     // Factor by which the fidelity weight falls per level of refinement under
     //   cascade_lambda_t::COARSEST_ONLY, i.e. lambda(finer) = lambda(coarser) / this.
@@ -543,7 +573,21 @@ public:
     //   for the first time -- at whichever pass -- must do. Only native-resolution solves take part:
     //   the weight a coarse-grid bootstrap converges to is the answer to a different (decimated,
     //   self-calibrated) problem and is not on the native grid's scale.
-    bool carry_lambda = false;
+    //
+    // This is safe only because the inner solve is not truncated, and the distinction is not
+    //   academic. Carrying makes each pass start from the previous pass's own answer, so a search
+    //   that systematically stops short of the weight the criterion asks for compounds that
+    //   shortfall from pass to pass instead of merely repeating it, and the phase drifts toward the
+    //   truncated iteration's own attractor rather than toward the criterion's root: with the
+    //   balanced step sizes and the looser lambda tolerance that preceded these, that attractor
+    //   sits near a quarter of the correct weight and the phase error grows monotonically with pass
+    //   count. At the step sizes and tolerance configured here the attractor is the correct weight
+    //   itself -- the search lands within 2e-4 of it, carrying or not -- and the answer is constant
+    //   to four significant figures from the second pass onward (measured out to six passes) while
+    //   costing 12% fewer sweeps than repeating the search, for a phase a third further from the
+    //   exact minimiser in the mean. Reducing the budgets, loosening lambda_tol or removing
+    //   cp_step_ratio re-creates the drift.
+    bool carry_lambda = true;
     // Geometric ratio by which lambda is stepped while searching for a bracket. Consumed by
     //   CONTINUATION only; BISECTION doubles or halves. Ratios close to one keep each inner solve
     //   a small perturbation of the last but need proportionally more steps to reach the crossing,
@@ -567,9 +611,13 @@ public:
     //   search preceding them is bounded separately by lambda_bracket_cap.
     double lambda_root_tol = 1e-3;
     // Relative-change tolerance for early exit of the lambda fixed-point iteration; consumed by
-    //   lambda_solver_t::FIXED_POINT only. Rarely reached in practice: the fixed point converges
-    //   within budget only on the coarse cold pass, and even there for a minority of planes.
-    double lambda_tol = 1e-2;
+    //   lambda_solver_t::FIXED_POINT only. With the step sizes cp_step_ratio selects this, rather
+    //   than max_lambda_iter, is usually what ends the search: the fixed point meets it in a median
+    //   of 14 of the 20 updates a warm solve is allowed, at a weight within about 2e-4 of the exact
+    //   root, though the upper tail of the distribution does reach that bound. At the looser 1e-2
+    //   the search stops a few updates earlier, leaving a phase some sixty times further from the
+    //   exact minimiser of the same energy.
+    double lambda_tol = 1e-4;
     // Ratio fixing the primal-dual step sizes of the inner Chambolle-Pock sweeps, as the
     //   dimensionless product tau * lambda. Zero (or negative) keeps the classical balanced choice
     //   tau = sigma = 1/||K||, which is what this solver used originally.
@@ -599,8 +647,21 @@ public:
     //
     // This is a step-size choice, not a stopping rule: the solve converges to the same minimiser for
     //   any admissible ratio, so unlike the iteration budgets it does not co-determine the achieved
-    //   regularisation except through how nearly the budget reaches that minimiser.
-    double cp_step_ratio = 0.0;
+    //   regularisation except through how nearly the budget reaches that minimiser. The value
+    //   configured here was chosen by searching {0, 0.01, 0.02, 0.03, 0.05} jointly with those
+    //   budgets; over that search it is worth two to three orders of magnitude in the distance
+    //   between the phase this estimator returns and the phase that exactly minimises the same
+    //   energy, and it is what makes the budgets above sufficient rather than merely large.
+    //
+    // A side effect worth relying on: with tau fixed by tau * lambda, the whole solve becomes very
+    //   nearly invariant to the intensity units of the data rather than merely insensitive to them.
+    //   On real data scaled by 1e3 and by 1e-3 the estimated noise level tracks the scaling to
+    //   within four parts in 1e5, even though the eq. 7 seed contains a term in 1/sigmabar^2 that is
+    //   not dimensionally consistent and reaches 13% of the seed at the smaller scaling: the lambda
+    //   search converges away from its seed, so the inconsistency costs iterations rather than
+    //   accuracy, and what residual scale dependence remains is a difference in where the search
+    //   stops rather than in the minimiser it is approaching.
+    double cp_step_ratio = 0.05;
     // Whether the inner sweeps run Chambolle-Pock's Algorithm 2 -- one-sided acceleration, in which
     //   theta, tau and sigma are updated every sweep from the strong convexity modulus of the data
     //   term -- in place of Algorithm 1 at fixed step sizes and theta = 1.
@@ -625,16 +686,21 @@ public:
     // Relative-change tolerance for early exit of the *inner* Chambolle-Pock sweeps
     //   themselves (both the lambda-loop sweeps and the polish sweeps), checked every sweep
     //   at negligible extra cost (the comparison piggybacks on the primal update's existing
-    //   per-voxel pass, so it does not add another sweep over the plane). Deliberately tight
-    //   by default: this is a safety net against the *fixed* per-call budget doing
-    //   inconsequential extra work once a warm-started plane has already re-settled. Set to 0
-    //   (or a negative value) to disable and always spend the full budget, matching pre-2026-07
-    //   behaviour exactly.
+    //   per-voxel pass, so it does not add another sweep over the plane). Zero (or a negative
+    //   value) disables it and always spends the full budget.
     //
-    // On real data it does not fire: over 99% of warm and ~80-93% of cold solves consume their
-    //   whole budget, and raising it to 1e-4 changed neither run time nor any output. Do not
-    //   reach for it as a speed measure -- since the budgets co-determine the regularisation
-    //   (see discrepancy_scale), a tolerance loose enough to cut sweeps would cut smoothing.
+    // Whether it fires at all depends on the step sizes. With the classical balanced choice the
+    //   iterate moves so little per sweep that it never fires -- over 99% of warm and 80-93% of
+    //   cold solves consumed their whole budget, and loosening it to 1e-4 changed neither run time
+    //   nor any output. With the step sizes cp_step_ratio selects the iterate moves far enough for
+    //   the test to fire *within* the budget, and at this value it cuts roughly a third of the cold
+    //   sweeps, at a cost of a factor of about 2.4 in the distance between the returned phase and
+    //   the exact minimiser of the same energy. That trade is taken deliberately: the distance in
+    //   question is four orders of magnitude smaller than the balanced steps reached at any budget,
+    //   it leaves no trace in the noise-recovery figure R (see discrepancy_scale), and the saving is
+    //   what keeps a converged solve at the cost of the truncated one. Do not loosen it further --
+    //   since the budgets co-determine the achieved regularisation, anything that cuts more sweeps
+    //   cuts smoothing, and this is not a speed knob.
     double cp_tol = 1e-6;
     // The per-voxel fidelity weight w = sigmabar^2 / sigma^2 is clamped to
     //   [1/weight_clamp, weight_clamp] to bound its dynamic range (guards near-zero sigma in

@@ -45,8 +45,8 @@
 //      changes no other plane's -- neither another volume's, nor another slice of the same volume.
 //      This pins both axes of the index at once, and is the direct statement of the property that a
 //      volume reaching a later pass with no history must not inherit another volume's weight.
-//   4. With Params::carry_lambda unset the same perturbation changes nothing at all, so the state is
-//      recorded but not consumed.
+//   4. With Params::carry_lambda cleared the same perturbation changes nothing at all, so the state
+//      is recorded but not consumed.
 //
 // The iteration budgets are cut far below the shipped ones throughout: this test is about which
 //   plane a scalar reaches, not about how well any plane is solved, and the phase's dependence on
