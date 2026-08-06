@@ -159,6 +159,54 @@ void downsample2x(const Eigen::Ref<const Eigen::ArrayXXd> &src, Eigen::Ref<Eigen
   }
 }
 
+// Carry a per-voxel noise level onto the 2x-decimated grid the box-averaged data of downsample2x
+//   live on, so that a coarsened grid can be solved against the same noise level map as the native
+//   one instead of estimating a global level from its own (decimated) data.
+//
+// A coarse datum is the average of the four native voxels above it, so its own noise variance is
+//   one sixteenth of their summed variance -- a quarter of their mean variance, i.e. half their RMS.
+//   That factor is what keeps the criterion on one scale down the stack; the choice between the two
+//   aggregations is what to do with variation *within* the block:
+//     - sigma_squared_mean takes the noise level of the decimated datum itself, exactly as above;
+//     - weight_mean takes the mean of the four fidelity weights (w = sigmabar^2/sigma^2, so the
+//       mean of sigma^-2) and places it on the same absolute scale, preserving the block's total
+//       weight rather than its noise level.
+//   They differ only where sigma varies within a 2x2 block, i.e. at parallel-imaging g-factor
+//   gradients. A coarse voxel is usable if any of its children is; voxels with no usable estimate
+//   are excluded from the aggregate rather than counted as zero noise, and a coarse voxel with no
+//   usable child is itself marked unusable.
+void restrict_sigma(const Eigen::Ref<const Eigen::ArrayXXd> &src,
+                    Eigen::Ref<Eigen::ArrayXXd> dst,
+                    const bool weight_mean) {
+  const ssize_t Nx = src.rows();
+  const ssize_t Ny = src.cols();
+  const ssize_t cNx = dst.rows();
+  const ssize_t cNy = dst.cols();
+  for (ssize_t j = 0; j != cNy; ++j) {
+    const ssize_t j0 = 2 * j;
+    const ssize_t j1 = std::min(j0 + 1, Ny - 1);
+    for (ssize_t i = 0; i != cNx; ++i) {
+      const ssize_t i0 = 2 * i;
+      const ssize_t i1 = std::min(i0 + 1, Nx - 1);
+      const double children[4] = {src(i0, j0), src(i1, j0), src(i0, j1), src(i1, j1)};
+      double total = 0.0;
+      ssize_t count = 0;
+      for (const double s : children) {
+        if (!std::isfinite(s) || !(s > 0.0))
+          continue;
+        total += weight_mean ? 1.0 / Math::pow2(s) : Math::pow2(s);
+        ++count;
+      }
+      if (count == 0) {
+        dst(i, j) = -1.0;
+        continue;
+      }
+      const double mean = total / double(count);
+      dst(i, j) = weight_mean ? 0.5 / std::sqrt(mean) : 0.5 * std::sqrt(mean);
+    }
+  }
+}
+
 // Bilinearly upsample a coarse unit-magnitude phase back to the native grid and renormalise to
 //   unit magnitude. Interpolating the (cos, sin) = (phase_r, phase_i) channels (rather than the
 //   wrapped angle) avoids phase-wrap artefacts; renormalisation restores |phase| == 1 as the
@@ -192,6 +240,59 @@ void upsample_phase(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
       if (mag > std::numeric_limits<double>::min() * 1e3) {
         pr(i, j) = r / mag;
         pi(i, j) = im / mag;
+      } else {
+        pr(i, j) = 1.0;
+        pi(i, j) = 0.0;
+      }
+    }
+  }
+}
+
+// Bilinearly upsample the two channels of the complex image iterate u = magnitude * (phase_r,
+//   phase_i) rather than its phase alone, splitting the interpolated vector back into a magnitude
+//   and a unit-magnitude phase for the caller. Interpolation weights and cell-centred mapping are
+//   those of upsample_phase.
+//
+// The difference from upsample_phase is what happens to the magnitude the coarse level settled on:
+//   here it is carried up, so the finer level starts from a smoothed image, whereas prolongating
+//   the phase alone discards it and the finer level rebuilds its image from its own (unsmoothed)
+//   data magnitude. The interpolated vector is also not renormalised before it is split, so where
+//   the phase turns quickly within a coarse cell the interpolated magnitude falls, which is what
+//   bilinear interpolation of the iterate means and is a further difference from interpolating the
+//   phase channels alone.
+void upsample_iterate(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
+                      const Eigen::Ref<const Eigen::ArrayXXd> &pi_c,
+                      const Eigen::Ref<const Eigen::ArrayXXd> &mag_c,
+                      Eigen::Ref<Eigen::ArrayXXd> pr,
+                      Eigen::Ref<Eigen::ArrayXXd> pi,
+                      Eigen::Ref<Eigen::ArrayXXd> mag) {
+  const ssize_t Nx = pr.rows();
+  const ssize_t Ny = pr.cols();
+  const ssize_t cNx = pr_c.rows();
+  const ssize_t cNy = pr_c.cols();
+  for (ssize_t j = 0; j != Ny; ++j) {
+    const double cy = std::min(std::max((double(j) - 0.5) * 0.5, 0.0), double(cNy - 1));
+    const ssize_t J0 = std::min(ssize_t(std::floor(cy)), cNy - 1);
+    const ssize_t J1 = std::min(J0 + 1, cNy - 1);
+    const double fy = cy - double(J0);
+    for (ssize_t i = 0; i != Nx; ++i) {
+      const double cx = std::min(std::max((double(i) - 0.5) * 0.5, 0.0), double(cNx - 1));
+      const ssize_t I0 = std::min(ssize_t(std::floor(cx)), cNx - 1);
+      const ssize_t I1 = std::min(I0 + 1, cNx - 1);
+      const double fx = cx - double(I0);
+      const double w00 = (1.0 - fx) * (1.0 - fy);
+      const double w10 = fx * (1.0 - fy);
+      const double w01 = (1.0 - fx) * fy;
+      const double w11 = fx * fy;
+      const double r = w00 * mag_c(I0, J0) * pr_c(I0, J0) + w10 * mag_c(I1, J0) * pr_c(I1, J0)    //
+                       + w01 * mag_c(I0, J1) * pr_c(I0, J1) + w11 * mag_c(I1, J1) * pr_c(I1, J1); //
+      const double im = w00 * mag_c(I0, J0) * pi_c(I0, J0) + w10 * mag_c(I1, J0) * pi_c(I1, J0)    //
+                        + w01 * mag_c(I0, J1) * pi_c(I0, J1) + w11 * mag_c(I1, J1) * pi_c(I1, J1); //
+      const double length = std::hypot(r, im);
+      mag(i, j) = length;
+      if (length > std::numeric_limits<double>::min() * 1e3) {
+        pr(i, j) = r / length;
+        pi(i, j) = im / length;
       } else {
         pr(i, j) = 1.0;
         pi(i, j) = 0.0;
@@ -242,7 +343,9 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
                                  Eigen::Ref<Eigen::ArrayXXd> phase_r,
                                  Eigen::Ref<Eigen::ArrayXXd> phase_i,
                                  const bool warm_start,
-                                 double *const io_lambda) const {
+                                 double *const io_lambda,
+                                 Eigen::ArrayXXd *const io_magnitude,
+                                 const bool fixed_lambda) const {
   const ssize_t Nx = fr.rows();
   const ssize_t Ny = fr.cols();
   const ssize_t Npix = Nx * Ny;
@@ -332,7 +435,11 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   //   ~converged and only the cheap magnitude smoothing remains, matching the reduced budget.
   Eigen::ArrayXXd ur, ui;
   if (warm_start) {
-    const Eigen::ArrayXXd mag = (fr.square() + fi.square()).sqrt();
+    // The magnitude the warm start's image is built from: the data's own, unless the caller has
+    //   supplied one (an image carried up from a coarser grid, whose magnitude is already smoothed).
+    const bool magnitude_supplied =
+        io_magnitude != nullptr && io_magnitude->rows() == Nx && io_magnitude->cols() == Ny;
+    const Eigen::ArrayXXd mag = magnitude_supplied ? *io_magnitude : (fr.square() + fi.square()).sqrt();
     ur = mag * phase_r;
     ui = mag * phase_i;
   } else {
@@ -495,9 +602,13 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   //   knows nothing of the plane; where the caller has kept what a previous pass over this same
   //   plane converged to, that is a far better starting point, and the search then only has to
   //   track how the criterion's answer has moved as the noise map settled (Params::carry_lambda).
-  const bool carried =
-      params.carry_lambda && io_lambda != nullptr && std::isfinite(*io_lambda) && *io_lambda > 0.0;
-  const double lambda_start = carried ? *io_lambda : lambda_seed;
+  const bool weight_supplied = io_lambda != nullptr && std::isfinite(*io_lambda) && *io_lambda > 0.0;
+  // A caller that already knows the weight this plane is to be solved at -- one level of a
+  //   resolution cascade taking the weight of the level below it -- pins it instead, and no search
+  //   runs at all: the budget of this call is then its polish sweeps alone.
+  const bool pinned = fixed_lambda && weight_supplied;
+  const bool carried = params.carry_lambda && weight_supplied && !pinned;
+  const double lambda_start = (carried || pinned) ? *io_lambda : lambda_seed;
   double lambda = lambda_start;
   const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar_lambda;
   // The weighted residual over the calibration domain, summed over the two channels: the quantity
@@ -516,7 +627,9 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   ssize_t cp_sweeps_used = 0;
   ssize_t bracket_steps_used = 0;
 #endif
-  if (params.lambda_solver == lambda_solver_t::FIXED_POINT) {
+  if (pinned) {
+    // The weight is the caller's; go straight to the polish.
+  } else if (params.lambda_solver == lambda_solver_t::FIXED_POINT) {
     for (ssize_t li = 0; li != n_lambda; ++li) {
 #ifdef DWIDENOISE2_APC_PROFILE
       lambda_iters_used = li + 1;
@@ -621,9 +734,15 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
     *io_lambda = lambda;
 
   // --- Extract unit-magnitude phase -----------------------------------------------------
+  // The magnitude is handed back too where the caller asked for it, so that the solved image can be
+  //   reconstructed rather than only its argument.
+  if (io_magnitude != nullptr)
+    io_magnitude->resize(Nx, Ny);
   for (ssize_t j = 0; j != Ny; ++j)
     for (ssize_t i = 0; i != Nx; ++i) {
       const double mag = std::hypot(ur(i, j), ui(i, j));
+      if (io_magnitude != nullptr)
+        (*io_magnitude)(i, j) = mag;
       if (mag > std::numeric_limits<double>::min() * 1e3) {
         phase_r(i, j) = ur(i, j) / mag;
         phase_i(i, j) = ui(i, j) / mag;
@@ -657,8 +776,9 @@ public:
              Image<uint32_t> &serialise,
              const std::vector<AdaptivePhaseEstimator::VolumePlan> &plan,
              std::vector<double> *lambda_store,
-             ssize_t cascade_depth)
+             const AdaptivePhaseEstimator::Params &params)
       : estimator(&estimator),
+        params(params),
         outer_axes(outer_axes),
         inner_axes(inner_axes),
         in(in),
@@ -695,19 +815,24 @@ public:
       //   handful of voxels would leave nothing to estimate a noise level from).
       ssize_t lNx = Nx;
       ssize_t lNy = Ny;
-      for (ssize_t level = 1; level < std::max<ssize_t>(1, cascade_depth) && lNx >= 4 && lNy >= 4; ++level) {
+      for (ssize_t level = 1; level < std::max<ssize_t>(1, params.cascade_depth) && lNx >= 4 && lNy >= 4; ++level) {
         lNx = (lNx + 1) / 2;
         lNy = (lNy + 1) / 2;
         CascadeLevel entry;
         entry.fr.resize(lNx, lNy);
         entry.fi.resize(lNx, lNy);
-        // Every coarsened level self-calibrates its noise level from its own data, so no map is
-        //   consumed there; all-unknown sigma routes solve_plane to its self-calibration branch.
+        // All-unknown sigma routes solve_plane to its self-calibration branch, which is where a
+        //   coarsened level is left unless the noise level map is being restricted onto it (and it
+        //   is where it stays regardless on a pass that has no map at all).
         entry.sig = Eigen::ArrayXXd::Constant(lNx, lNy, -1.0);
         entry.pr.resize(lNx, lNy);
         entry.pi.resize(lNx, lNy);
+        if (params.cascade_prolongation == AdaptivePhaseEstimator::cascade_prolongation_t::ITERATE)
+          entry.mag.resize(lNx, lNy);
         cascade.push_back(std::move(entry));
       }
+      if (params.cascade_prolongation == AdaptivePhaseEstimator::cascade_prolongation_t::ITERATE)
+        mag.resize(Nx, Ny);
     }
   }
 
@@ -761,53 +886,94 @@ public:
     }
 
     if (use_coarse) {
-      // Restriction: decimate the data down the stack, each level from the one above it. Every
-      //   level is deliberately self-calibrated even where a noise map exists (a volume first
-      //   estimated at iteration 2+ of a schedule that sub-samples): sigma would have to be
-      //   decimated onto each coarsened grid to be consistent with the decimated data there, and
-      //   these solves are only a bootstrap for a native, spatially-weighted refinement -- by a
-      //   later pass under COLD_COARSE, or immediately below under COLD_COARSE_THEN_WARM.
+      // Restriction: decimate the data down the stack, each level from the one above it.
       downsample2x(fr, cascade[0].fr);
       downsample2x(fi, cascade[0].fi);
       for (size_t level = 1; level != cascade.size(); ++level) {
         downsample2x(cascade[level - 1].fr, cascade[level].fr);
         downsample2x(cascade[level - 1].fi, cascade[level].fi);
       }
+      // Restriction of the noise level, where the policy asks for it and a map exists at all. The
+      //   alternative -- and what a pass with no map has no choice but to do -- is for each level to
+      //   estimate a global noise level from its own decimated data, which is what the all-unknown
+      //   sigma left in place below routes solve_plane to.
+      using cascade_lambda_t = AdaptivePhaseEstimator::cascade_lambda_t;
+      const bool restrict_map = params.cascade_lambda != cascade_lambda_t::SELF_CALIBRATED && have_sigma;
+      bool have_native_sigma = false;
+      if (restrict_map) {
+        gather_sigma(ax, ay);
+        have_native_sigma = true;
+        const bool weight_mean =
+            params.cascade_restriction == AdaptivePhaseEstimator::cascade_restriction_t::WEIGHT_MEAN;
+        restrict_sigma(sig, cascade[0].sig, weight_mean);
+        for (size_t level = 1; level != cascade.size(); ++level)
+          restrict_sigma(cascade[level - 1].sig, cascade[level].sig, weight_mean);
+      }
       // Cold solve on the coarsest grid, then prolongation: each finer level is warm-started from
       //   the level below it upsampled, so it inherits the long-wavelength phase already recovered
       //   there and has only the detail that grid could not represent left to add. If a level is
       //   degenerate, leave the pre-loaded incoming phase untouched and stop (a slice with no
       //   estimable noise level is no more tractable at a finer resolution).
-      // None of these solves takes part in the carried state: their fidelity weights answer the
-      //   decimated, self-calibrated problems, whose noise levels -- and hence whose weights -- are
-      //   on different scales from the native grid's.
+      // None of these solves takes part in the caller's carried state: their fidelity weights answer
+      //   decimated problems, whose noise levels -- and hence whose weights -- are on a different
+      //   scale from the native grid's. Under cascade_lambda_t::COARSEST_ONLY they do carry a weight
+      //   among themselves, one level to the next, scaled by the grid-to-grid factor.
+      const bool prolongate_iterate =
+          params.cascade_prolongation == AdaptivePhaseEstimator::cascade_prolongation_t::ITERATE;
+      const bool pin_lambda = params.cascade_lambda == cascade_lambda_t::COARSEST_ONLY;
+      const double lambda_ratio = std::max(1e-12, params.cascade_lambda_ratio);
+      double level_lambda = 0.0;
       size_t level = cascade.size() - 1;
-      bool solved = estimator->solve_plane(cascade[level].fr,   //
-                                           cascade[level].fi,   //
-                                           cascade[level].sig,  //
-                                           cascade[level].pr,   //
-                                           cascade[level].pi,   //
-                                           false,               //
-                                           nullptr);
+      bool solved = estimator->solve_plane(cascade[level].fr,                              //
+                                           cascade[level].fi,                              //
+                                           cascade[level].sig,                             //
+                                           cascade[level].pr,                              //
+                                           cascade[level].pi,                              //
+                                           false,                                          //
+                                           pin_lambda ? &level_lambda : nullptr,           //
+                                           prolongate_iterate ? &cascade[level].mag : nullptr);
       while (solved && level != 0) {
-        upsample_phase(cascade[level].pr, cascade[level].pi, cascade[level - 1].pr, cascade[level - 1].pi);
+        if (prolongate_iterate)
+          upsample_iterate(cascade[level].pr,       //
+                           cascade[level].pi,       //
+                           cascade[level].mag,      //
+                           cascade[level - 1].pr,   //
+                           cascade[level - 1].pi,   //
+                           cascade[level - 1].mag); //
+        else
+          upsample_phase(cascade[level].pr, cascade[level].pi, cascade[level - 1].pr, cascade[level - 1].pi);
         --level;
-        solved = estimator->solve_plane(cascade[level].fr,   //
-                                        cascade[level].fi,   //
-                                        cascade[level].sig,  //
-                                        cascade[level].pr,   //
-                                        cascade[level].pi,   //
-                                        true,                //
-                                        nullptr);
+        level_lambda /= lambda_ratio;
+        solved = estimator->solve_plane(cascade[level].fr,                                //
+                                        cascade[level].fi,                                //
+                                        cascade[level].sig,                               //
+                                        cascade[level].pr,                                //
+                                        cascade[level].pi,                                //
+                                        true,                                             //
+                                        pin_lambda ? &level_lambda : nullptr,             //
+                                        prolongate_iterate ? &cascade[level].mag : nullptr, //
+                                        pin_lambda);
       }
-      if (solved)
-        upsample_phase(cascade[0].pr, cascade[0].pi, phase_r, phase_i);
+      if (solved) {
+        if (prolongate_iterate)
+          upsample_iterate(cascade[0].pr, cascade[0].pi, cascade[0].mag, phase_r, phase_i, mag);
+        else
+          upsample_phase(cascade[0].pr, cascade[0].pi, phase_r, phase_i);
+      }
       if (solved && vp.regime == regime_t::COLD_COARSE_THEN_WARM) {
         // No later pass will refine this volume, so carry out that refinement here: the upsampled
         //   coarsened phase is exactly the warm start a subsequent pass would have used, so the
         //   reduced ..._warm budget re-settles it at native resolution just as it would there.
-        gather_sigma(ax, ay);
-        estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true, lambda_slot);
+        if (!have_native_sigma)
+          gather_sigma(ax, ay);
+        estimator->solve_plane(fr,                                     //
+                               fi,                                     //
+                               sig,                                    //
+                               phase_r,                                //
+                               phase_i,                                //
+                               true,                                   //
+                               lambda_slot,                            //
+                               prolongate_iterate ? &mag : nullptr);
       }
     } else {
       // Native resolution: warm-started from the incoming phase, or -- on a plane too small to
@@ -873,6 +1039,7 @@ private:
   }
 
   const AdaptivePhaseEstimator *estimator;
+  AdaptivePhaseEstimator::Params params;
   std::vector<size_t> outer_axes;
   std::vector<size_t> inner_axes;
   Image<T> in;
@@ -890,10 +1057,14 @@ private:
   Transform transform;
   ssize_t Nx, Ny;
   Eigen::ArrayXXd fr, fi, sig, phase_r, phase_i;
-  // One coarsened level of a cold solve: the decimated data, the (absent) noise level that routes
-  //   it to self-calibration, and the phase solved there.
+  // Magnitude of the image the finest coarsened level solved, carried up with its phase; used only
+  //   where the prolongation carries the iterate rather than the phase alone.
+  Eigen::ArrayXXd mag;
+  // One coarsened level of a cold solve: the decimated data, the noise level it is solved against
+  //   (all-unknown where that level self-calibrates), and the phase and image magnitude solved
+  //   there.
   struct CascadeLevel {
-    Eigen::ArrayXXd fr, fi, sig, pr, pi;
+    Eigen::ArrayXXd fr, fi, sig, pr, pi, mag;
   };
   // The coarsened levels, finest first, so the cold solve starts at the back and works forward.
   //   The native grid is not among them; it is the members above. Empty where no planned volume
@@ -956,8 +1127,8 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
        " skipped (not used by this iteration)");
 
   ThreadedLoop(message, in, outer_axes, inslice_axes)
-      .run_outer(APCFunctor<T>(
-          *this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan, io_lambda, params.cascade_depth));
+      .run_outer(
+          APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan, io_lambda, params));
 }
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and

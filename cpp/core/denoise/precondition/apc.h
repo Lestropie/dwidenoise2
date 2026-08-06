@@ -77,7 +77,9 @@ namespace MR::Denoise::Precondition {
 //   background phase is smooth (low spatial bandwidth), every cold solve begins on a downsampled
 //   grid with the result upsampled (~1/4 the cost per level of decimation, near-lossless for a
 //   smooth field; Params::cascade_depth sets how many such levels there are, two in total by
-//   default -- one coarse and the native one). Every pass
+//   default -- one coarse and the native one, with Params::cascade_lambda deciding how each level
+//   calibrates its own regularisation and Params::cascade_prolongation how its result is carried to
+//   the level above it). Every pass
 //   after a volume's first is native but warm-started from that volume's previous estimate (seeded
 //   with |f| * the incoming phase), so a much smaller iteration budget (the Params ..._warm counts)
 //   re-settles it. Where a later pass will provide that refinement the cold solve stops at the
@@ -268,6 +270,45 @@ public:
     CONTINUATION
   };
 
+  // Where each level of a cold solve's resolution cascade (Params::cascade_depth) gets the noise
+  //   level that calibrates its discrepancy criterion, and hence the fidelity weight it solves at.
+  //   See Params::cascade_lambda.
+  enum class cascade_lambda_t {
+    // Each coarsened level estimates a single global noise level from its own decimated data and
+    //   weights every voxel equally.
+    SELF_CALIBRATED,
+    // Each coarsened level takes the noise level map decimated onto its own grid, and so keeps the
+    //   spatially-varying weighting the native problem carries.
+    RESTRICTED_MAP,
+    // As RESTRICTED_MAP, except that only the coarsest level searches for a fidelity weight; every
+    //   finer coarsened level is handed that weight scaled by Params::cascade_lambda_ratio per
+    //   level and runs no search of its own.
+    COARSEST_ONLY
+  };
+
+  // How a per-voxel noise level is carried onto a 2x-decimated grid. The two differ exactly where
+  //   sigma varies within a 2x2 block -- at parallel-imaging g-factor gradients, which are steep --
+  //   and agree everywhere else. See Params::cascade_restriction.
+  enum class cascade_restriction_t {
+    // The noise level of the decimated datum itself: 2x2 averaging of four voxels whose noise is
+    //   independent gives a variance of one quarter their mean variance.
+    SIGMA_SQUARED_MEAN,
+    // The mean of the four fidelity weights, i.e. of sigma^-2, placed on the same absolute scale.
+    //   Preserves the total weight of the block rather than its noise level.
+    WEIGHT_MEAN
+  };
+
+  // How the solution of one cascade level is carried to the finer level above it. Neither
+  //   interpolates arg(u), which wraps. See Params::cascade_prolongation.
+  enum class cascade_prolongation_t {
+    // Bilinearly interpolate the unit-magnitude phase (its cos and sin channels), renormalise, and
+    //   let the finer level re-take its magnitude from its own data.
+    PHASE,
+    // Bilinearly interpolate the two channels of the image iterate u itself, carrying the coarse
+    //   level's smoothed magnitude up with its phase.
+    ITERATE
+  };
+
   struct Params {
     // Scale factor applied to the noise level sigmabar *only* where it selects lambda: the
     //   eq. 7 seed and the eq. 11 residual target. The per-voxel fidelity weights
@@ -398,6 +439,61 @@ public:
     //   native resolution whatever the value. Volumes refined from a prior estimate are solved at
     //   native resolution only and take no part.
     ssize_t cascade_depth = 2;
+    // Where each coarsened level of a cold solve gets the noise level its discrepancy criterion is
+    //   calibrated against, and hence which energy that level minimises.
+    //
+    // A cascade level helps the level above it only in so far as it poses a faithful coarsening of
+    //   the same problem, and self-calibration does not, for a reason that is a property of the
+    //   data rather than of the estimator: 2x2 box averaging halves the noise level but leaves the
+    //   anatomy, so the structure-to-noise ratio doubles per level of decimation and the fraction
+    //   of anatomical texture that any estimator built from local intensity differences counts as
+    //   noise grows with it (see estimate_sigma_rms() in apc.cpp). Measured on 3T diffusion data,
+    //   the level a coarsened grid self-calibrates against runs from 0.46 to 4.34 times the native
+    //   one where a faithful coarsening would give half per level, and it is not even monotone in
+    //   the level; the fidelity weight the criterion then selects there lands between 0.33 and 2.4
+    //   times the weight the native problem's own criterion asks for. Each level is consequently
+    //   the exact minimiser of a differently regularised energy rather than an approximate
+    //   minimiser of the right one.
+    //
+    // RESTRICTED_MAP removes that by decimating the noise level map onto each level instead
+    //   (Params::cascade_restriction chooses how), which also restores the spatially-varying
+    //   weighting the native problem carries and which self-calibration replaces with uniform
+    //   weights. It is available only where a map exists: the first pass of any schedule has none,
+    //   and a level with no usable map self-calibrates whatever this is set to.
+    //
+    // COARSEST_ONLY additionally stops every level but the coarsest from searching for a weight of
+    //   its own, which removes the whole lambda loop from those levels and leaves them only their
+    //   polish sweeps. It differs from RESTRICTED_MAP only where more than one coarsened level
+    //   exists, i.e. at cascade_depth 3 and above.
+    cascade_lambda_t cascade_lambda = cascade_lambda_t::SELF_CALIBRATED;
+    // How the noise level map is carried onto each coarsened grid. Consumed by
+    //   cascade_lambda_t::RESTRICTED_MAP and cascade_lambda_t::COARSEST_ONLY only.
+    cascade_restriction_t cascade_restriction = cascade_restriction_t::SIGMA_SQUARED_MEAN;
+    // How a level's solution is carried to the finer level above it: as a unit-magnitude phase, or
+    //   as the image iterate itself.
+    cascade_prolongation_t cascade_prolongation = cascade_prolongation_t::PHASE;
+    // Factor by which the fidelity weight falls per level of refinement under
+    //   cascade_lambda_t::COARSEST_ONLY, i.e. lambda(finer) = lambda(coarser) / this.
+    //
+    // Discretising the continuum energy at a spacing h gives a total variation of order
+    //   h sum|delta u| against a fidelity term of order h^2 sum w (u-f)^2, so the discrete weight
+    //   this solver uses carries one factor of h and the same continuum problem should be posed with
+    //   a weight that doubles per level of coarsening. It is more than that in practice. Located
+    //   exactly by bracketing and bisection on restricted 3T diffusion planes at 128, 64, 32 and 16
+    //   voxels across, the realised factor is 2.47 in the median (fitted exponent 1.30 against the
+    //   predicted 1.00), and it is ordered by contrast-to-noise: 2.4 on b = 5 planes rising to 4.1
+    //   at b = 3000.
+    //
+    // The reason is that the derivation treats the two grids as discretisations of one continuum
+    //   problem, which the data are not: 2x2 averaging resamples smooth structure but *halves the
+    //   amplitude* of the noise, so the field the finite differences see is a different field at
+    //   each level, and the more of the energy that noise accounts for the further the realised
+    //   scaling departs from the smooth-field prediction. Since the departure therefore tracks
+    //   contrast-to-noise, which varies by shell and by plane and which the solver cannot see, no
+    //   single value of this is right everywhere; the measured spread is 2.2 to 3.1 over planes. In
+    //   compensation the result is weakly sensitive to it -- over values from 1 to 4 the phase this
+    //   estimator ends up with moves by about 10%.
+    double cascade_lambda_ratio = 2.35;
     // How lambda is chosen to satisfy the discrepancy criterion.
     //
     // The criterion asks for the lambda at which the weighted residual over the calibration
@@ -660,6 +756,14 @@ public:
   //              iff Params::carry_lambda is set; the converged weight is written back whenever
   //              the plane is solved, whether or not the incoming value was consumed. A declined
   //              plane leaves it untouched.
+  //   io_magnitude : optional per-voxel magnitude accompanying the phase, of the plane's own size,
+  //              or null. On a warm start it replaces |f| as the magnitude the initial image is
+  //              built from, so that the caller can seed the solver with an image other than
+  //              |f| * (incoming phase); on exit it is written with |u*|, the magnitude of the
+  //              solved image whose argument the phase is. A declined plane leaves it untouched.
+  //   fixed_lambda : consume *io_lambda as the fidelity weight and run no search for one at all,
+  //              so that only the polish sweeps are spent. Requires a positive *io_lambda and is
+  //              independent of Params::carry_lambda, which governs where a *search* starts.
   // Arrays are column-major (Nx rows = first in-slice axis, Ny cols = second).
   bool solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
                    const Eigen::Ref<const Eigen::ArrayXXd> &fi,
@@ -667,7 +771,9 @@ public:
                    Eigen::Ref<Eigen::ArrayXXd> phase_r,
                    Eigen::Ref<Eigen::ArrayXXd> phase_i,
                    bool warm_start,
-                   double *io_lambda = nullptr) const;
+                   double *io_lambda = nullptr,
+                   Eigen::ArrayXXd *io_magnitude = nullptr,
+                   bool fixed_lambda = false) const;
 
   const std::vector<size_t> &axes() const { return inslice_axes; }
 
