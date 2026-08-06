@@ -597,6 +597,16 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   //   it is the phase, not the image, that the extra smoothing is for). See apc.h.
   const double sigmabar_lambda = params.discrepancy_scale * sigmabar;
   const double sigmabar2_lambda = Math::pow2(sigmabar_lambda);
+  // The seed's second term is not dimensionally consistent with its first -- it scales as 1/k^2
+  //   where that one scales as 1/k -- so its share of the seed depends on the intensity units of
+  //   the data: 1.4e-4 of it at sigmabar ~ 178, but 13% at sigmabar ~ 0.178. The search converges
+  //   away from its seed, so this costs iterations rather than accuracy, and what survives is a
+  //   small difference in where the search stops: rescaling real data by 1e-3 moves the phase this
+  //   estimator returns by 1.6e-4 rad on a warm solve and 4.7e-3 rad on the cold chain. Dropping the
+  //   term makes the solve exactly scale-invariant -- every such comparison then falls to the
+  //   float32 floor of the phase map, ~1.5e-7 rad -- while moving the phase by under 1e-7 rad at the
+  //   intensity the defaults were calibrated at. It is kept only because it is what Chambolle's
+  //   eq. 7 states; removing it is measured, sound, and independent of anything else here.
   const double lambda_seed = 2.1237 / sigmabar_lambda + 0.0547 / sigmabar2_lambda; // eq. 7
   // Where the search for lambda begins. The eq. 7 seed is a function of the noise level alone and
   //   knows nothing of the plane; where the caller has kept what a previous pass over this same

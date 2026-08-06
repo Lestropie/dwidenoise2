@@ -68,18 +68,22 @@ namespace MR::Denoise::Precondition {
 //   from Pizzolato's own solver (an explicit finite-difference oriented-Laplacian PDE driven
 //   to steady state): here the phase is only a means to reduce the PCA rank of the
 //   demodulated Casorati matrix, not an end in itself, so phase MSE is not the objective, and
-//   the estimate is re-derived every outer iteration. A bounded per-slice cost with graceful
-//   (approximate) convergence therefore suits the loop far better than iterating any solver
-//   to full convergence. See dwidenoise2_dephase.md sections 2.2 and 2.5.
+//   the estimate is re-derived every outer iteration. A bounded per-slice cost therefore suits
+//   the loop far better than running any solver against a convergence test. The bound is not,
+//   however, a truncation: with the step sizes Params::cp_step_ratio selects, the budgets
+//   configured below reach the minimiser of the energy above at the weight the discrepancy
+//   criterion asks for -- measured per plane against exactly minimised references, to within
+//   about 2e-4 of that weight. See dwidenoise2_dephase.md sections 2.2 and 2.5.
 //
 //   Cost across the iteration loop: the phase changes little once the noise map stabilises, so a
 //   volume is solved from a cold start only on the first pass that estimates it -- and, because a
 //   background phase is smooth (low spatial bandwidth), every cold solve begins on a downsampled
-//   grid with the result upsampled (~1/4 the cost per level of decimation, near-lossless for a
-//   smooth field; Params::cascade_depth sets how many such levels there are, two in total by
-//   default -- one coarse and the native one, with Params::cascade_lambda deciding how each level
-//   calibrates its own regularisation and Params::cascade_prolongation how its result is carried to
-//   the level above it). Every pass
+//   grid with the result upsampled (~1/4 the cost per level of decimation; Params::cascade_depth
+//   sets how many such levels there are, two in total by default -- one coarse and the native one,
+//   with Params::cascade_lambda deciding how each level calibrates its own regularisation and
+//   Params::cascade_prolongation how its result is carried to the level above it. What a coarse
+//   level produces is a bootstrap and not an answer: it minimises a differently calibrated energy,
+//   which the native level above it repairs. See Params::cascade_depth). Every pass
 //   after a volume's first is native but warm-started from that volume's previous estimate (seeded
 //   with |f| * the incoming phase), so a much smaller iteration budget (the Params ..._warm counts)
 //   re-settles it. Where a later pass will provide that refinement the cold solve stops at the
@@ -99,8 +103,7 @@ namespace MR::Denoise::Precondition {
 //   pass, and hands operator() one VolumePlan per volume; a never-estimated volume is planned as a
 //   cold solve regardless of how many passes have already run over other volumes. solve_plane
 //   itself consumes only a warm_start flag (cold-start seed vs warm-start seed, and full vs
-//   reduced budget). This is the dominant lever on APC's contribution to run time -- though not on
-//   its result, which the bootstrap grid decides (finding 3 under DWIDENOISE2_APC_PROFILE below).
+//   reduced budget). This is the dominant lever on APC's contribution to run time.
 //
 //   Regularisation strength lambda: the discrepancy criterion (Morozov), realised by default as
 //   Chambolle's (2004) fixed-point iteration on lambda (their eq. 6) seeded from eq. 7 --
@@ -182,78 +185,97 @@ namespace MR::Denoise::Precondition {
 //   lambda-selection alternatives: the discrepancy criterion (implemented; short, cheap
 //   outer loop) vs spatially-varying Monte-Carlo SURE (svSURE; MSE-optimal but the ~98-min
 //   bottleneck, deferred).
+//
+//   One alternative that looks promising and is not: splitting the phase into a low-order
+//   component removed analytically -- the k-space Hann demodulator this codebase already carries
+//   would supply one -- and a TV-regularised remainder, on the expectation that the remainder is a
+//   short-wavelength correction the solver settles in few sweeps. It cannot accelerate this solve,
+//   and the reason is a property of the functional rather than of the data: TV_vec is built from
+//   first differences, so a long-wavelength field carries almost none of its energy. Measured on
+//   exactly minimised solutions of the energy above, removing every ideal low-pass component from
+//   wavelengths of 64 voxels down to 8 changes TV_vec by between -1.3% and +0.1%, and the Hann
+//   component increases it. The fidelity term meanwhile is exactly invariant under demodulation by
+//   a unit-modulus phase, so the split poses the same problem in different coordinates: handing the
+//   solver the exact long-wavelength phase for free is worth 1.00x in sweeps at every accuracy
+//   threshold measured, on both grids and in all four b-value shells. The same argument is why
+//   -demodulate hann cannot be recast as a cheap first stage of this estimator.
 // ---------------------------------------------------------------------------------------
 //
-// Data-driven early termination (2026-07-02) and the DWIDENOISE2_APC_PROFILE experiment.
-//   Beyond the reduced ..._warm budgets, run_cp() now stops a sweep sequence early once the
-//   relative per-sweep change in the primal image falls below Params::cp_tol (a genuinely
-//   data-driven cut -- it only shortens a call once *that specific plane, at that specific
-//   outer iteration* has actually stopped moving; the ..._warm budgets are a fixed, uniform
-//   guess). The comparison is folded into the primal update's existing per-voxel pass, so it
-//   costs no extra sweep over the plane. cp_tol defaults tight (1e-6): a safety net against
-//   waste, not a substitute for the ..._warm budgets, since the right threshold cannot be
-//   chosen from first principles -- it depends on how quickly real (not synthetic) DWI planes
-//   actually settle once warm-started, which is an empirical question.
+// Data-driven early termination, and the DWIDENOISE2_APC_PROFILE build.
+//   Beyond the reduced ..._warm budgets, run_cp() stops a sweep sequence early once the relative
+//   per-sweep change in the primal image falls below Params::cp_tol -- a genuinely data-driven
+//   cut, in that it only shortens a call once *that specific plane, at that specific outer
+//   iteration* has stopped moving, where the ..._warm budgets are a fixed, uniform guess. The
+//   comparison is folded into the primal update's existing per-voxel pass, so it costs no extra
+//   sweep over the plane. Whether it fires at all is a property of the step sizes rather than of
+//   the threshold; Params::cp_tol records what it does at the values configured here, and why it
+//   must not be loosened as a speed measure.
 //
-//   To answer that question, build with -DDWIDENOISE2_APC_PROFILE to compile in a per-plane
-//   DEBUG() line (run under -debug) reporting, for every solve_plane() call: plane size,
-//   cold/warm, spatially-varying vs self-calibrated, ndomain fraction, sigmabar, lambda
-//   iterations used vs budgeted, total Chambolle-Pock sweeps actually consumed vs the full
-//   budget (n_lambda*n_cp + n_polish), and the converged lambda. This is compile-time gated
-//   (rather than always emitted under -debug) because computing and formatting it triggers
-//   string work on every one of the many thousands of solve_plane() calls in a full run, which
-//   would be a needless cost in ordinary -debug diagnostic use; opting in is a deliberate,
-//   separate build for this experiment. The sweep- and lambda-iteration counters that feed the
-//   line exist *only* to report it -- run_cp()'s early-exit decision itself needs no count, only
-//   the per-sweep relative-change comparison -- so those counters (and run_cp()'s ssize_t return)
-//   are themselves compiled out under the non-profile build, not merely left unprinted. A
-//   non-profile build's timing therefore isolates the effect of cp_tol's early exit from the
-//   cost of instrumenting it, which is the point of comparing the two builds' run times.
+//   Build with -DDWIDENOISE2_APC_PROFILE to compile in a per-plane DEBUG() line (run under -debug)
+//   reporting, for every solve_plane() call: plane size, cold/warm, spatially-varying vs
+//   self-calibrated, ndomain fraction, sigmabar, lambda iterations used vs budgeted, total
+//   Chambolle-Pock sweeps actually consumed vs the full budget (n_lambda*n_cp + n_polish), and the
+//   converged lambda. This is compile-time gated rather than always emitted under -debug because
+//   computing and formatting it triggers string work on every one of the many thousands of
+//   solve_plane() calls in a full run, which would be a needless cost in ordinary -debug
+//   diagnostic use. The sweep- and lambda-iteration counters that feed the line exist *only* to
+//   report it -- run_cp()'s early-exit decision itself needs no count, only the per-sweep
+//   relative-change comparison -- so those counters (and run_cp()'s ssize_t return) are themselves
+//   compiled out under the non-profile build, not merely left unprinted. A non-profile build's
+//   timing therefore isolates the effect of cp_tol's early exit from the cost of instrumenting it.
+// ---------------------------------------------------------------------------------------
 //
-//   What that experiment found, when finally run on real data (128x128 in-plane, 105 volumes,
-//   3T Prisma, MB4 / PF 0.75 / 64-channel head-neck coil; multi-iteration schedule; both the
-//   per-plane log and paired denoising runs). Three results, none of which the pre-run
-//   expectations above anticipated:
-//     1. The lambda fixed point is NOT reached, and at native resolution is not reachable.
-//        On the coarse cold pass it needs ~30 lambda updates (budget 10). On the native warm
-//        passes lambda dives well below its eq. 7 seed, turns, and then creeps back so slowly
-//        that 300 updates x 60 sweeps still has not converged. Chambolle-Pock needs sweeps of
-//        the order of the plane's width to propagate information across it, so at 128 wide a
-//        budget of tens of sweeps leaves the inner solve far from its own minimiser, and the
-//        outer fixed point inherits that lag. The budgets below therefore do NOT merely bound
-//        the cost of reaching a lambda the criterion selects: together with
-//        discrepancy_scale they *are* what selects it. Raising them raises the achieved
-//        smoothing; they cannot be treated as a free speed knob.
-//        What rescues this from being a calibration of an arbitrary stopping point is that the
-//        *result* settles even though lambda does not: quadrupling the budgets the file shipped
-//        with brings the noise-recovery figure R to within a few percent of its value under a
-//        further doubling, so there is a well-defined answer to calibrate discrepancy_scale
-//        against. That is what the current budgets buy, at roughly 5x the APC cost, and it is
-//        why they are what they are. Anyone reducing them for speed is not merely trading
-//        accuracy for time -- they are moving the operating point to one where the noise level
-//        depends on where the iteration was cut, and must re-derive discrepancy_scale there.
-//     2. cp_tol never fires. Over 99% of warm and ~80-93% of cold solves consume their entire
-//        sweep budget, and raising cp_tol from 1e-6 to 1e-4 changed neither the run time nor
-//        any output. It remains as a safety net for planes that do settle early, but it is not
-//        a lever, and loosening it as a speed measure would cut smoothing (see 1) rather than
-//        cut waste.
-//     3. The dominant lever on the result is not the ..._warm budget at all but the 2x
-//        coarse-grid cold bootstrap. Against a reference that solves cold at native resolution
-//        on the full budget at *every* pass, replacing only the first pass's grid (native cold
-//        bootstrap, then the ordinary reduced warm passes) reproduces it to 1.1% RMS, whereas
-//        the shipped coarse bootstrap differs by 4.8% -- and no warm budget from 6/3/6 up to
-//        the full 25/10/25 moves that figure by more than 0.2%. The warm start is sticky: at
-//        native resolution the solver stays near whatever it is seeded with. That is what makes
-//        the reduced warm budget nearly free, and it is also why the bootstrap grid, which sets
-//        the phase's spatial bandwidth once and for all, decides the outcome.
-//   Validating on rank alone proved insufficient, because the estimated signal rank is a
-//   function of the noise level the same run estimates: a configuration whose phase absorbs
-//   noise reports both a lower noise level and, through the Marchenko-Pastur threshold that
-//   level sets, a lower rank -- so over-fitting reads as an improvement on that metric. The
-//   discriminating measurement is the added-noise recovery test described at
-//   Params::discrepancy_scale, with rank retained only as a check that the extra smoothing has
-//   not cost demodulation quality (it has not: rank rises ~1% while the recovery deficit,
-//   14-23% of the added noise variance, is eliminated).
+// What the defaults below were measured against, and what that measurement does not cover.
+//
+//   The reference. Every per-plane accuracy figure quoted in this file is a distance to the
+//   *exact* minimiser of the energy above at the *exact* root of the discrepancy condition, not to
+//   another run of this solver. It is obtained per plane by bracketing and bisecting that condition
+//   to 1e-6 relative, each inner problem being solved until its Fenchel duality gap certifies
+//   E(u) - min E below 1e-9 of |E|. The dual of that energy is
+//
+//       D(p) = -<f, div p> - (1/(2 lambda)) sum_x ||div p(x)||^2 / w(x),   ||p(x)||_2 <= 1,
+//
+//   with div the exact negative adjoint of the forward difference this solver forms, its boundary
+//   rows included; a textbook divergence with a symmetric or periodic boundary is a different
+//   operator and bounds nothing here. Two certified solves of one plane from different starting
+//   points agree to about 1e-5 rad, which is the floor of every per-plane figure quoted below.
+//
+//   What that reference settled, and it is why several of the defaults are where they are: the
+//   iteration budgets were never the binding constraint. With the classical balanced primal-dual
+//   steps the lambda search settles near 0.30 of the weight the criterion asks for and stays there
+//   at any affordable budget, so the budgets rather than the criterion were selecting the
+//   regularisation, a coarse-grid bootstrap rather than the budgets was deciding the answer, and
+//   the fixed point looked unreachable at native resolution. None of that survives the step sizes:
+//   fixing the dimensionless product tau * lambda instead (Params::cp_step_ratio) locates the
+//   criterion's weight to within about 2e-4 on the same budgets, cold and warm alike, and the depth
+//   of the cold cascade then moves the phase returned by some 14% rather than by a factor of four.
+//
+//   The data. One complex acquisition: 3T Siemens Prisma, MB4, PF 0.75, 64-channel head-neck coil,
+//   128x128 in plane, 105 volumes over four b-value shells. Two 4-slice slabs of it, one central
+//   (high g-factor) and one peripheral; no whole-volume run was validated. In-plane widths 128, 96
+//   and 64, obtained by *cropping* that acquisition and never by resampling, which would change the
+//   noise correlation. Intensities rescaled over six orders of magnitude. One added-noise increment
+//   at which the recovery check closes.
+//
+//   The metrics, including the two that must not be used. Per plane, the distance to the certified
+//   minimiser above says whether the solver solves the problem it is posed. End to end, the
+//   added-noise recovery figure R defined at Params::discrepancy_scale says whether that problem is
+//   the right one, and it is the criterion any re-tune must be validated on. Do NOT use the
+//   retained rank as a primary metric: the rank is thresholded by the noise level the same run
+//   estimates, so a phase that absorbs noise reports both a lower level and, through that
+//   threshold, a lower rank, and over-fitting reads as an improvement. Rank is a check that added
+//   smoothing has not cost demodulation quality, and nothing more. Do NOT tune on phase MSE against
+//   another phase estimate either: no reference phase exists on real data, and the phase is a means
+//   of reducing the rank of the demodulated Casorati matrix rather than an end in itself.
+//
+//   What is not covered. No second vendor, field strength, coil or reconstruction, and no second
+//   acquisition of any kind. No in-plane matrix size above 128, and none below 64. The dependence
+//   of R on the size of the added-noise increment, and the regime in which no noise level map ever
+//   exists, are both open and are set out at Params::discrepancy_scale. Denoising quality itself
+//   was not assessed: no reference exists on real data against which a denoised series could be
+//   scored, so what is established is that the solver reaches the minimiser the criterion selects,
+//   and that the noise level estimated from the result is unbiased at the increment measured --
+//   not that the phase it returns is the best available background phase.
 // ---------------------------------------------------------------------------------------
 class AdaptivePhaseEstimator {
 public:
@@ -365,10 +387,10 @@ public:
     //      one octave down, where the added variance is 15% of the total and the statistic
     //      magnifies a given error in the estimated level about 2.6-fold -- the same runs read
     //      R = 0.80 (slab A) and 0.85 (slab B). This is a property of the noise level estimation
-    //      rather than of these settings: at these same iteration counts with zero step ratio, the
-    //      looser lambda tolerance that preceded this one and scale 1.05, the identical measurement
-    //      reads 0.87 and 0.83. Read R at a much smaller increment as a consistency check that does
-    //      not currently close, not as a bias.
+    //      rather than of these settings: at these same iteration counts with zero step ratio, a
+    //      looser lambda tolerance and scale 1.05, the identical measurement reads 0.87 and 0.83.
+    //      Read R at a much smaller increment as a consistency check that does not currently
+    //      close, not as a bias.
     //   2. Where no noise level map exists -- the first iteration of any schedule, and *every*
     //      solve under a single-row schedule (-vst_method none, -fixed_rank, apriori) -- sigmabar
     //      is self-calibrated from the plane's own data. Both branches estimate the same
@@ -383,11 +405,13 @@ public:
     //      the rigid-phase limit, while an under-smoothed one absorbs noise into the phase and
     //      biases the estimated level down -- but one value of this scale cannot place both regimes
     //      at unity, and this one is placed on the multi-iteration schedule.
-    //   3. The value was derived on a single acquisition (3T Prisma, MB4, PF 0.75, 64-channel
-    //      head-neck coil). It holds across in-plane widths 128, 96 and 64 (R = 1.01 / 0.98 / 1.03)
-    //      and is very nearly invariant to the intensity units of the data, R agreeing to four
-    //      significant figures over six orders of magnitude of rescaling. No other vendor, field
-    //      strength or in-plane matrix size has been tested, and no matrix size above 128.
+    //   3. The value was derived on a single acquisition (3T Siemens Prisma, MB4, PF 0.75,
+    //      64-channel head-neck coil, 128x128 in plane), on two 4-slice slabs of it. It holds
+    //      across in-plane widths 128, 96 and 64 (R = 1.01 / 0.98 / 1.03), all three obtained by
+    //      cropping that same acquisition, and it is very nearly invariant to the intensity units
+    //      of the data, R agreeing to four significant figures over six orders of magnitude of
+    //      rescaling. No other vendor, field strength, coil or reconstruction has been tested; no
+    //      in-plane matrix size above 128 or below 64; and no whole-volume run.
     double discrepancy_scale = 1.20;
     // Chambolle-Pock primal-dual iterations run between successive lambda updates. The
     //   solver is warm-started across lambda updates, so this need not fully converge each
@@ -456,9 +480,29 @@ public:
     //   and 128, over a sixteenfold range of iteration budgets spanning the counts above, the gap
     //   between depths 1 and 2 falls from a factor of 3.9 in the phase error under truncation to
     //   14%, and at the settings configured here the two are indistinguishable in the phase they
-    //   return. What survives is the cost argument: the coarse level does most of the travelling on
-    //   a grid a quarter the area, so two levels reach that same phase for about a quarter fewer
-    //   voxel-updates than one, which is why two remains the default.
+    //   return.
+    //
+    // Why two, given that one is the cheaper route to a given accuracy. Per plane at matched
+    //   accuracy, on each width's own cost/accuracy front, one level is cheaper everywhere: any
+    //   depth of two or more costs 1.3x to 7.3x more sweeps and 0.7x to 4.0x more voxel-updates to
+    //   reach the same phase error, and at an equal budget the single level is the more accurate of
+    //   the two in 22 of the 24 (width, budget, step size) cells measured. On that comparison the
+    //   cascade is not beneficial and is not retained on it. What retains it is whole-pipeline run
+    //   time at the counts above, which is what the defaults were selected on: wall clock tracks
+    //   voxel-updates rather than sweeps, a two-level chain spends most of its sweeps on a grid a
+    //   quarter the area, and both depths locate the weight the criterion asks for to within about
+    //   2e-4 at these counts -- so what separates them per plane leaves no trace in the
+    //   noise-recovery figure R, in the retained rank, or in the denoised series, while the run time
+    //   does. Reducing the budgets would re-open this, since the argument depends on both depths
+    //   converging.
+    //
+    // No dependence on the plane's width was found, so this is a constant rather than a rule in
+    //   Nx, Ny. Fitting the shallowest depth within 5% of the best achievable at each width against
+    //   log2(width) gives a slope of -0.014 over 24 cells (residual rms 0.28) where the propagation
+    //   argument above predicts +1.000, and within the cascade family the coarsest grid at that knee
+    //   tracks the width at W/2 rather than sitting at a fixed size. Measured over in-plane widths
+    //   64, 96 and 128 only: no complex acquisition wider than 128 was available, so nothing here
+    //   licenses a different value above it.
     //
     // Descent stops at any level whose plane is under 4 voxels along either axis, so this is an
     //   upper bound and not an exact count; a plane too small to decimate at all is solved cold at
@@ -541,7 +585,7 @@ public:
     //   order ten updates. What limits it is that the inner problem is *not* minimised exactly:
     //   a truncated Chambolle-Pock sequence has not yet moved u far from where it started, so it
     //   under-reports R, and the update then drives lambda below the lambda the criterion asks
-    //   for -- on 128x128 planes at the budgets above, by a factor of three to four.
+    //   for.
     //
     // BISECTION and CONTINUATION instead bracket the crossing and bisect within the bracket, so
     //   the returned lambda is bounded by the bracket however the search reached it. Both work in
@@ -579,14 +623,14 @@ public:
     //   that systematically stops short of the weight the criterion asks for compounds that
     //   shortfall from pass to pass instead of merely repeating it, and the phase drifts toward the
     //   truncated iteration's own attractor rather than toward the criterion's root: with the
-    //   balanced step sizes and the looser lambda tolerance that preceded these, that attractor
-    //   sits near a quarter of the correct weight and the phase error grows monotonically with pass
-    //   count. At the step sizes and tolerance configured here the attractor is the correct weight
-    //   itself -- the search lands within 2e-4 of it, carrying or not -- and the answer is constant
-    //   to four significant figures from the second pass onward (measured out to six passes) while
-    //   costing 12% fewer sweeps than repeating the search, for a phase a third further from the
-    //   exact minimiser in the mean. Reducing the budgets, loosening lambda_tol or removing
-    //   cp_step_ratio re-creates the drift.
+    //   balanced step sizes and a looser lambda tolerance, that attractor sits near a quarter of
+    //   the correct weight and the phase error grows monotonically with pass count. At the step
+    //   sizes and tolerance configured here the attractor is the correct weight itself -- the
+    //   search lands within 2e-4 of it, carrying or not -- and the answer is constant to four
+    //   significant figures from the second pass onward (measured out to six passes) while costing
+    //   12% fewer sweeps than repeating the search, for a phase a third further from the exact
+    //   minimiser in the mean. Reducing the budgets, loosening lambda_tol or removing cp_step_ratio
+    //   re-creates the drift.
     bool carry_lambda = true;
     // Geometric ratio by which lambda is stepped while searching for a bracket. Consumed by
     //   CONTINUATION only; BISECTION doubles or halves. Ratios close to one keep each inner solve
@@ -620,7 +664,7 @@ public:
     double lambda_tol = 1e-4;
     // Ratio fixing the primal-dual step sizes of the inner Chambolle-Pock sweeps, as the
     //   dimensionless product tau * lambda. Zero (or negative) keeps the classical balanced choice
-    //   tau = sigma = 1/||K||, which is what this solver used originally.
+    //   tau = sigma = 1/||K||.
     //
     // Why the balanced choice is the wrong one here. Chambolle-Pock constrains only the *product*
     //   tau * sigma * ||K||^2 <= 1; their ratio is free, and it is what decides how fast each of the
