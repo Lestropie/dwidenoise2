@@ -345,12 +345,15 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   Eigen::ArrayXXd pxi = Eigen::ArrayXXd::Zero(Nx, Ny);
   Eigen::ArrayXXd pyi = Eigen::ArrayXXd::Zero(Nx, Ny);
 
-  // Step sizes: for the 2-D forward-difference gradient, ||grad||^2 <= 8; the coupled
-  //   two-channel operator has the same norm. tau * sigma_cp * ||K||^2 = 1 (the limiting
-  //   stable choice for Chambolle-Pock Algorithm 1, theta = 1).
+  // For the 2-D forward-difference gradient, ||grad||^2 <= 8; the coupled two-channel operator has
+  //   the same norm. Every step-size pair below satisfies tau * sigma_cp * ||K||^2 = 1, the limiting
+  //   stable choice, and differs only in how it divides that product between the two variables
+  //   (Params::cp_step_ratio).
   const double L2 = 8.0;
-  const double tau = 1.0 / std::sqrt(L2);
-  const double sigma_cp = 1.0 / std::sqrt(L2);
+  // The strong convexity modulus of the data term, for the accelerated scheme: the smallest weight
+  //   anywhere on the plane bounds its curvature from below. Formed here rather than per sweep
+  //   because only lambda changes between calls.
+  const double w_min = params.cp_accelerate ? w.minCoeff() : 0.0;
 
   // One primal-dual sweep at fidelity weight "lambda". Warm-starts from the current state, and
   //   stops early once the relative per-sweep change in u falls below params.cp_tol (data-driven
@@ -366,7 +369,29 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
 #else
   auto run_cp = [&](const ssize_t niter, const double lambda) {
 #endif
+    // Step sizes for this call. tau carries the intensity units of the primal image while the dual
+    //   variable is confined to the unit ball, so the classical balanced pair tau = sigma_cp =
+    //   1/||K|| is a choice about the data's scale rather than a neutral one; where
+    //   Params::cp_step_ratio asks for it, the dimensionless product tau * lambda is fixed instead,
+    //   which both removes that scale dependence and re-balances the pair as the lambda search
+    //   moves.
+    double tau = 1.0 / std::sqrt(L2);
+    double sigma_cp = 1.0 / std::sqrt(L2);
+    if (params.cp_step_ratio > 0.0) {
+      const double scaled = params.cp_step_ratio / lambda;
+      if (std::isfinite(scaled) && scaled > 0.0) {
+        tau = scaled;
+        sigma_cp = 1.0 / (L2 * tau);
+      }
+    }
+    // Chambolle-Pock Algorithm 2 restarts its step-size sequence for each call, since a call is a
+    //   fresh sequence at a fresh lambda, and hence at a fresh modulus.
+    const double gamma = params.cp_accelerate ? lambda * w_min : 0.0;
     for (ssize_t iter = 0; iter != niter; ++iter) {
+      // Over-relaxation factor. Algorithm 1 holds it at 1; Algorithm 2 derives it from the step
+      //   size this sweep uses, then applies it to both step sizes for the next, which leaves their
+      //   product -- and so the stability condition -- exactly unchanged.
+      const double theta = params.cp_accelerate ? 1.0 / std::sqrt(1.0 + 2.0 * gamma * tau) : 1.0;
 #ifdef DWIDENOISE2_APC_PROFILE
       ++used;
 #endif
@@ -396,8 +421,9 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
       //   the forward-difference gradient (backward differences). The proximal step of the
       //   weighted quadratic data term G(u) = (lambda/2) sum_x w(x) ||u - f||^2 is pointwise:
       //   u = ( v + tau*lambda*w*f ) / ( 1 + tau*lambda*w ), v = u + tau*div(p). Over-relaxed
-      //   ubar = 2*u_new - u_old (theta = 1). Each voxel is independent, so the in-place
-      //   overwrite of u is safe.
+      //   ubar = u_new + theta*(u_new - u_old), which at theta = 1 is written in its exact
+      //   2*u_new - u_old form (the two are not bit-identical in floating point). Each voxel is
+      //   independent, so the in-place overwrite of u is safe.
       // Relative per-sweep change in u, accumulated alongside the update itself (no extra pass):
       //   the data-driven early-exit test below compares sum_diff2 against sum_old2.
       double sum_diff2 = 0.0;
@@ -428,11 +454,20 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
           const double oldi = ui(i, j);
           sum_diff2 += Math::pow2(unewr - oldr) + Math::pow2(unewi - oldi);
           sum_old2 += Math::pow2(oldr) + Math::pow2(oldi);
-          ubr(i, j) = 2.0 * unewr - oldr;
-          ubi(i, j) = 2.0 * unewi - oldi;
+          if (params.cp_accelerate) {
+            ubr(i, j) = unewr + theta * (unewr - oldr);
+            ubi(i, j) = unewi + theta * (unewi - oldi);
+          } else {
+            ubr(i, j) = 2.0 * unewr - oldr;
+            ubi(i, j) = 2.0 * unewi - oldi;
+          }
           ur(i, j) = unewr;
           ui(i, j) = unewi;
         }
+      }
+      if (params.cp_accelerate) {
+        tau *= theta;
+        sigma_cp /= theta;
       }
       if (params.cp_tol > 0.0 && sum_old2 > 0.0 && sum_diff2 < Math::pow2(params.cp_tol) * sum_old2)
         break;

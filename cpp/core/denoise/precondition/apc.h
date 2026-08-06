@@ -450,6 +450,58 @@ public:
     //   lambda_solver_t::FIXED_POINT only. Rarely reached in practice: the fixed point converges
     //   within budget only on the coarse cold pass, and even there for a minority of planes.
     double lambda_tol = 1e-2;
+    // Ratio fixing the primal-dual step sizes of the inner Chambolle-Pock sweeps, as the
+    //   dimensionless product tau * lambda. Zero (or negative) keeps the classical balanced choice
+    //   tau = sigma = 1/||K||, which is what this solver used originally.
+    //
+    // Why the balanced choice is the wrong one here. Chambolle-Pock constrains only the *product*
+    //   tau * sigma * ||K||^2 <= 1; their ratio is free, and it is what decides how fast each of the
+    //   two variables moves. The primal variable u carries the intensity units of the data, whereas
+    //   the dual variable p is confined to the unit ball, so tau and sigma are not dimensionless and
+    //   tau = sigma = 1/||K|| tacitly assumes data of order one. Complex MRI data are not: on 3T
+    //   diffusion data the plane's own values run into the hundreds. The dimensionless combination
+    //   is tau * lambda, and the number of sweeps a solve needs is set by it: at the optimum the
+    //   data term balances the regulariser, div p = lambda w (u - f), so the primal iterate closes a
+    //   distance |u - f| at a speed tau |div p| = tau lambda w |u - f| per sweep, i.e. in about
+    //   1 / (tau lambda w) sweeps regardless of the intensity scale. With tau pinned at 1/sqrt(8)
+    //   and lambda of order 1e-3, that is several hundred sweeps of pure travel before the iterate
+    //   even reaches its own minimiser -- which is most of what the fixed iteration budgets buy.
+    //
+    // Fixing tau * lambda instead makes the sweep count scale-free, and adapts tau as the lambda
+    //   search moves: a smaller lambda means a solution further from the data, and proportionally
+    //   larger primal steps to reach it. Measured against the exactly minimised problem on 3T
+    //   diffusion planes, values between 0.01 and 0.05 reach a given phase accuracy in 6 to 29 times
+    //   fewer sweeps than the balanced choice, on every plane tested and at every accuracy level;
+    //   the optimum is shallow, and drifts from ~0.03 on warm-started 128x128 planes to ~0.015 on
+    //   the cold 64x64 bootstrap, whose iterate must additionally propagate information across the
+    //   plane and so cannot profit from larger steps beyond that point. Above ~0.1 the dual variable
+    //   is starved in proportion and the gain reverses.
+    //
+    // This is a step-size choice, not a stopping rule: the solve converges to the same minimiser for
+    //   any admissible ratio, so unlike the iteration budgets it does not co-determine the achieved
+    //   regularisation except through how nearly the budget reaches that minimiser.
+    double cp_step_ratio = 0.0;
+    // Whether the inner sweeps run Chambolle-Pock's Algorithm 2 -- one-sided acceleration, in which
+    //   theta, tau and sigma are updated every sweep from the strong convexity modulus of the data
+    //   term -- in place of Algorithm 1 at fixed step sizes and theta = 1.
+    //
+    // The data term (lambda/2) sum_x w(x) ||u - f||^2 is uniformly convex, with Euclidean modulus
+    //   gamma = lambda * min_x w(x): the smallest weight anywhere on the plane is what bounds the
+    //   curvature from below, and the per-plane minimum is used rather than the worst case
+    //   1/weight_clamp the clamp permits, since a larger admissible modulus is strictly better for
+    //   the scheme. Algorithm 2 then promises O(1/k^2) in place of O(1/k).
+    //
+    // It does not deliver here, and the reason is worth recording. The accelerated updates shrink
+    //   tau and grow sigma by theta = 1/sqrt(1 + 2 gamma tau) per sweep, so the acceleration only
+    //   engages once gamma * tau * k is of order one over the sweep count k. On these data the
+    //   weights are bounded below by ~0.1 and lambda is of order 1e-3, making gamma ~ 1e-4: with the
+    //   step sizes cp_step_ratio selects, the accelerated scheme reaches a given phase accuracy
+    //   within a few percent of Algorithm 1 -- neither reliably better nor worse -- and with any
+    //   larger modulus it is progressively worse, because the collapsing primal step costs more
+    //   travel than the improved rate returns. It cannot, however, be unstable: theta multiplies tau
+    //   and divides sigma, so tau * sigma * ||K||^2 is preserved exactly, and an over-large modulus
+    //   stalls the iteration rather than diverging it.
+    bool cp_accelerate = false;
     // Relative-change tolerance for early exit of the *inner* Chambolle-Pock sweeps
     //   themselves (both the lambda-loop sweeps and the polish sweeps), checked every sweep
     //   at negligible extra cost (the comparison piggybacks on the primal update's existing
