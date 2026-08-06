@@ -199,6 +199,20 @@ void upsample_phase(const Eigen::Ref<const Eigen::ArrayXXd> &pr_c,
     }
   }
 }
+
+#ifdef DWIDENOISE2_APC_PROFILE
+const char *lambda_solver_name(const AdaptivePhaseEstimator::lambda_solver_t solver) {
+  switch (solver) {
+  case AdaptivePhaseEstimator::lambda_solver_t::FIXED_POINT:
+    return "fixed_point";
+  case AdaptivePhaseEstimator::lambda_solver_t::BISECTION:
+    return "bisection";
+  case AdaptivePhaseEstimator::lambda_solver_t::CONTINUATION:
+    return "continuation";
+  }
+  return "unknown";
+}
+#endif
 } // namespace
 
 bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
@@ -406,40 +420,112 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
 #endif
   };
 
-  // --- Discrepancy-criterion (Morozov) fixed point on lambda ----------------------------
-  // Chambolle (2004) update, eq. 6, seeded by eq. 7, targeting a weighted residual energy of
+  // --- Discrepancy-criterion (Morozov) selection of lambda ------------------------------
+  // Seeded by Chambolle (2004) eq. 7 and targeting a weighted residual energy of
   //   Rr^2 + Ri^2 = 2 * ndomain * sigmabar_lambda^2 (spatially-varying form, their eq. 11). Image
-  //   and lambda are refined jointly (the solver is warm-started across updates).
+  //   and lambda are refined jointly: the solver is warm-started across lambda updates, so each
+  //   update's sweeps continue the previous one's rather than restarting. Which search is used --
+  //   their eq. 6 multiplicative update, or one of two bracketing searches for the same condition
+  //   -- is Params::lambda_solver, documented in apc.h.
   // The noise level driving the seed and the target is scaled by params.discrepancy_scale, so the
   //   residual is targeted above the noise energy the criterion nominally prescribes; the fidelity
   //   weights w computed above deliberately do not see that factor (they are scale-invariant, and
   //   it is the phase, not the image, that the extra smoothing is for). See apc.h.
   const double sigmabar_lambda = params.discrepancy_scale * sigmabar;
   const double sigmabar2_lambda = Math::pow2(sigmabar_lambda);
-  double lambda = 2.1237 / sigmabar_lambda + 0.0547 / sigmabar2_lambda; // eq. 7
+  const double lambda_seed = 2.1237 / sigmabar_lambda + 0.0547 / sigmabar2_lambda; // eq. 7
+  double lambda = lambda_seed;
   const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar_lambda;
+  // The weighted residual over the calibration domain, summed over the two channels: the quantity
+  //   the discrepancy criterion matches against target_scale. Evaluated at whatever image the
+  //   sweeps above have reached, so it inherits their truncation.
+  auto residual_sum = [&]() {
+    const double Rr = std::sqrt((indom * w * (ur - fr).square()).sum());
+    const double Ri = std::sqrt((indom * w * (ui - fi).square()).sum());
+    return Rr + Ri;
+  };
   // Bookkeeping for the DWIDENOISE2_APC_PROFILE DEBUG() call below only -- entirely compiled out
   //   otherwise, so a non-profile build's timing reflects only run_cp's cp_tol early exit, not
   //   the cost of reporting it.
 #ifdef DWIDENOISE2_APC_PROFILE
   ssize_t lambda_iters_used = 0;
   ssize_t cp_sweeps_used = 0;
+  ssize_t bracket_steps_used = 0;
 #endif
-  for (ssize_t li = 0; li != n_lambda; ++li) {
+  if (params.lambda_solver == lambda_solver_t::FIXED_POINT) {
+    for (ssize_t li = 0; li != n_lambda; ++li) {
 #ifdef DWIDENOISE2_APC_PROFILE
-    lambda_iters_used = li + 1;
-    cp_sweeps_used +=
+      lambda_iters_used = li + 1;
+      cp_sweeps_used +=
 #endif
-        run_cp(n_cp, lambda);
-    const double Rr = std::sqrt((indom * w * (ur - fr).square()).sum());
-    const double Ri = std::sqrt((indom * w * (ui - fi).square()).sum());
-    const double lambda_new = lambda * (Rr + Ri) / target_scale;
-    if (!std::isfinite(lambda_new) || lambda_new <= 0.0)
-      break;
-    const double rel = std::abs(lambda_new - lambda) / lambda;
-    lambda = lambda_new;
-    if (rel < params.lambda_tol)
-      break;
+          run_cp(n_cp, lambda);
+      const double lambda_new = lambda * residual_sum() / target_scale;
+      if (!std::isfinite(lambda_new) || lambda_new <= 0.0)
+        break;
+      const double rel = std::abs(lambda_new - lambda) / lambda;
+      lambda = lambda_new;
+      if (rel < params.lambda_tol)
+        break;
+    }
+  } else {
+    // Bracketing search for the same condition. residual_sum() - target_scale is decreasing in
+    //   lambda with a single sign change (see Params::lambda_solver), so a pair of lambda at which
+    //   it takes opposite signs traps the crossing, and every subsequent evaluation halves the
+    //   interval in log lambda. The primal-dual state is deliberately *not* reset between
+    //   evaluations: each inner solve resumes from the image and dual variable the previous lambda
+    //   left, which is what keeps the total sweep count of a search comparable to a handful of
+    //   solves rather than one per evaluation.
+    auto excess_at = [&](const double value) {
+#ifdef DWIDENOISE2_APC_PROFILE
+      ++lambda_iters_used;
+      cp_sweeps_used +=
+#endif
+          run_cp(n_cp, value);
+      return residual_sum() - target_scale;
+    };
+    // BISECTION halves or doubles; CONTINUATION walks by the configured (smaller) ratio.
+    const double step = params.lambda_solver == lambda_solver_t::CONTINUATION
+                            ? std::max(1.0 + 1e-9, params.lambda_step_factor)
+                            : 2.0;
+    lambda = lambda_seed * params.lambda_start_scale;
+    double excess = excess_at(lambda);
+    // Invariant maintained from here on: excess(lambda_lo) >= 0 >= excess(lambda_hi).
+    double lambda_lo = lambda;
+    double lambda_hi = lambda;
+    bool bracketed = (excess == 0.0);
+    // A residual below target means too little smoothing has been asked for, so the crossing lies
+    //   at a *smaller* lambda; above target, at a larger one.
+    const bool downward = (excess < 0.0);
+    for (ssize_t k = 0; !bracketed && k != params.lambda_bracket_cap; ++k) {
+      const double previous = lambda;
+      lambda = downward ? (lambda / step) : (lambda * step);
+      if (!std::isfinite(lambda) || !(lambda > 0.0))
+        break;
+#ifdef DWIDENOISE2_APC_PROFILE
+      ++bracket_steps_used;
+#endif
+      if (downward ? (excess_at(lambda) >= 0.0) : (excess_at(lambda) <= 0.0)) {
+        lambda_lo = downward ? lambda : previous;
+        lambda_hi = downward ? previous : lambda;
+        bracketed = true;
+      }
+    }
+    if (!bracketed) {
+      WARN("adaptive phase correction: the discrepancy criterion is met at no fidelity weight "
+           "within " +
+           str(params.lambda_bracket_cap) + " geometric steps of the initial estimate for a " + str(Nx) + "x" +
+           str(Ny) + " plane; that plane's incoming phase is left unchanged");
+      return false;
+    }
+    // Geometric (log-lambda) bisection of the bracket.
+    for (ssize_t li = 0; li != n_lambda && 0.5 * std::log(lambda_hi / lambda_lo) > params.lambda_root_tol; ++li) {
+      const double middle = std::sqrt(lambda_lo * lambda_hi);
+      if (excess_at(middle) >= 0.0)
+        lambda_lo = middle;
+      else
+        lambda_hi = middle;
+    }
+    lambda = std::sqrt(lambda_lo * lambda_hi);
   }
 
   // Settle the image at the converged lambda before extracting its argument.
@@ -451,6 +537,8 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
         " spatially_varying=" + str(spatially_varying) +                             //
         " ndomain=" + str(ndomain) + "/" + str(Npix) +                               //
         " sigmabar=" + str(sigmabar) +                                               //
+        " lambda_solver=" + lambda_solver_name(params.lambda_solver) +               //
+        " bracket_steps=" + str(bracket_steps_used) +                                //
         " lambda_iters=" + str(lambda_iters_used) + "/" + str(n_lambda) +            //
         " cp_sweeps=" + str(cp_sweeps_used) + "/" + str(n_lambda * n_cp + n_polish) + //
         " polish_sweeps=" + str(polish_sweeps_used) + "/" + str(n_polish) +          //

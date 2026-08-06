@@ -98,9 +98,10 @@ namespace MR::Denoise::Precondition {
 //   reduced budget). This is the dominant lever on APC's contribution to run time -- though not on
 //   its result, which the bootstrap grid decides (finding 3 under DWIDENOISE2_APC_PROFILE below).
 //
-//   Regularisation strength lambda: the discrepancy criterion (Morozov), realised as
-//   Chambolle's (2004) fixed-point iteration on lambda (their eq. 6) seeded from eq. 7,
-//   targeting a weighted residual energy of 2 * N * sigmabar^2 (their eq. 11; the factor 2
+//   Regularisation strength lambda: the discrepancy criterion (Morozov), realised by default as
+//   Chambolle's (2004) fixed-point iteration on lambda (their eq. 6) seeded from eq. 7 --
+//   Params::lambda_solver selects between that and two bracketing searches for the same
+//   condition -- targeting a weighted residual energy of 2 * N * sigmabar^2 (their eq. 11; the factor 2
 //   is the two real+imaginary channels of complex data), where the noise level entering that
 //   seed and that target is scaled by Params::discrepancy_scale. That factor is empirical and
 //   greater than one: the criterion as Pizzolato state it calibrates the *image* estimate u,
@@ -252,6 +253,19 @@ namespace MR::Denoise::Precondition {
 // ---------------------------------------------------------------------------------------
 class AdaptivePhaseEstimator {
 public:
+  // Strategy by which the fidelity weight lambda satisfying the discrepancy criterion is located.
+  //   All three target the same condition and differ only in how they search for it; see
+  //   Params::lambda_solver.
+  enum class lambda_solver_t {
+    // Chambolle's (2004) multiplicative fixed point (their eq. 6), seeded from their eq. 7.
+    FIXED_POINT,
+    // Bracket the crossing by doubling or halving lambda from that same seed, then bisect.
+    BISECTION,
+    // Reach the crossing by a monotone walk in small geometric steps from an over-fidelity
+    //   start, then bisect within the (narrow) interval the walk ends in.
+    CONTINUATION
+  };
+
   struct Params {
     // Scale factor applied to the noise level sigmabar *only* where it selects lambda: the
     //   eq. 7 seed and the eq. 11 residual target. The per-voxel fidelity weights
@@ -360,9 +374,61 @@ public:
     ssize_t cp_iter_warm = 48;
     ssize_t max_lambda_iter_warm = 20;
     ssize_t polish_iter_warm = 48;
-    // Relative-change tolerance for early exit of the lambda fixed-point iteration. Rarely
-    //   reached in practice: the fixed point converges within budget only on the coarse cold
-    //   pass, and even there for a minority of planes.
+    // How lambda is chosen to satisfy the discrepancy criterion.
+    //
+    // The criterion asks for the lambda at which the weighted residual over the calibration
+    //   domain, R(lambda) = Rr(lambda) + Ri(lambda), meets its target 2 sqrt(ndomain) sigmabar
+    //   (with sigmabar scaled by discrepancy_scale). R is monotone *decreasing* in lambda -- a
+    //   larger lambda means higher fidelity and hence a smaller residual -- and runs between two
+    //   plateaux: R -> 0 as lambda -> infinity, where u -> f, and R -> its maximum as lambda -> 0,
+    //   where u collapses to a constant image. It crosses the target exactly once in between, so
+    //   any method that brackets that crossing converges unconditionally, while a fixed-point
+    //   iteration converges only at a rate set by the local slope of R.
+    //
+    // FIXED_POINT is lambda <- lambda R(lambda)/target. Its contraction factor is
+    //   1 + d ln R / d ln lambda, which on 3T diffusion planes measures between 0.14 and 0.68 per
+    //   update, so with an exactly minimised inner problem it would reach several digits in of
+    //   order ten updates. What limits it is that the inner problem is *not* minimised exactly:
+    //   a truncated Chambolle-Pock sequence has not yet moved u far from where it started, so it
+    //   under-reports R, and the update then drives lambda below the lambda the criterion asks
+    //   for -- on 128x128 planes at the budgets above, by a factor of three to four.
+    //
+    // BISECTION and CONTINUATION instead bracket the crossing and bisect within the bracket, so
+    //   the returned lambda is bounded by the bracket however the search reached it. Both work in
+    //   log lambda -- geometric steps, geometric midpoints -- because lambda ranges over decades
+    //   while R is close to a power law in it. They differ only in how the bracket is found:
+    //   BISECTION doubles or halves, which reaches the crossing in few steps but makes each inner
+    //   solve start from an image minimising a substantially different energy; CONTINUATION steps
+    //   by the smaller lambda_step_factor, so every inner solve is a small perturbation of the one
+    //   before and the warm-started image stays near its own minimiser, at the cost of more steps.
+    //   Neither removes the truncation bias described above: bracketing locates the root of the
+    //   residual *as evaluated*, so the accuracy of the located lambda is set by how accurately
+    //   each evaluation minimises the inner problem (see cp_iter), not by the bracket width.
+    lambda_solver_t lambda_solver = lambda_solver_t::FIXED_POINT;
+    // Geometric ratio by which lambda is stepped while searching for a bracket. Consumed by
+    //   CONTINUATION only; BISECTION doubles or halves. Ratios close to one keep each inner solve
+    //   a small perturbation of the last but need proportionally more steps to reach the crossing,
+    //   which on these data lies a factor of two to sixteen below the eq. 7 seed.
+    double lambda_step_factor = 1.5;
+    // Multiplier applied to the eq. 7 seed to place the start of the bracket search. One starts at
+    //   the seed itself, which on every plane measured here already lies on the high-fidelity side
+    //   of the crossing, so the search walks downward from it.
+    double lambda_start_scale = 1.0;
+    // Maximum number of geometric steps the bracket search may take. Exhausting it means the
+    //   criterion is met at no lambda within reach of the seed, which contradicts the shape of R
+    //   described above and therefore indicates a degenerate plane rather than a slow search: the
+    //   plane is declined outright, so its incoming phase stands, in preference to regularising it
+    //   at an arbitrary lambda.
+    ssize_t lambda_bracket_cap = 40;
+    // Relative half-width of the bracket at which bisection stops, i.e. the relative uncertainty
+    //   of the returned lambda. Each bisection evaluation halves the log-width of the bracket, so
+    //   tightening this by a factor of two costs one further evaluation. max_lambda_iter (or its
+    //   ..._warm counterpart) bounds the number of those refinement evaluations; the bracket
+    //   search preceding them is bounded separately by lambda_bracket_cap.
+    double lambda_root_tol = 1e-3;
+    // Relative-change tolerance for early exit of the lambda fixed-point iteration; consumed by
+    //   lambda_solver_t::FIXED_POINT only. Rarely reached in practice: the fixed point converges
+    //   within budget only on the coarse cold pass, and even there for a minority of planes.
     double lambda_tol = 1e-2;
     // Relative-change tolerance for early exit of the *inner* Chambolle-Pock sweeps
     //   themselves (both the lambda-loop sweeps and the polish sweeps), checked every sweep
@@ -476,7 +542,9 @@ public:
   //   phase_r, phase_i : on entry (warm_start only) the incoming unit-magnitude phase used to
   //              seed the solver; on exit written with the new unit-magnitude phase iff the
   //              return value is true. Left untouched (so the caller's incoming phase stands)
-  //              only when the slice is fully degenerate -- no estimable noise level (false).
+  //              when the slice is fully degenerate -- no estimable noise level -- and, under a
+  //              bracketing lambda solver, when no lambda within Params::lambda_bracket_cap
+  //              geometric steps of the seed satisfies the discrepancy criterion (false).
   //   warm_start : false -> seed the image at the data f with the full iteration budget (a cold
   //              solve); true -> seed the image at |f| * (phase_r, phase_i) -- the smooth phase
   //              is then already ~converged, only the fast magnitude smoothing remains -- and use
