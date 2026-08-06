@@ -212,15 +212,37 @@ const char *lambda_solver_name(const AdaptivePhaseEstimator::lambda_solver_t sol
   }
   return "unknown";
 }
+
+const char *regime_name(const AdaptivePhaseEstimator::regime_t regime) {
+  switch (regime) {
+  case AdaptivePhaseEstimator::regime_t::WARM:
+    return "warm";
+  case AdaptivePhaseEstimator::regime_t::COLD_COARSE:
+    return "cold_coarse";
+  case AdaptivePhaseEstimator::regime_t::COLD_COARSE_THEN_WARM:
+    return "cold_coarse_then_warm";
+  }
+  return "unknown";
+}
 #endif
 } // namespace
+
+size_t AdaptivePhaseEstimator::slice_axis() const {
+  assert(inslice_axes.size() == 2);
+  for (size_t axis = 0; axis != 3; ++axis)
+    if (std::find(inslice_axes.begin(), inslice_axes.end(), axis) == inslice_axes.end())
+      return axis;
+  assert(false);
+  return 2;
+}
 
 bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
                                  const Eigen::Ref<const Eigen::ArrayXXd> &fi,
                                  const Eigen::Ref<const Eigen::ArrayXXd> &sigma,
                                  Eigen::Ref<Eigen::ArrayXXd> phase_r,
                                  Eigen::Ref<Eigen::ArrayXXd> phase_i,
-                                 const bool warm_start) const {
+                                 const bool warm_start,
+                                 double *const io_lambda) const {
   const ssize_t Nx = fr.rows();
   const ssize_t Ny = fr.cols();
   const ssize_t Npix = Nx * Ny;
@@ -434,7 +456,14 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   const double sigmabar_lambda = params.discrepancy_scale * sigmabar;
   const double sigmabar2_lambda = Math::pow2(sigmabar_lambda);
   const double lambda_seed = 2.1237 / sigmabar_lambda + 0.0547 / sigmabar2_lambda; // eq. 7
-  double lambda = lambda_seed;
+  // Where the search for lambda begins. The eq. 7 seed is a function of the noise level alone and
+  //   knows nothing of the plane; where the caller has kept what a previous pass over this same
+  //   plane converged to, that is a far better starting point, and the search then only has to
+  //   track how the criterion's answer has moved as the noise map settled (Params::carry_lambda).
+  const bool carried =
+      params.carry_lambda && io_lambda != nullptr && std::isfinite(*io_lambda) && *io_lambda > 0.0;
+  const double lambda_start = carried ? *io_lambda : lambda_seed;
+  double lambda = lambda_start;
   const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar_lambda;
   // The weighted residual over the calibration domain, summed over the two channels: the quantity
   //   the discrepancy criterion matches against target_scale. Evaluated at whatever image the
@@ -487,7 +516,7 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
     const double step = params.lambda_solver == lambda_solver_t::CONTINUATION
                             ? std::max(1.0 + 1e-9, params.lambda_step_factor)
                             : 2.0;
-    lambda = lambda_seed * params.lambda_start_scale;
+    lambda = lambda_start * params.lambda_start_scale;
     double excess = excess_at(lambda);
     // Invariant maintained from here on: excess(lambda_lo) >= 0 >= excess(lambda_hi).
     double lambda_lo = lambda;
@@ -538,6 +567,8 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
         " ndomain=" + str(ndomain) + "/" + str(Npix) +                               //
         " sigmabar=" + str(sigmabar) +                                               //
         " lambda_solver=" + lambda_solver_name(params.lambda_solver) +               //
+        " lambda_carried=" + str(carried ? 1 : 0) +                                  //
+        " lambda_start=" + str(lambda_start) +                                       //
         " bracket_steps=" + str(bracket_steps_used) +                                //
         " lambda_iters=" + str(lambda_iters_used) + "/" + str(n_lambda) +            //
         " cp_sweeps=" + str(cp_sweeps_used) + "/" + str(n_lambda * n_cp + n_polish) + //
@@ -546,6 +577,13 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
 #else
   run_cp(n_polish, lambda);
 #endif
+
+  // Hand the converged weight back for the next pass over this plane to start from. Written
+  //   unconditionally, so that enabling Params::carry_lambda is all that is needed for a later pass
+  //   to consume it; the early returns above deliberately leave it alone, a declined plane having
+  //   converged to nothing.
+  if (io_lambda != nullptr)
+    *io_lambda = lambda;
 
   // --- Extract unit-magnitude phase -----------------------------------------------------
   for (ssize_t j = 0; j != Ny; ++j)
@@ -582,7 +620,8 @@ public:
              Image<float> &sigma,
              Image<cfloat> &phase,
              Image<uint32_t> &serialise,
-             const std::vector<AdaptivePhaseEstimator::VolumePlan> &plan)
+             const std::vector<AdaptivePhaseEstimator::VolumePlan> &plan,
+             std::vector<double> *lambda_store)
       : estimator(&estimator),
         outer_axes(outer_axes),
         inner_axes(inner_axes),
@@ -591,6 +630,9 @@ public:
         phase(phase),
         serialise(serialise),
         plan(&plan),
+        lambda_store(lambda_store),
+        slice_axis(estimator.slice_axis()),
+        num_slices(in.size(estimator.slice_axis())),
         have_sigma(sigma.valid()),
         transform(in),
         Nx(in.size(inner_axes[0])),
@@ -627,10 +669,22 @@ public:
     // This plane's volume: skipped entirely (before any data are gathered) unless the current
     //   iteration uses it, and otherwise solved in the regime that volume's own estimation
     //   history dictates.
-    const AdaptivePhaseEstimator::VolumePlan &vp = (*plan)[size_t(volume_index(pos))];
+    const ssize_t volume = volume_index(pos);
+    const AdaptivePhaseEstimator::VolumePlan &vp = (*plan)[size_t(volume)];
     if (!vp.estimate)
       return;
     using regime_t = AdaptivePhaseEstimator::regime_t;
+    // This plane's slot in the caller's carried fidelity-weight state. (Serialised volume, slice)
+    //   is what identifies a plane from one pass to the next: a schedule may draw a different
+    //   temporal subset each pass, so neither the order in which planes are visited nor the
+    //   position of a volume within the current subset is stable, whereas the serialised index --
+    //   the same space the VolumePlan itself is indexed in -- is.
+    double *const lambda_slot =
+        lambda_store == nullptr ? nullptr
+                                : &(*lambda_store)[size_t(volume * num_slices + pos.index(slice_axis))];
+#ifdef DWIDENOISE2_APC_PROFILE
+    const double lambda_in = lambda_slot == nullptr ? 0.0 : *lambda_slot;
+#endif
     // A cold volume starts on the coarse grid where the plane is large enough to decimate; a plane
     //   too small for that falls back to a cold native solve on the full budget, in either cold
     //   regime.
@@ -671,7 +725,10 @@ public:
       //   immediately below under COLD_COARSE_THEN_WARM.
       downsample2x(fr, fr_c);
       downsample2x(fi, fi_c);
-      const bool solved = estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false);
+      // The coarse solve is deliberately excluded from the carried state: its fidelity weight is
+      //   the answer to the decimated, self-calibrated problem, whose noise level -- and hence
+      //   whose weight -- is on a different scale from the native grid's.
+      const bool solved = estimator->solve_plane(fr_c, fi_c, sig_c, pr_c, pi_c, false, nullptr);
       if (solved)
         upsample_phase(pr_c, pi_c, phase_r, phase_i);
       if (solved && vp.regime == regime_t::COLD_COARSE_THEN_WARM) {
@@ -679,13 +736,13 @@ public:
         //   coarse phase is exactly the warm start a subsequent pass would have used, so the
         //   reduced ..._warm budget re-settles it at native resolution just as it would there.
         gather_sigma(ax, ay);
-        estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true);
+        estimator->solve_plane(fr, fi, sig, phase_r, phase_i, true, lambda_slot);
       }
     } else {
       // Native resolution: warm-started from the incoming phase, or -- on a plane too small to
       //   decimate -- cold on the full budget.
       gather_sigma(ax, ay);
-      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, vp.regime == regime_t::WARM);
+      estimator->solve_plane(fr, fi, sig, phase_r, phase_i, vp.regime == regime_t::WARM, lambda_slot);
     }
 
     for (auto l = Loop(inner_axes)(phase); l; ++l) {
@@ -693,6 +750,17 @@ public:
       const ssize_t iy = phase.index(ay);
       phase.value() = cfloat(float(phase_r(ix, iy)), float(phase_i(ix, iy)));
     }
+#ifdef DWIDENOISE2_APC_PROFILE
+    // Attribution of the per-plane records solve_plane() emits above: which volume and which slice
+    //   produced them, in which regime, and the fidelity weight carried into and out of that plane.
+    //   solve_plane() is handed an anonymous pair of arrays, so this is the only point at which a
+    //   plane's identity is known alongside its result.
+    DEBUG("APC plane: volume=" + str(volume) +                                       //
+          " slice=" + str(pos.index(slice_axis)) +                                   //
+          " regime=" + regime_name(vp.regime) +                                      //
+          " lambda_in=" + str(lambda_in) +                                           //
+          " lambda_out=" + str(lambda_slot == nullptr ? 0.0 : *lambda_slot));        //
+#endif
   }
 
 private:
@@ -741,6 +809,12 @@ private:
   Image<cfloat> phase;
   Image<uint32_t> serialise;
   const std::vector<AdaptivePhaseEstimator::VolumePlan> *plan;
+  // Caller-owned fidelity weight per (serialised volume, slice), or null where no state is carried
+  //   between passes. Each plane owns one entry and no two planes share one, so the threaded loop
+  //   writes it without locking, exactly as it does the phase map.
+  std::vector<double> *lambda_store;
+  size_t slice_axis;
+  ssize_t num_slices;
   bool have_sigma;
   // Whether coarse-grid scratch was allocated for this thread: false if no planned volume requests
   //   a downsampled solve, or if the planes are too small to decimate.
@@ -760,8 +834,10 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
                                         Image<float> &sigma,
                                         Image<cfloat> &io_phase,
                                         Image<uint32_t> &serialise,
-                                        const std::vector<VolumePlan> &plan) const {
+                                        const std::vector<VolumePlan> &plan,
+                                        std::vector<double> *const io_lambda) const {
   assert(inslice_axes.size() == 2);
+  assert(io_lambda == nullptr || io_lambda->size() == plan.size() * size_t(in.size(slice_axis())));
   // Outer axes = every axis of the data except the two in-slice (demodulation) axes: the
   //   slice-normal spatial axis, the volume axis, and any serialised supra-volume axes. Each
   //   outer position is one independent 2-D phase-estimation problem.
@@ -806,14 +882,22 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
        " skipped (not used by this iteration)");
 
   ThreadedLoop(message, in, outer_axes, inslice_axes)
-      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan));
+      .run_outer(APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan, io_lambda));
 }
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and
 //   callers gate instantiation with `if constexpr (is_complex<T>::value)`.
-template void AdaptivePhaseEstimator::operator()(
-    Image<cfloat> &, Image<float> &, Image<cfloat> &, Image<uint32_t> &, const std::vector<VolumePlan> &) const;
-template void AdaptivePhaseEstimator::operator()(
-    Image<cdouble> &, Image<float> &, Image<cfloat> &, Image<uint32_t> &, const std::vector<VolumePlan> &) const;
+template void AdaptivePhaseEstimator::operator()(Image<cfloat> &,
+                                                 Image<float> &,
+                                                 Image<cfloat> &,
+                                                 Image<uint32_t> &,
+                                                 const std::vector<VolumePlan> &,
+                                                 std::vector<double> *) const;
+template void AdaptivePhaseEstimator::operator()(Image<cdouble> &,
+                                                 Image<float> &,
+                                                 Image<cfloat> &,
+                                                 Image<uint32_t> &,
+                                                 const std::vector<VolumePlan> &,
+                                                 std::vector<double> *) const;
 
 } // namespace MR::Denoise::Precondition

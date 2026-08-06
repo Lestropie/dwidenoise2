@@ -405,14 +405,34 @@ public:
     //   residual *as evaluated*, so the accuracy of the located lambda is set by how accurately
     //   each evaluation minimises the inner problem (see cp_iter), not by the bracket width.
     lambda_solver_t lambda_solver = lambda_solver_t::FIXED_POINT;
+    // Whether a warm-started solve begins its search for lambda where the previous pass over that
+    //   same plane finished, instead of at the eq. 7 seed.
+    //
+    // The phase is already carried between passes; the fidelity weight is not, so every pass
+    //   repeats the entire search from the seed even though the only input that changes between
+    //   passes -- the noise level map -- moves the answer very little once it has settled. Carrying
+    //   one scalar per plane starts each later pass at the previous answer, leaving only that drift
+    //   to be tracked, and so needs far fewer lambda updates (and hence far fewer sweeps) to reach
+    //   the same place. It offers nothing to the pass that first estimates a volume, which has
+    //   nothing to carry.
+    //
+    // The state itself is owned by the caller and reaches the solver through the io_lambda argument
+    //   of operator() / solve_plane(); it is per (serialised volume, slice), because that pair is
+    //   what identifies a plane across passes under a temporally sub-sampling schedule. A plane
+    //   with no stored value falls back to the eq. 7 seed, which is what a volume being estimated
+    //   for the first time -- at whichever pass -- must do. Only native-resolution solves take part:
+    //   the weight a coarse-grid bootstrap converges to is the answer to a different (decimated,
+    //   self-calibrated) problem and is not on the native grid's scale.
+    bool carry_lambda = false;
     // Geometric ratio by which lambda is stepped while searching for a bracket. Consumed by
     //   CONTINUATION only; BISECTION doubles or halves. Ratios close to one keep each inner solve
     //   a small perturbation of the last but need proportionally more steps to reach the crossing,
     //   which on these data lies a factor of two to sixteen below the eq. 7 seed.
     double lambda_step_factor = 1.5;
-    // Multiplier applied to the eq. 7 seed to place the start of the bracket search. One starts at
-    //   the seed itself, which on every plane measured here already lies on the high-fidelity side
-    //   of the crossing, so the search walks downward from it.
+    // Multiplier applied to the starting estimate -- the eq. 7 seed, or a carried weight where one
+    //   is available -- to place the start of the bracket search. One starts at that estimate
+    //   itself, which for the eq. 7 seed on every plane measured here already lies on the
+    //   high-fidelity side of the crossing, so the search walks downward from it.
     double lambda_start_scale = 1.0;
     // Maximum number of geometric steps the bracket search may take. Exhausting it means the
     //   criterion is met at no lambda within reach of the seed, which contradicts the shape of R
@@ -523,6 +543,14 @@ public:
   //              count), selecting which volumes are estimated in this pass and, for each, the
   //              cold/warm and native/downsampled regime. Volumes with estimate == false are
   //              skipped entirely.
+  //   io_lambda : optional per-plane fidelity-weight state carried between passes (see
+  //              Params::carry_lambda), or null for none. Must hold
+  //              plan.size() * in.size(slice_axis()) entries, indexed
+  //              [serialised volume index * number of slices + slice index], with zero meaning
+  //              "nothing stored for this plane". Every native-resolution solve writes its
+  //              converged weight here, and -- under Params::carry_lambda -- starts from whatever
+  //              it finds. Distinct planes occupy distinct entries, so the threaded loop writes it
+  //              without locking, exactly as it does the phase map.
   // Only instantiated for complex T (the phase is ill-defined for real data); callers gate
   //   with `if constexpr (is_complex<T>::value)`.
   template <typename T>
@@ -530,7 +558,8 @@ public:
                   Image<float> &sigma,
                   Image<cfloat> &io_phase,
                   Image<uint32_t> &serialise,
-                  const std::vector<VolumePlan> &plan) const;
+                  const std::vector<VolumePlan> &plan,
+                  std::vector<double> *io_lambda = nullptr) const;
 
   // Per-2-D-plane primitive (the reusable, unit-testable core): solves one slice's weighted
   //   vectorial-TV ROF problem by fixed-budget primal-dual with discrepancy-criterion lambda.
@@ -549,15 +578,26 @@ public:
   //              solve); true -> seed the image at |f| * (phase_r, phase_i) -- the smooth phase
   //              is then already ~converged, only the fast magnitude smoothing remains -- and use
   //              the reduced Params ..._warm budget.
+  //   io_lambda : optional caller-owned fidelity weight for this plane, or null. A positive
+  //              incoming value replaces the eq. 7 seed as the starting point of the lambda search
+  //              iff Params::carry_lambda is set; the converged weight is written back whenever
+  //              the plane is solved, whether or not the incoming value was consumed. A declined
+  //              plane leaves it untouched.
   // Arrays are column-major (Nx rows = first in-slice axis, Ny cols = second).
   bool solve_plane(const Eigen::Ref<const Eigen::ArrayXXd> &fr,
                    const Eigen::Ref<const Eigen::ArrayXXd> &fi,
                    const Eigen::Ref<const Eigen::ArrayXXd> &sigma,
                    Eigen::Ref<Eigen::ArrayXXd> phase_r,
                    Eigen::Ref<Eigen::ArrayXXd> phase_i,
-                   bool warm_start) const;
+                   bool warm_start,
+                   double *io_lambda = nullptr) const;
 
   const std::vector<size_t> &axes() const { return inslice_axes; }
+
+  // The spatial axis normal to the estimated planes: the one axis of 0, 1, 2 that is not an
+  //   in-slice axis. With the serialised volume index it identifies a plane, and so indexes the
+  //   per-plane state that operator()'s io_lambda argument carries between passes.
+  size_t slice_axis() const;
 
 private:
   std::vector<size_t> inslice_axes;

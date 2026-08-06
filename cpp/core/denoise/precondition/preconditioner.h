@@ -231,6 +231,14 @@ private:
   //   entries still hold the unit-phase initialisation, and must be solved cold when first
   //   estimated. Sized (and left all-false) at construction iff APC is active.
   std::vector<bool> apc_volume_has_phase;
+  // Per (serialised volume, slice), laid out as [volume * number of slices + slice]: the fidelity
+  //   weight that plane's last native-resolution APC solve converged to, or zero where it has never
+  //   had one. Carried across passes so that a warm solve can start its search for the weight where
+  //   the previous pass finished rather than at the analytic seed (AdaptivePhaseEstimator::Params
+  //   ::carry_lambda); indexed on the serialised volume for the same reason apc_volume_has_phase is,
+  //   namely that a temporally sub-sampling schedule estimates different volumes in different
+  //   iterations. Sized (and left all-zero) at construction iff APC is active.
+  std::vector<double> apc_plane_lambda;
   // Will a subsequent APC pass refine what the next pass estimates? Set by set_apc_refine_later;
   //   the sole determinant of whether a cold solve is performed on a 2x-downsampled grid.
   bool apc_refine_later = false;
