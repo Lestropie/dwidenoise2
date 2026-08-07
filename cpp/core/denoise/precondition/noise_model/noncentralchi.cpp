@@ -307,6 +307,9 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
         psi[k] = interp_increasing(mu, a_grid, theta_m);
     }
   } break;
+  case vst_method_t::NONE:
+  case vst_method_t::LINEAR:
+    throw Exception("Invalid VST method for NonCentralChi");
   }
   inverse_unbiased_lut = LUT(0.0, du, std::vector<default_type>(psi));
 
