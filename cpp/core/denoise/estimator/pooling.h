@@ -125,6 +125,13 @@ struct NoiseStats {
   double sum = 0.0;  // sum_p sum_{i in noise_p} s_{p,i}, ie. energy
   double dof = 0.0;  // sum_p k_p qnz_p
   ssize_t count = 0; // sum_p k_p, counting nonzero noise components only
+  // Standardised value of the most significant component classified as noise anywhere in the
+  //   patch, ie. max_p Spectrum::max_noise_standardized(k_p): the empirical signal/noise boundary
+  //   actually realised, as against the theoretical one that the noise level implies. Zero where
+  //   no nonzero component is noise. It is at most the cut z, and strictly below it wherever the
+  //   cut falls between two components; it is the standardised maximum rather than the normalised
+  //   one because partitions of unequal aspect ratio are commensurable only on that scale.
+  double z_max = 0.0;
   bool empty() const { return count == 0; }
   double sigma2() const { return sum / dof; }
 };
@@ -134,7 +141,7 @@ struct NoiseStats {
 //   noise counts and boundaries and the pooled noise count of "result", and returns the pooled
 //   energy and degrees of freedom of the nonzero noise components (the rz_p components that
 //   demeaning forces to zero count as noise, as in the single-PCA estimators, but carry no energy
-//   and no degrees of freedom).
+//   and no degrees of freedom), together with the empirical boundary they reach.
 //
 // This one function replaces both of the thresholding paths that preceded it: applying a single
 //   normalised threshold to every partition (correct only where every beta_p is equal), and

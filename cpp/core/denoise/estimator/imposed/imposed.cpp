@@ -42,8 +42,8 @@ Result ImposedSigma::operator()(const Spectrum &spectrum, const Eigen::Vector3d 
   //   given the ordered list of eigenvalues.
   // On the standardised scale the Marchenko-Pastur boundary is the noise level itself, so the
   //   known sigma^2 doubles as the cut and lambda+ need only be formed for export.
-  result.lamplus = sigma_sq * spectrum.edge();
   result.cutoff_p = spectrum.noise_count(sigma_sq);
+  result.set_boundaries(spectrum.edge(), spectrum.max_noise_standardized(result.cutoff_p));
   return result;
 }
 
@@ -53,9 +53,9 @@ Result ImposedSigma::operator()(const std::vector<Spectrum> &spectra, const Eige
   if (!get_sigma_sq(pos, sigma_sq))
     return result;
   result.sigma2 = sigma_sq;
-  apply_threshold_standardized(spectra, sigma_sq, result);
+  const NoiseStats stats = apply_threshold_standardized(spectra, sigma_sq, result);
   // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
-  result.lamplus = sigma_sq * mean_edge(spectra);
+  result.set_boundaries(mean_edge(spectra), stats.z_max);
   return result;
 }
 

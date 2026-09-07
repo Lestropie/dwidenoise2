@@ -33,7 +33,9 @@
 // What is asserted, and why each matters to the convention:
 //
 //   1. Every data-driven estimator, and the fixed-rank estimator, is homogeneous of degree 1 in
-//      sigma: scaling the whole eigenspectrum by c^2 scales sigma2 and lamplus by c^2 and leaves
+//      sigma: scaling the whole eigenspectrum by c^2 scales sigma2 and both signal/noise
+//      boundaries (lamplus and lammax_noise) by c^2, leaves the aspect-ratio constant "edge"
+//      untouched, and leaves
 //      the signal / noise classification untouched. This is what makes rescaling the SPECTRUM
 //      equivalent to rescaling those estimators' OUTPUT, and hence what makes the correction safe
 //      to apply once, upstream, rather than estimator by estimator.
@@ -304,6 +306,21 @@ void test_homogeneity() {
       check(bool(base), "baseline threshold usable" + shape_context);
       if (!base)
         continue;
+      // The two signal/noise boundaries are separate members, and each must be what it claims to
+      //   be: lambda+ is the THEORETICAL edge, exactly sigma2 * edge, and depends on the data only
+      //   through the noise level; the maximal noise eigenvalue is the EMPIRICAL boundary, and is
+      //   therefore an actual entry of the spectrum -- the last component the classification
+      //   admitted as noise, or zero where it admitted none that is nonzero. Conflating the two,
+      //   as a single field once forced every estimator to do, cannot satisfy both.
+      check_relative(base.lamplus, base.sigma2 * base.edge, 1.0e-12, "lamplus is sigma2 * edge" + shape_context);
+      check_relative(base.lammax_noise,
+                     base.cutoff_p > reference.rz() ? reference.normalized(base.cutoff_p - 1) : 0.0,
+                     1.0e-12,
+                     "lammax_noise is the last component classified as noise" + shape_context);
+      check_relative(base.lammax_noise_standardized(),
+                     base.lammax_noise / base.edge,
+                     1.0e-12,
+                     "the standardised empirical boundary divides by the edge" + shape_context);
       // Ascending in "scales", for the monotonicity check on the imposed estimators below.
       std::vector<ssize_t> cutoff_by_scale;
       for (const double scale : scales) {
@@ -315,6 +332,8 @@ void test_homogeneity() {
         if (named.homogeneous) {
           check_relative(result.sigma2, base.sigma2 * scale, 1.0e-9, "sigma2 scales exactly" + context);
           check_relative(result.lamplus, base.lamplus * scale, 1.0e-9, "lamplus scales exactly" + context);
+          check_relative(
+              result.lammax_noise, base.lammax_noise * scale, 1.0e-9, "lammax_noise scales exactly" + context);
           check(result.cutoff_p == base.cutoff_p, "signal/noise classification is invariant" + context);
         } else {
           // The imposed level is external to the spectrum, so it does NOT follow the rescaling --
@@ -372,8 +391,11 @@ void test_homogeneity() {
     check(bool(base) && bool(scaled), "partitioned threshold usable" + context);
     if (!base || !scaled)
       continue;
+    check_relative(base.lamplus, base.sigma2 * base.edge, 1.0e-12, "lamplus is sigma2 * edge" + context);
     check_relative(scaled.sigma2, base.sigma2 * scale, 1.0e-9, "sigma2 scales exactly" + context);
     check_relative(scaled.lamplus, base.lamplus * scale, 1.0e-9, "lamplus scales exactly" + context);
+    check_relative(scaled.lammax_noise, base.lammax_noise * scale, 1.0e-9, "lammax_noise scales exactly" + context);
+    check_relative(scaled.edge, base.edge, 1.0e-12, "the aspect-ratio constant is unaffected" + context);
     check(scaled.cutoff_p == base.cutoff_p, "pooled classification is invariant" + context);
     check(scaled.cutoff_p_partition == base.cutoff_p_partition, "per-partition classification is invariant" + context);
   }
@@ -874,8 +896,7 @@ void test_apc_nonstationary() {
   const double sigma_median = median_of(flat);
   // Without this the test would be vacuous: on a field whose RMS and median coincide, a robust
   //   centre passes the check below just as well as the functional the criterion requires.
-  check(sigmabar_map > 2.5 * sigma_median,
-        "the phantom's noise field separates its root mean square from its median");
+  check(sigmabar_map > 2.5 * sigma_median, "the phantom's noise field separates its root mean square from its median");
 
   const double sigma_self = measure_self_calibrated_sigma(fr, fi, 0.02 * sigmabar_map, 20.0 * sigmabar_map);
   std::printf("   sigma spans %.1f to %.1f; map branch sqrt(mean(sigma^2)) = %.2f, its median = %.2f;\n"
@@ -886,10 +907,8 @@ void test_apc_nonstationary() {
               sigma_median,
               sigma_self,
               sigma_self / sigmabar_map);
-  check_relative(sigma_self,
-                 sigmabar_map,
-                 0.10,
-                 "self-calibration recovers the map branch's level on a non-stationary plane");
+  check_relative(
+      sigma_self, sigmabar_map, 0.10, "self-calibration recovers the map branch's level on a non-stationary plane");
 
   // Note what is deliberately NOT asserted: that the self-calibrated phase resembles the phase the
   //   non-stationary map itself produces. Those two solves differ in their fidelity weights as well

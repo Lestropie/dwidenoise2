@@ -166,17 +166,19 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
 //   interpolated at each voxel's scanner position. When the data were stabilised with a noise
 //   map, an estimate derived on the stabilised data is a unit-less correction factor; multiplying
 //   by the noise level recovers the first-order refinement on the native scale (see
-//   Iterative::estimate and the dwidenoise2 final noise_out / lamplus exports). ThreadedLoop
+//   Iterative::estimate and the dwidenoise2 final noise_out / boundary-map exports). ThreadedLoop
 //   copies the functor per thread, giving each thread its own interpolator; the map being scaled
 //   is the looped image, so writes are voxel-disjoint. "grid" is the header defining the map's
 //   voxel-to-scanner transform (the sub-sample grid).
 //
 // "power" is the power of sigma in which the map being rescaled is expressed, and must be stated by
 //   every caller rather than assumed: a noise level map carries sigma (power 1), whereas a map of
-//   eigenvalue units carries sigma^2 (power 2). Estimator::Result::lamplus is sigma^2 * edge(), so
-//   removing the effect of the stabilisation from an exported lambda+ map requires the square of the
-//   noise level; using the first power leaves a map that is neither the stabilised quantity nor the
-//   native one, and does so silently, differing only in magnitude.
+//   eigenvalue units carries sigma^2 (power 2). Both signal/noise boundaries of Estimator::Result
+//   are proportional to sigma^2 -- lamplus is sigma^2 * edge(), and the standardised maximal noise
+//   eigenvalue is that same quantity divided by a shape constant -- so removing the effect of the
+//   stabilisation from either exported map requires the square of the noise level; using the first
+//   power leaves a map that is neither the stabilised quantity nor the native one, and does so
+//   silently, differing only in magnitude.
 class NoiseMapVSTRescaleFunctor {
 public:
   NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid, const int power)

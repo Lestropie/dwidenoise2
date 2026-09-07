@@ -38,6 +38,8 @@ void Exports::set_noise_out() { noise_out = Image<float>::scratch(*H_ss, "Scratc
 
 void Exports::set_lamplus(const std::string &path) { lamplus = Image<float>::create(path, *H_ss); }
 
+void Exports::set_lammax_noise(const std::string &path) { lammax_noise = Image<float>::create(path, *H_ss); }
+
 void Exports::set_rank_pcanonzero(const std::string &path) {
   Header H(*H_ss);
   H.datatype() = DataType::UInt16;

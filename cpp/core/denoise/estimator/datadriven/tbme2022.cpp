@@ -113,7 +113,7 @@ Result TBME2022::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*
 
   result.cutoff_p = cutoff_p;
   result.sigma2 = Math::pow2(sigma);
-  result.lamplus = Math::pow2(1.0 + sqrtbeta) * result.sigma2;
+  result.set_boundaries(spectrum.edge(), spectrum.max_noise_standardized(cutoff_p));
   return result;
 }
 
@@ -208,9 +208,9 @@ Result TBME2022::operator()(const std::vector<Spectrum> &spectra, //
   for (ssize_t j = 1; j <= K; ++j)
     sigma = std::max(sigma, std::pow(Pn[j] / Cn[j], 1.0 / double(j)));
 
-  apply_threshold_standardized(spectra, pooled[cutoff_pooled - 1].z, result);
+  const NoiseStats stats = apply_threshold_standardized(spectra, pooled[cutoff_pooled - 1].z, result);
   result.sigma2 = Math::pow2(sigma);
-  result.lamplus = result.sigma2 * mean_edge(spectra);
+  result.set_boundaries(mean_edge(spectra), stats.z_max);
   return result;
 }
 

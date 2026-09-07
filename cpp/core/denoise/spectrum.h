@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 
 #include <Eigen/Dense>
 
@@ -125,6 +126,19 @@ public:
   //   demeaning forces to zero are always noise, as in the single-PCA estimators. Monotone in z,
   //   since edge() is constant within a partition.
   ssize_t noise_count(const double z) const;
+
+  // The largest STANDARDISED eigenvalue among the "count" leading (ascending) components that a
+  //   classification has assigned to noise, ie. the empirical signal/noise boundary this partition
+  //   actually realised, as against the theoretical lambda+ = sigma^2 edge() that the noise level
+  //   implies. Standardised rather than normalised so that partitions (and patches, and kernels)
+  //   of differing aspect ratio are commensurable: the value is on the sigma^2 scale, and equals
+  //   sigma^2 exactly when the boundary falls on the Marchenko-Pastur edge.
+  // Zero where the noise set holds no nonzero component (count <= rz): the components that
+  //   demeaning forces to zero say nothing about where the boundary fell.
+  double max_noise_standardized(const ssize_t count) const {
+    assert(count >= 0 && count <= r_);
+    return count > rz_ ? standardized(count - 1) : 0.0;
+  }
 
   // Sum of raw eigenvalues over [first, first + count). Raw rather than normalised because sums
   //   are accumulated across partitions of differing qnz: a raw sum is an energy, and energies
