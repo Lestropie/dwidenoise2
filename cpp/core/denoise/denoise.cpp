@@ -19,16 +19,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <optional>
 
+#include "algo/loop.h"
 #include "algo/threaded_loop.h"
 #include "axes.h"
 #include "denoise/mask.h"
 #include "denoise/metadata.h"
 #include "exception.h"
 #include "filter/smooth.h"
+#include "math/math.h"
 #include "mrtrix.h"
 #include "transform.h"
 
@@ -179,36 +182,221 @@ namespace {
 //   thread receives independent Image voxel accessors (deep-copied); the operations below are
 //   strictly voxel-local, so no locking is required.
 
-// Copy (and optionally condition) a noise-level map into a scratch image, with either padded
-//   edge-clamped sampling (pad) or a direct positional copy, and optional NaN-to-zero imputation.
-//   Holds its own copy of the source image so each thread samples it independently.
+// Map a position in the (possibly padded) output onto the corresponding position in the source,
+//   clamping into range so that the padded region replicates the nearest edge value. Padding may
+//   be asymmetric (sized per edge to reach a coverage target), so the offset is per-axis.
+inline void assign_padded_pos(Image<float> &out,
+                              Image<float> &in,
+                              const noise_pad_type pad,
+                              const std::array<ssize_t, 3> &pad_lo) {
+  if (pad == noise_pad_type::PAD) {
+    for (ssize_t axis = 0; axis != 3; ++axis)
+      in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - pad_lo[axis]));
+  } else {
+    assign_pos_of(out, 0, 3).to(in);
+  }
+}
+
+// Copy a map into a scratch image, with either padded edge-clamped sampling (pad) or a direct
+//   positional copy, sanitising as it goes. Holds its own copy of the source image so each thread
+//   samples it independently.
+// The sanitisation is what establishes the single sentinel the rest of the conditioning relies on:
+//   for a noise level map, anything failing noise_level_is_valid() -- NaN, an infinity, a zero, a
+//   negative value -- becomes NaN. Estimated maps do not otherwise contain zeros once the former
+//   NaN-to-zero conversion is gone; this defends chiefly against a user-supplied -noise_in image
+//   and against float underflow. The NAN_TO_ZERO form is the legacy behaviour, retained for the
+//   rank-per-mm density alone.
 class ConditionNoiseMapFunctor {
 public:
   ConditionNoiseMapFunctor(Image<float> &in,
-                           const noise_impute_type nan_to_zero,
+                           const noise_impute_type impute,
                            const noise_pad_type pad,
                            const std::array<ssize_t, 3> &pad_lo)
-      : in(in), nan_to_zero(nan_to_zero), pad(pad), pad_lo(pad_lo) {}
+      : in(in), impute(impute), pad(pad), pad_lo(pad_lo) {}
   void operator()(Image<float> &out) {
-    if (pad == noise_pad_type::PAD) {
-        // Padding may be asymmetric (sized per edge to reach the coverage target), so the offset
-        //   is per-axis. Clamping replicates the nearest edge value into the padded region.
-        for (ssize_t axis = 0; axis != 3; ++axis)
-          in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - pad_lo[axis]));
-    } else {
-      assign_pos_of(out).to(in);
-    }
-    if (nan_to_zero == noise_impute_type::NAN_TO_ZERO)
-      out.value() = std::isfinite(in.value()) ? in.value() : 0.0F;
+    assign_padded_pos(out, in, pad, pad_lo);
+    const float value = in.value();
+    if (impute == noise_impute_type::NAN_TO_ZERO)
+      out.value() = std::isfinite(value) ? value : 0.0F;
     else
-      out.value() = in.value();
+      out.value() = noise_level_is_valid(value) ? value : std::numeric_limits<float>::quiet_NaN();
   }
 
 private:
   Image<float> in;
-  noise_impute_type nan_to_zero;
+  noise_impute_type impute;
   noise_pad_type pad;
   std::array<ssize_t, 3> pad_lo;
+};
+
+// sigma -> x = log(sigma^2) = 2 log(sigma), and back. Invalid voxels carry NaN through both.
+class ToLogNoiseFunctor {
+public:
+  void operator()(Image<float> &image) {
+    const float sigma = image.value();
+    image.value() = noise_level_is_valid(sigma) ? float(2.0 * std::log(default_type(sigma)))
+                                                : std::numeric_limits<float>::quiet_NaN();
+  }
+};
+class FromLogNoiseFunctor {
+public:
+  void operator()(Image<float> &image) {
+    const float x = image.value();
+    // A voxel still invalid here survived every fill mechanism, and only the RETAIN policy lets one
+    //   through; exp() of NaN preserves it rather than manufacturing a value.
+    image.value() = std::isfinite(x) ? float(std::exp(0.5 * default_type(x))) : x;
+  }
+};
+
+// The two halves of a normalised convolution: split the value image into the numerator product
+//   w .* x and the 0/1 weight field w, then recombine them after each has been smoothed.
+class NormalisedConvolutionSplitFunctor {
+public:
+  void operator()(Image<float> &x, Image<float> &numerator, Image<float> &denominator) {
+    const float value = x.value();
+    const bool valid = std::isfinite(value);
+    // The zero written at an invalid voxel is a placeholder in the NUMERATOR PRODUCT, not an
+    //   imputed value: the same voxel contributes zero to the denominator, so it never survives the
+    //   division. It is chosen because it is finite, exactly representable and annihilates under
+    //   multiplication; any other finite constant would give the same answer. It must not be read
+    //   as imputing sigma^2 == 1 at holes.
+    numerator.value() = valid ? value : 0.0F;
+    denominator.value() = valid ? 1.0F : 0.0F;
+  }
+};
+class NormalisedConvolutionCombineFunctor {
+public:
+  explicit NormalisedConvolutionCombineFunctor(const default_type epsilon) : epsilon(epsilon) {}
+  void operator()(Image<float> &x, Image<float> &numerator, Image<float> &denominator) {
+    const default_type weight = default_type(denominator.value());
+    // No valid support anywhere within the kernel: leave the voxel invalid for the imputation
+    //   passes that follow, rather than dividing two near-zeros.
+    x.value() = weight > epsilon ? float(default_type(numerator.value()) / weight)
+                                 : std::numeric_limits<float>::quiet_NaN();
+  }
+
+private:
+  default_type epsilon;
+};
+
+// Fill invalid voxels from the valid ones among their 26 immediate neighbours, weighted by a
+//   Gaussian whose full width at half maximum is one mean voxel spacing of the map's own grid.
+//   Isotropic in millimetres, and therefore anisotropic in voxels wherever the grid is.
+//
+// The kernel is deliberately very tight. With FWHM equal to the mean spacing the standard deviation
+//   is ~0.425 voxels, so a face neighbour weighs exp(-2.77) ~ 0.063 against an edge neighbour's
+//   0.0039 and a corner's 0.00024: an imputed value is essentially the weighted mean of its face
+//   neighbours, and one pass erodes a hole by one voxel. That is the intended behaviour -- a hole of
+//   half-width k voxels closes in k passes -- and is what removes any need to enlarge the kernel to
+//   cover the largest hole a map might contain.
+//
+// Double-buffered: reads the previous pass's image and writes a new one. Updating in place would
+//   make the result depend on traversal order (a voxel filled early in a sweep would feed a later
+//   one within the same sweep) and would not be thread-safe under ThreadedLoop.
+class ImputeNoiseFunctor {
+public:
+  ImputeNoiseFunctor(Image<float> &previous, const std::array<default_type, 3> &spacing, std::atomic<size_t> &filled)
+      : previous(previous), filled(&filled) {
+    const default_type fwhm = std::cbrt(spacing[0] * spacing[1] * spacing[2]);
+    const default_type stdev = fwhm / (2.0 * std::sqrt(2.0 * std::log(2.0)));
+    const default_type denominator = 2.0 * stdev * stdev;
+    for (ssize_t dz = -1; dz != 2; ++dz) {
+      for (ssize_t dy = -1; dy != 2; ++dy) {
+        for (ssize_t dx = -1; dx != 2; ++dx) {
+          const default_type distance_sq = Math::pow2(default_type(dx) * spacing[0])  //
+                                           + Math::pow2(default_type(dy) * spacing[1]) //
+                                           + Math::pow2(default_type(dz) * spacing[2]);
+          weights[tap_index(dx, dy, dz)] = std::exp(-distance_sq / denominator);
+        }
+      }
+    }
+  }
+  void operator()(Image<float> &out) {
+    const std::array<ssize_t, 3> pos{out.index(0), out.index(1), out.index(2)};
+    for (ssize_t axis = 0; axis != 3; ++axis)
+      previous.index(axis) = pos[axis];
+    const float centre = previous.value();
+    if (std::isfinite(centre)) {
+      out.value() = centre;
+      return;
+    }
+    default_type sum = 0.0;
+    default_type sum_weights = 0.0;
+    for (ssize_t dz = -1; dz != 2; ++dz) {
+      const ssize_t z = pos[2] + dz;
+      if (z < 0 || z >= previous.size(2))
+        continue;
+      for (ssize_t dy = -1; dy != 2; ++dy) {
+        const ssize_t y = pos[1] + dy;
+        if (y < 0 || y >= previous.size(1))
+          continue;
+        for (ssize_t dx = -1; dx != 2; ++dx) {
+          const ssize_t x = pos[0] + dx;
+          if (x < 0 || x >= previous.size(0))
+            continue;
+          if (dx == 0 && dy == 0 && dz == 0)
+            continue;
+          previous.index(0) = x;
+          previous.index(1) = y;
+          previous.index(2) = z;
+          const default_type value = default_type(previous.value());
+          if (!std::isfinite(value))
+            continue;
+          const default_type weight = weights[tap_index(dx, dy, dz)];
+          sum += weight * value;
+          sum_weights += weight;
+        }
+      }
+    }
+    if (sum_weights > 0.0) {
+      out.value() = float(sum / sum_weights);
+      filled->fetch_add(1, std::memory_order_relaxed);
+    } else {
+      out.value() = std::numeric_limits<float>::quiet_NaN();
+    }
+  }
+
+private:
+  static ssize_t tap_index(const ssize_t dx, const ssize_t dy, const ssize_t dz) {
+    return (dz + 1) * 9 + (dy + 1) * 3 + (dx + 1);
+  }
+  Image<float> previous;
+  std::array<default_type, 27> weights;
+  std::atomic<size_t> *filled;
+};
+
+// Last-resort fill from the patch-derived upper bounds (Estimator::Result::sigma2_bound, exported
+//   as a noise level). Applied only to voxels that no imputation pass could reach, and only in the
+//   log domain the surrounding map is already in.
+class BoundFillFunctor {
+public:
+  BoundFillFunctor(Image<float> &bound,
+                   const noise_pad_type pad,
+                   const std::array<ssize_t, 3> &pad_lo,
+                   std::atomic<size_t> &filled)
+      : bound(bound), pad(pad), pad_lo(pad_lo), filled(&filled) {}
+  void operator()(Image<float> &out) {
+    if (std::isfinite(out.value()))
+      return;
+    assign_padded_pos(out, bound, pad, pad_lo);
+    const float sigma = bound.value();
+    if (!noise_level_is_valid(sigma))
+      return;
+    out.value() = float(2.0 * std::log(default_type(sigma)));
+    filled->fetch_add(1, std::memory_order_relaxed);
+  }
+
+private:
+  Image<float> bound;
+  noise_pad_type pad;
+  std::array<ssize_t, 3> pad_lo;
+  std::atomic<size_t> *filled;
+};
+
+// Copy one map into another of identical dimensions.
+class CopyFloatFunctor {
+public:
+  void operator()(Image<float> &destination, Image<float> &source) { destination.value() = source.value(); }
 };
 
 // Fill every voxel of a scratch image with a fixed value.
@@ -233,15 +421,88 @@ public:
 private:
   default_type partition_scale;
 };
+// Number of voxels of a map holding no usable value: NaN at any point after sanitisation, and
+//   equivalently anything failing noise_level_is_valid() before it. Serial: the maps this is
+//   applied to are the sub-sampled grid, and the count is needed as a scalar between passes.
+size_t count_invalid_noise_levels(Image<float> &image) {
+  size_t count = 0;
+  for (auto l = Loop(image)(image); l; ++l) {
+    if (!noise_level_is_valid(image.value()))
+      ++count;
+  }
+  return count;
+}
+
+// Number of voxels of a LOG-domain map holding no usable value. The predicate differs from the one
+//   above by necessity: x = log(sigma^2) is legitimately zero or negative, so only finiteness
+//   distinguishes a hole there.
+size_t count_nonfinite(Image<float> &image) {
+  size_t count = 0;
+  for (auto l = Loop(image)(image); l; ++l) {
+    if (!std::isfinite(image.value()))
+      ++count;
+  }
+  return count;
+}
+
+// Normalised convolution (Knutsson-Westin) of a log-domain map holding NaN at invalid voxels, at
+//   the given full width at half maximum in millimetres.
+//
+// Both convolutions are performed on images that are finite everywhere, so the smoothing filter's
+//   own missing-data fallback never triggers and the result does not depend on it. That matters:
+//   MRtrix3's smoother renormalises over the finite neighbours of each ONE-DIMENSIONAL pass
+//   (Filter::SmoothFunctor1D::operator(), Adapter::Gaussian1D::value()), which applied separably is
+//   not 3D normalised convolution -- a voxel filled during the x pass is treated as full-weight
+//   data by the y pass, so the result silently extrapolates between passes and depends on axis
+//   order. Here the weight field is fixed and the Gaussian separable, so each convolution is an
+//   exact separable 3D convolution and their ratio is the exact 3D normalised convolution,
+//   independent of axis order.
+//
+// The 0/1 weight field is a placeholder for a precision weight w = nu/2, the inverse variance of
+//   log(sigma^2) with nu the number of noise components the patch pooled (Result::cutoff_p, the
+//   -rank_pcanonzero export). That would turn the operation from an unweighted geometric mean into
+//   the best linear unbiased estimate of the log-noise field; the formulation is chosen so that it
+//   is a one-line substitution when that becomes available.
+//
+// Deliberately written free of any dwidenoise2-specific dependency -- a value image, a weight
+//   image and a width -- so that it can be lifted upstream verbatim if MRtrix3's smoothing filter
+//   ever grows an optional weight image.
+void normalised_convolution(Image<float> &x, const default_type fwhm) {
+  // Filter::Smooth is parameterised by the standard deviation of the Gaussian in millimetres, one
+  //   value per spatial axis; the schedule specifies the FWHM of a spatially isotropic Gaussian, so
+  //   the same converted width is imposed on all three axes irrespective of the (possibly
+  //   anisotropic) voxel size of the grid on which the map was estimated.
+  const default_type stdev = fwhm / (2.0 * std::sqrt(2.0 * std::log(2.0)));
+  Header H(x);
+  Image<float> numerator = Image<float>::scratch(H, "Numerator of normalised convolution");
+  Image<float> denominator = Image<float>::scratch(H, "Denominator of normalised convolution");
+  ThreadedLoop(x).run(NormalisedConvolutionSplitFunctor(), x, numerator, denominator);
+  for (Image<float> *image : {&numerator, &denominator}) {
+    Filter::Smooth smooth_filter(*image);
+    smooth_filter.set_stdev(stdev);
+    smooth_filter(*image);
+  }
+  // The normalised Gaussian sums to at most one, so a denominator this small marks a voxel with no
+  //   valid support anywhere within the kernel rather than a poorly-covered one.
+  constexpr default_type coverage_epsilon = 1e-6;
+  ThreadedLoop(x).run(NormalisedConvolutionCombineFunctor(coverage_epsilon), x, numerator, denominator);
+}
+
 } // namespace
 
 Image<float> condition_noise_map(Image<float> &in,
-                                 const noise_impute_type nan_to_zero,
+                                 const noise_impute_type impute,
                                  const noise_pad_type pad,
                                  const default_type smooth_fwhm,
-                                 const Header *coverage) {
+                                 const Header *coverage,
+                                 Image<float> *bound,
+                                 const noise_unfilled_type unfilled,
+                                 const std::string &context) {
   assert(smooth_fwhm >= 0.0);
   Header H(in);
+  // Imputation weights are formed from the map's OWN voxel spacings, which for an iterative
+  //   schedule differ from one iteration to the next; padding does not change them.
+  const std::array<default_type, 3> spacing{H.spacing(0), H.spacing(1), H.spacing(2)};
   // Margin required either side for cubic interpolation to be well-posed.
   constexpr ssize_t interp_margin = 2;
   std::array<ssize_t, 3> pad_lo{0, 0, 0};
@@ -282,16 +543,83 @@ Image<float> condition_noise_map(Image<float> &in,
                                                                                default_type(-pad_lo[2])};
   }
   Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
-  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, nan_to_zero, pad, pad_lo), out);
+  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, impute, pad, pad_lo), out);
+  // The rank-per-mm density is not a noise level: zero is a legitimate value for it, and the log
+  //   domain is meaningless. Padding and the NaN-to-zero conversion are all it wants from here.
+  if (impute == noise_impute_type::NAN_TO_ZERO)
+    return out;
+
+  // Report the number of voxels the map itself holds no estimate at, before padding replicates any
+  //   of them outward. The threshold escalating INFO to WARN is a property of the map's own grid.
+  report_imputed_noise_levels(count_invalid_noise_levels(in), Header(in), context);
+
+  // Everything from here to the inverse transform below operates on x = log(sigma^2).
+  ThreadedLoop(out).run(ToLogNoiseFunctor(), out);
+
+  size_t remaining = count_nonfinite(out);
+  ssize_t passes = 0;
   if (smooth_fwhm > 0.0) {
-    // Filter::Smooth is parameterised by the standard deviation of the Gaussian in millimetres,
-    //   one value per spatial axis; the schedule specifies the FWHM of a spatially isotropic
-    //   Gaussian, so the same converted width is imposed on all three axes irrespective of the
-    //   (possibly anisotropic) voxel size of the grid on which the map was estimated.
-    Filter::Smooth smooth_filter(out);
-    smooth_filter.set_stdev(smooth_fwhm / (2.0 * std::sqrt(2.0 * std::log(2.0))));
-    smooth_filter(out);
+    // Pass zero is the requested smoothing, which -- being a normalised convolution -- fills every
+    //   hole with any valid support inside its (much wider) kernel as a by-product. Passes one
+    //   onward are the tight imputation kernel, which erodes whatever remains one voxel at a time.
+    normalised_convolution(out, smooth_fwhm);
+    remaining = count_nonfinite(out);
+    ++passes;
   }
+  size_t imputed = 0;
+  Image<float> previous;
+  while (remaining > 0) {
+    if (!previous.valid())
+      previous = Image<float>::scratch(H, "Previous pass of noise level map imputation");
+    ThreadedLoop(previous).run(CopyFloatFunctor(), previous, out);
+    std::atomic<size_t> filled{0};
+    ThreadedLoop(out).run(ImputeNoiseFunctor(previous, spacing, filled), out);
+    const size_t filled_count = filled.load(std::memory_order_acquire);
+    // A pass that fills nothing means no hole has a valid neighbour; since holes shrink
+    //   monotonically, that means the map holds no valid voxel at all. Break rather than spin:
+    //   the per-voxel fallback below is what such a map is left to.
+    if (filled_count == 0)
+      break;
+    assert(filled_count <= remaining);
+    remaining -= filled_count;
+    imputed += filled_count;
+    ++passes;
+  }
+  if (passes > 0) {
+    INFO(context + ": conditioning completed in " + str(passes) + " pass(es), " + str(imputed) +
+         " voxel(s) filled by imputation");
+  }
+
+  if (remaining > 0 && bound != nullptr && bound->valid()) {
+    std::atomic<size_t> filled{0};
+    ThreadedLoop(out).run(BoundFillFunctor(*bound, pad, pad_lo, filled), out);
+    const size_t filled_count = filled.load(std::memory_order_acquire);
+    assert(filled_count <= remaining);
+    remaining -= filled_count;
+    if (filled_count > 0) {
+      INFO(context + ": " + str(filled_count) +
+           " voxel(s) beyond the reach of any valid estimate were filled from the patch-derived"
+           " upper bound on the noise level");
+    }
+  }
+
+  if (remaining > 0) {
+    const std::string message = context + " holds " + str(remaining) +
+                                " voxel(s) at which no noise level could be established:"
+                                " no valid estimate anywhere in the map is able to reach them,"
+                                " and no patch-derived bound is available for them";
+    if (unfilled == noise_unfilled_type::THROW)
+      throw Exception(message);
+    WARN(message + "; they are left undefined in the exported map");
+  }
+
+  ThreadedLoop(out).run(FromLogNoiseFunctor(), out);
+#ifndef NDEBUG
+  if (unfilled == noise_unfilled_type::THROW) {
+    for (auto l = Loop(out)(out); l; ++l)
+      assert(noise_level_is_valid(out.value()));
+  }
+#endif
   return out;
 }
 
@@ -341,7 +669,17 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
   }
   // Pad out to cover the DWI field of view: the map is interpolated at patch centres drawn from
   //   the DWI grid, so it need not share that grid but must be sampleable across all of it.
-  return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, 0.0, &H_spatial);
+  // A supplied map is conditioned exactly as an estimated one is. This is the route by which
+  //   non-positive and non-finite noise levels most plausibly enter the software, and cubic
+  //   interpolation would otherwise spread a single one of them across a 4^3 neighbourhood.
+  return condition_noise_map(in,
+                             noise_impute_type::NONE,
+                             noise_pad_type::PAD,
+                             0.0,
+                             &H_spatial,
+                             nullptr,
+                             noise_unfilled_type::THROW,
+                             "the noise level map supplied via -noise_in");
 }
 
 Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_dist, const ssize_t num_partitions) {
@@ -375,6 +713,9 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
   }
   // As for the noise level map: cover the DWI field of view so interpolation is well-posed at
   //   every patch position, rather than requiring the supplied map to be grid-conformant.
+  // NAN_TO_ZERO is retained here, and here alone. A rank density is not a noise level: zero is a
+  //   legitimate value for it (a patch with no signal rank), so there is nothing to impute and
+  //   nothing the log domain would mean.
   return condition_noise_map(in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, 0.0, &H_spatial);
 }
 

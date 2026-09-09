@@ -615,6 +615,10 @@ void run(Header &dwi,
     // For internal iterations, we only save the output noise level estimate
     Exports iteration_exports(dwi, subsample->header());
     iteration_exports.set_noise_out();
+    // Patch-derived upper bounds on the noise level, for those voxels at which the estimator
+    //   declared every component to be signal and so left no estimate. Conditioning falls back to
+    //   these only where imputation from neighbouring voxels has nothing to work from.
+    iteration_exports.set_noise_bound();
     iteration_exports.set_rank_input();
     iteration_exports.set_max_dist();
     Iterative::estimate(input,
@@ -633,11 +637,18 @@ void run(Header &dwi,
                         partitioning,
                         volume_group,
                         demean_site);
-    // Propagate result to next iteration
+    // Propagate result to next iteration. Conditioning runs whether or not the schedule asked for
+    //   smoothing: this map is about to parameterise the next iteration's variance-stabilising
+    //   transform and to be cubic-interpolated at every patch centre, so every voxel of it must
+    //   hold a usable noise level, and only conditioning guarantees that.
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             noise_impute_type::NAN_TO_ZERO,
+                                             noise_impute_type::NONE,
                                              noise_pad_type::PAD,
-                                             iterations[iteration].smooth_noiseout_fwhm);
+                                             iterations[iteration].smooth_noiseout_fwhm,
+                                             nullptr,
+                                             &iteration_exports.noise_bound,
+                                             noise_unfilled_type::THROW,
+                                             "the noise level map of iteration " + str(iteration + 1));
     // Signal-rank density (per mm of kernel radius) used to size the next iteration's rank-based
     //   kernel. Under partitioning the rank-based kernel is sized from the smallest partition
     //   (m'/P), so the density must be *per partition*: rank_input is the signal rank summed over
@@ -777,8 +788,6 @@ void run(Header &dwi,
                3)                                                          //
       .run(func, input_preconditioned, output_preconditioned);             //
   func.report_warnings();
-  // Note: Denoise::condition_noise_map() is intentionally _not_ called here:
-  //   noise estimates are fed through as-is
 
   const size_t max_rank = Denoise::num_volumes(dwi);
 
@@ -838,6 +847,10 @@ void run(Header &dwi,
     if (final_exports.noise_out.valid()) {
       ThreadedLoop(final_exports.noise_out)
           .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), final_exports.noise_out);
+      if (final_exports.noise_bound.valid()) {
+        ThreadedLoop(final_exports.noise_bound)
+            .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), final_exports.noise_bound);
+      }
     }
     // Note: each boundary voxel is scaled by the noise level interpolated at *its own* scanner
     //   position (the looped image's index), correcting a prior copy-paste that sampled
@@ -853,6 +866,25 @@ void run(Header &dwi,
       ThreadedLoop(final_exports.lammax_noise)
           .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), final_exports.lammax_noise);
     }
+  }
+
+  // Condition the exported noise map. Nothing downstream consumes it -- this is the reconstruction
+  //   pass, and the denoising has already happened -- so the change is confined to the image the
+  //   user receives: no NaN reaches their file, and the voxels at which estimation failed carry a
+  //   level derived from their neighbours instead. -noise_valid is what records which those were.
+  //   No smoothing is applied: the schedule parser forbids a non-zero smooth_noise on dwidenoise2's
+  //   final row. RETAIN, because a degenerate configuration must not abort a run at the point of
+  //   writing an output image.
+  if (final_exports.noise_out.valid()) {
+    Image<float> conditioned = Denoise::condition_noise_map(final_exports.noise_out,
+                                                            noise_impute_type::NONE,
+                                                            noise_pad_type::NONE,
+                                                            0.0,
+                                                            nullptr,
+                                                            &final_exports.noise_bound,
+                                                            noise_unfilled_type::RETAIN,
+                                                            "the exported noise level map");
+    ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, conditioned);
   }
 
   opt = get_options("residual_statistics");
@@ -1228,8 +1260,10 @@ void run() {
 
   Exports final_exports(dwi, final_subsample->header());
   opt = get_options("noise_out");
-  if (!opt.empty())
+  if (!opt.empty()) {
     final_exports.set_noise_out(opt[0][0].as_text());
+    final_exports.set_noise_bound();
+  }
   opt = get_options("lamplus");
   if (!opt.empty())
     final_exports.set_lamplus(opt[0][0].as_text());
