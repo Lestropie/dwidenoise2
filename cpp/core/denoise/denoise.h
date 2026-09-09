@@ -280,6 +280,36 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 //   (NaN->0 and padded) so it can be safely interpolated to size the reconstruction kernel.
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
+// Log-domain twin of a conditioned noise level map: x = log(sigma^2) = 2 log(sigma), and NaN
+//   wherever the source holds no usable level (which for a conditioned map is nowhere).
+//
+// Every point at which a noise level map is sampled between voxel centres samples this instead,
+//   through LogNoiseInterp below. Two reasons, and they are the reasons conditioning itself is
+//   performed in the log domain:
+// - Cubic interpolation is not monotone: it undershoots at a step, and near the edge of the object
+//   the noise field presents a large one. In the linear domain that undershoot reaches zero and
+//   below, and the consequences are silent -- NoiseModel::Gaussian::stabilise() returns 0 for
+//   sigma <= 0, blanking the data at that voxel; Estimator::Import squares the interpolated value,
+//   laundering a negative sigma into a plausible positive sigma^2; Estimator::Constant divides by
+//   its square, so a zero yields an infinity. exp() of an undershooting log value is merely small.
+// - It makes interpolation geometric, matching the domain in which the map was conditioned. A map
+//   smoothed as a geometric mean and then sampled as an arithmetic one is inconsistent with itself.
+Image<float> log_noise_map(Image<float> &sigma_map);
+
+// Cubic interpolation of a noise level map performed on its log-domain twin, returning the noise
+//   level. Constructed over the image log_noise_map() returns, never over the map itself.
+//   Out-of-field-of-view sampling yields NaN, as the underlying interpolator does; callers test the
+//   value they receive.
+class LogNoiseInterp {
+public:
+  explicit LogNoiseInterp(const Image<float> &log_map) : interp(log_map) {}
+  bool scanner(const Eigen::Vector3d &position) { return interp.scanner(position); }
+  default_type value() { return std::exp(0.5 * default_type(interp.value())); }
+
+private:
+  Interp::Cubic<Image<float>> interp;
+};
+
 // Multiply a 3-D map in place by a power of the noise level (variance-stabilising-transform scale)
 //   interpolated at each voxel's scanner position. When the data were stabilised with a noise
 //   map, an estimate derived on the stabilised data is a unit-less correction factor; multiplying
@@ -299,14 +329,19 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
 //   silently, differing only in magnitude.
 class NoiseMapVSTRescaleFunctor {
 public:
+  // The log-domain twin is built here, once per construction, and held so that the scratch buffer
+  //   outlives the per-thread copies ThreadedLoop makes of this functor (an Image copy shares the
+  //   buffer, and each copy's interpolator gets its own voxel accessor). Building it here rather
+  //   than requiring it of the caller keeps every call site expressed in the map it actually holds.
   NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid, const int power)
-      : vst_interp(vst_image), transform(grid), power(power) {
+      : vst_log(log_noise_map(vst_image)), vst_interp(vst_log), transform(grid), power(power) {
     assert(power == 1 || power == 2);
   }
   void operator()(Image<float> &map);
 
 private:
-  Interp::Cubic<Image<float>> vst_interp;
+  Image<float> vst_log;
+  LogNoiseInterp vst_interp;
   Transform transform;
   int power;
 };

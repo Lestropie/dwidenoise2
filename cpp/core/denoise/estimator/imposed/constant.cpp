@@ -17,15 +17,17 @@
 
 #include "denoise/estimator/imposed/constant.h"
 
+#include "denoise/denoise.h"
 #include "interp/cubic.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Estimator {
 
-Constant::Constant(const default_type value, Image<float> &vst_noise_in) //
-    : sigma2(Math::pow2(value)),                                         //
-      vst_image(vst_noise_in),                                           //
-      rescale_by_vst(true) {}                                            //
+Constant::Constant(const default_type value, Image<float> &vst_noise_in)                             //
+    : sigma2(Math::pow2(value)),                                                                    //
+      vst_image(vst_noise_in),                                                                      //
+      vst_log_image(vst_noise_in.valid() ? log_noise_map(vst_noise_in) : Image<float>()),           //
+      rescale_by_vst(true) {}                                                                       //
 
 Constant::Constant(const default_type value) //
     : sigma2(Math::pow2(value)),             //
@@ -36,7 +38,7 @@ bool Constant::get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const 
   //   then we need to rescale the threshold that we load from this image
   //   based on knowledge of that rescaling
   if (vst_image.valid()) {
-    Interp::Cubic<Image<float>> vst_interp(vst_image);
+    LogNoiseInterp vst_interp(vst_log_image);
     if (!vst_interp.scanner(pos))
       return false;
     sigma_sq = sigma2 / Math::pow2(vst_interp.value());

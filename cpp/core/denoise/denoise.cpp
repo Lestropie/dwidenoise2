@@ -719,11 +719,19 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
   return condition_noise_map(in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, 0.0, &H_spatial);
 }
 
+Image<float> log_noise_map(Image<float> &sigma_map) {
+  Image<float> out =
+      Image<float>::scratch(Header(sigma_map), "Log-domain twin of \"" + std::string(sigma_map.name()) + "\"");
+  ThreadedLoop(out).run(CopyFloatFunctor(), out, sigma_map);
+  ThreadedLoop(out).run(ToLogNoiseFunctor(), out);
+  return out;
+}
+
 void NoiseMapVSTRescaleFunctor::operator()(Image<float> &map) {
   vst_interp.scanner(transform.voxel2scanner *
                      Eigen::Vector3d({double(map.index(0)), double(map.index(1)), double(map.index(2))}));
-  const float sigma = vst_interp.value();
-  map.value() *= (power == 2) ? (sigma * sigma) : sigma;
+  const default_type sigma = vst_interp.value();
+  map.value() *= float((power == 2) ? (sigma * sigma) : sigma);
 }
 
 } // namespace MR::Denoise
