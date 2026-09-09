@@ -103,6 +103,23 @@ double mean_edge(const std::vector<Spectrum> &spectra);
 //   edge difference) must use this rather than an average.
 double max_beta(const std::vector<Spectrum> &spectra);
 
+// The largest noise level consistent with a classification that declared EVERY component of the
+//   decomposition(s) to be signal, ie. Estimator::Result::sigma2_bound. Every component being
+//   signal means every one lies above the Marchenko-Pastur edge lambda+ = sigma^2 * edge, so
+//   sigma^2 < lambda_min / edge; that ratio is the smallest non-bypassed eigenvalue on the
+//   standardised scale, Spectrum::standardized(rz), and across partitions it is the smallest such
+//   value over the pool (each partition's own edge having already been divided out, which is what
+//   makes the partitions comparable at all -- see note 1 above).
+//
+// Returns NaN where no bound exists: no non-bypassed component to bound it with, or a smallest
+//   eigenvalue of zero, which is a degenerate spectrum rather than an all-signal patch.
+//
+// Only the estimator fall-throughs that make the all-signal claim may call this. It is not a
+//   general-purpose "upper bound on sigma" -- absent that claim, the smallest eigenvalue bounds
+//   the noise level from below rather than from above.
+double all_signal_sigma2_bound(const Spectrum &spectrum);
+double all_signal_sigma2_bound(const std::vector<Spectrum> &spectra);
+
 ssize_t total_rnz(const std::vector<Spectrum> &spectra);
 
 ssize_t total_qnz(const std::vector<Spectrum> &spectra);

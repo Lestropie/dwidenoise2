@@ -58,6 +58,11 @@ Result Rank::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unus
     result.cutoff_p = 0;
     result.sigma2 = 0.0;
     result.set_boundaries(spectrum.edge(), 0.0);
+    // The decomposition succeeded and the classification is "every component is signal", which is
+    //   precisely the claim that bounds the noise level from above; record that bound so that noise
+    //   map conditioning has something local to fall back on where a whole region is unestimated.
+    //   sigma2 itself is left at zero: this remains an unusable threshold (see Result).
+    result.sigma2_bound = all_signal_sigma2_bound(spectrum);
     return result;
   }
   result.cutoff_p = spectrum.r() - (rank - rz);
@@ -108,6 +113,8 @@ Result Rank::operator()(const std::vector<Spectrum> &spectra, //
     result.set_boundaries(mean_edge(spectra), 0.0);
     result.cutoff_p_partition.assign(spectra.size(), 0);
     result.lamplus_partition.assign(spectra.size(), 0.0);
+    // As in the single-PCA form: an all-signal classification bounds the noise level from above.
+    result.sigma2_bound = all_signal_sigma2_bound(spectra);
     return result;
   }
   // Ascending in standardised value, length total_nonzero.

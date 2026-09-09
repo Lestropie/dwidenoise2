@@ -112,6 +112,35 @@ public:
   //   the other stale, inconsistently scaled, or signalling NaN.
   void set_boundaries(const double mp_edge, const double z_max_noise);
 
+  // Largest noise level consistent with this patch's classification, where that classification
+  //   found no usable threshold BECAUSE it declared every component of the decomposition to be
+  //   signal (Rank with the imposed rank equal to the available rank; MRM2023's peel-off scan
+  //   reaching the end without the largest remaining candidate falling below the running noise
+  //   level). If every component lies above the Marchenko-Pastur edge lambda+ = sigma^2 * edge,
+  //   then sigma^2 < lambda_min / edge, and the smallest non-bypassed eigenvalue on the
+  //   standardised scale -- Spectrum::standardized(rz) -- is exactly that bound.
+  //
+  // NaN wherever no such bound exists: no decomposition at all, no non-bypassed component, or a
+  //   fall-through reached for some other reason. In particular a degenerate spectrum (every
+  //   eigenvalue in the noise range identically zero, from duplicated columns or a patch whose
+  //   only variance the preconditioner's demeaning removed) makes no all-signal claim, and its
+  //   standardized(rz) is zero rather than an upper bound; it is left NaN.
+  //
+  // This is a BOUND, not an estimate, and it ranks below any neighbourhood estimate: where a
+  //   signal-dominated patch triggers MRM2023's fall-through it may exceed the true noise level by
+  //   a large factor. It is consumed at exactly one place -- the terminal case of noise map
+  //   conditioning, where a hole could be filled from no valid neighbour whatsoever.
+  //
+  // Deliberately NOT consulted by operator bool(): a Result carrying only this remains unusable,
+  //   so Estimate and Recon still take the copy-through path and the reported signal rank remains
+  //   the full cardinality. Assigning the value to sigma2 instead would defeat that early-out, and
+  //   SpectrumFilter's OPTSHRINK / OPTTHRESH branches -- which derive both weights and rank from
+  //   sigma2 alone, never consulting cutoff_p -- would then shrink a patch the estimator had just
+  //   declared to be entirely signal, deleting its weakest components. For the same reason sigma2
+  //   is never given the value, so the invariant assertion at the head of set_boundaries() remains
+  //   an assertion about a programming error.
+  double sigma2_bound;
+
   // The empirical boundary on the beta-free standardised scale, ie. expressed in units of sigma^2:
   //   comparable across patches, kernels and iterations whose Casorati aspect ratio differs, and
   //   equal to sigma2 exactly when the classification cut falls on the Marchenko-Pastur edge.

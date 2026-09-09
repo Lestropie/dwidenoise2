@@ -17,6 +17,7 @@
 
 #include "denoise/estimator/imposed/imposed.h"
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,10 +32,25 @@ namespace MR::Denoise::Estimator {
 
 using namespace App;
 
+// A level that get_sigma_sq() reported as obtained but which is not a usable noise level must not
+//   reach Result::sigma2: set_boundaries() opens with an invariant assertion on that member, which
+//   a debug build would trip, and a release build would carry the non-finite value into the
+//   eigenspectrum filter. Leave the Result default-constructed instead -- hence invalid, hence
+//   copy-through and NaN in the noise map -- and count the occurrence for deferred reporting.
+//   Throwing is not an option: this executes inside a ThreadedLoop functor.
+bool ImposedSigma::accept_sigma_sq(const double sigma_sq) const {
+  if (std::isfinite(sigma_sq) && sigma_sq > 0.0)
+    return true;
+  unusable_sigma_counter.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
 Result ImposedSigma::operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const {
   Result result;
   double sigma_sq;
   if (!get_sigma_sq(pos, sigma_sq))
+    return result;
+  if (!accept_sigma_sq(sigma_sq))
     return result;
   result.sigma2 = sigma_sq;
   // From this noise level,
@@ -51,6 +67,8 @@ Result ImposedSigma::operator()(const std::vector<Spectrum> &spectra, const Eige
   Result result;
   double sigma_sq;
   if (!get_sigma_sq(pos, sigma_sq))
+    return result;
+  if (!accept_sigma_sq(sigma_sq))
     return result;
   result.sigma2 = sigma_sq;
   const NoiseStats stats = apply_threshold_standardized(spectra, sigma_sq, result);

@@ -44,6 +44,7 @@ public:
 
   void set_noise_out(const std::string &path);
   void set_noise_out();
+  void set_noise_bound();
   void set_lamplus(const std::string &path);
   void set_lammax_noise(const std::string &path);
   void set_rank_pcanonzero(const std::string &path);
@@ -62,6 +63,13 @@ public:
   void set_eigenspectra_path(const std::string &path);
 
   Image<float> noise_out;
+  // Patch-derived upper bound on the noise level (Estimator::Result::sigma2_bound, stored as a
+  //   noise level rather than a variance), NaN wherever noise_out holds a valid estimate. Scratch
+  //   only -- there is no command-line option for it, because it is not a diagnostic but the
+  //   last-resort fill for noise map conditioning, consulted only where a hole could be filled
+  //   from no valid neighbour at all. A bound is not an estimate, so voxels filled from it remain
+  //   absent from the -noise_valid mask.
+  Image<float> noise_bound;
   // The two signal/noise boundary maps of Estimator::Result, which are not the same quantity; see
   //   the commentary on that class. lamplus holds the theoretical Marchenko-Pastur edge on the
   //   normalised eigenvalue scale (sigma^2 * edge); lammax_noise holds the largest eigenvalue

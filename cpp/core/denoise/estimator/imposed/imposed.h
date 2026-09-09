@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -51,11 +52,28 @@ public:
   //   That family of boundaries is exactly the standardised cut z == sigma^2.
   Result operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const final;
 
+  ssize_t unusable_sigma_count() const final { return unusable_sigma_counter.load(std::memory_order_acquire); }
+
 protected:
   // Provide sigma^2 at the patch centre `pos`; return false if it cannot be
   //   determined there (e.g. cubic interpolation outside the image FoV), in which
   //   case the patch is left unprocessed (an invalid Result is returned).
   virtual bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const = 0;
+
+  // Test a level returned by get_sigma_sq() before it reaches Result::sigma2, counting (but not
+  //   reporting) each rejection. Returns false where the caller must abandon the patch.
+  bool accept_sigma_sq(const double sigma_sq) const;
+
+private:
+  // Patches at which get_sigma_sq() reported success but delivered a value that is not a usable
+  //   noise level. The route by which that could happen was a zero or negative value in the
+  //   variance-stabilising-transform map that Constant and Import divide by: a zero gave +inf, a
+  //   negative one was squared into a plausible positive. Both are now excluded by construction --
+  //   a conditioned noise level map is finite and strictly positive everywhere -- so a non-zero
+  //   count here reports a broken invariant rather than an expected data condition, which is why
+  //   it is surfaced through FAIL() rather than WARN(). Mutable because operator() is const and
+  //   shared across every thread of the estimation loop.
+  mutable std::atomic<ssize_t> unusable_sigma_counter{0};
 };
 
 // Construct an imposed (non-data-driven) estimator from the -fixed_rank command-line

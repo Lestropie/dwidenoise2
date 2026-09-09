@@ -18,6 +18,7 @@
 #include "denoise/estimate.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -249,6 +250,15 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   if (exports.noise_out.valid()) {
     // Per-channel noise level, for complex input as much as for magnitude: the eigenvalues from
     //   which sigma2 was derived were rescaled on that basis at to_per_channel() above.
+    // This is the ONE place at which Estimator::Result's "no usable threshold" convention
+    //   (sigma2 == 0, via operator bool()) is converted into the map-level convention (NaN); see
+    //   Denoise::noise_level_is_valid(). Every route to an unusable threshold arrives here alike:
+    //   a decomposition that failed to converge, an imposed rank equal to the available rank,
+    //   MRM2023's peel-off classifying every component as signal, a degenerate spectrum whose
+    //   noise components are identically zero, and an imposed estimator handed a level it could
+    //   not use. None of them yields a noise level at this voxel, and the map says so with the one
+    //   sentinel. Their provenance remains separable in the reporting (the two counters of
+    //   Estimate, and Result::sigma2_bound, which only the all-signal classifications populate).
     assign_pos_of(ss_index).to(exports.noise_out);
     exports.noise_out.value() = bool(threshold)                                //
                                     ? float(std::sqrt(threshold.sigma2))       //
@@ -264,6 +274,20 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   //   -noise_out map, which it equals when the cut lands exactly on the edge.
   // Both are NaN, rather than the signalling NaN of a default-constructed Result, where no usable
   //   threshold was found; as for -noise_out.
+  // The patch-derived upper bound on the noise level, where the estimator's classification was
+  //   "every component is signal" and hence left no estimate (Result::sigma2_bound). Written as a
+  //   noise level (its square root), on the same scale as noise_out, and NaN wherever noise_out
+  //   holds a valid estimate -- the two never disagree, and conditioning consults this map only
+  //   where imputation from neighbouring voxels had nothing to work from.
+  if (exports.noise_bound.valid()) {
+    assign_pos_of(ss_index).to(exports.noise_bound);
+    const bool usable = !bool(threshold)                        //
+                        && std::isfinite(threshold.sigma2_bound) //
+                        && threshold.sigma2_bound > 0.0;         //
+    exports.noise_bound.value() = usable                                       //
+                                      ? float(std::sqrt(threshold.sigma2_bound)) //
+                                      : std::numeric_limits<float>::quiet_NaN(); //
+  }
   if (exports.lamplus.valid()) {
     assign_pos_of(ss_index).to(exports.lamplus);
     exports.lamplus.value() = bool(threshold)                                //
@@ -350,6 +374,19 @@ template <typename F> void Estimate<F>::report_warnings() const {
   const ssize_t count = pca_failure_counter.load(std::memory_order_acquire);
   if (count > 0) {
     WARN("A total of " + str(count) + " PCA kernels failed to converge");
+  }
+  // An imposed estimator handed an unusable noise level reports here rather than throwing: this
+  //   count is accumulated inside a ThreadedLoop functor, from which an exception cannot safely
+  //   unwind, and FAIL() writing per voxel from every thread would interleave and flood the
+  //   terminal. Reported once, after the loop, at error level: the conditioned map from which the
+  //   level is drawn is finite and strictly positive by construction, so a non-zero count says
+  //   "this cannot happen and did" while still letting the run complete with those voxels marked
+  //   invalid.
+  const ssize_t unusable_sigma = estimator ? estimator->unusable_sigma_count() : 0;
+  if (unusable_sigma > 0) {
+    FAIL("At " + str(unusable_sigma) +
+         " patch(es) the imposed noise level was not finite and positive;"
+         " those patches were left unprocessed");
   }
   const ssize_t no_threshold = no_threshold_counter.load(std::memory_order_acquire);
   if (no_threshold > 0) {

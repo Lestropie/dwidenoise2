@@ -213,6 +213,10 @@ Exports::Exports(const Header &in, const Header &ss) //
 void Exports::set_noise_out(const std::string &path) { noise_out = Image<float>::create(path, *H_ss); }
 void Exports::set_noise_out() { noise_out = Image<float>::scratch(*H_ss, "Scratch image for noise level output"); }
 
+void Exports::set_noise_bound() {
+  noise_bound = Image<float>::scratch(*H_ss, "Scratch image for patch-derived noise level bound");
+}
+
 void Exports::set_lamplus(const std::string &path) { lamplus = Image<float>::create(path, *H_ss); }
 
 void Exports::set_lammax_noise(const std::string &path) { lammax_noise = Image<float>::create(path, *H_ss); }
