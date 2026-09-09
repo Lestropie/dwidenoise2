@@ -109,4 +109,27 @@ std::optional<default_type> metadata_max(const KeyValues &keyval, const std::str
 //   tool) leaves no trace in the image header at all.
 void warn_if_metadata_precludes_mp(const Header &H);
 
+// Whether a value stored in a noise level map is a usable noise level.
+//
+// A single sentinel governs every noise level map in this software: NaN means "no valid noise
+//   level here". Zero and negative values are not sentinels but corruption -- a zero noise level
+//   blanks the data it stabilises (NoiseModel::Gaussian::stabilise returns 0 for sigma <= 0), and a
+//   negative one is silently laundered into a plausible positive sigma^2 by the squaring in
+//   Estimator::Import::get_sigma_sq -- so they are treated here as equivalent to NaN and converted
+//   to it before anything else reads the map.
+//
+// Note the deliberate asymmetry with Estimator::Result, which uses sigma2 == 0 as its own internal
+//   "no usable threshold" sentinel (see Result::operator bool()). The conversion between the two
+//   conventions happens at exactly one place, where Estimate writes the estimated level into
+//   exports.noise_out.
+inline bool noise_level_is_valid(const float value) { return std::isfinite(value) && value > 0.0F; }
+
+// Report the number of voxels of a noise level map at which no valid noise level was estimated and
+//   which were consequently filled from their neighbours, escalating from INFO to WARN by the same
+//   rule as Denoise::report_invalid_data(): the threshold is the largest number of voxels within a
+//   single slice orthogonal to any axis, excluding the slice-encoding axis where the metadata name
+//   it. "H" must be the header of the map being conditioned (the sub-sampled grid), so that "one
+//   slice" is one slice of that map. "context" names the map in the message.
+void report_imputed_noise_levels(const size_t imputed_count, const Header &H, const std::string &context);
+
 } // namespace MR::Denoise

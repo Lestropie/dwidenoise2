@@ -207,12 +207,22 @@ protected:
   // Some data can only be written in a thread-safe manner
   static std::mutex mutex;
 
+  // Two distinct populations of patch yield no usable noise level, and they are counted
+  //   separately because they are not the same fault. pca_failure_counter counts genuine
+  //   decomposition failures (the eigensolver did not converge). no_threshold_counter counts
+  //   patches whose decomposition SUCCEEDED but for which the estimator located no signal/noise
+  //   boundary: the imposed rank equals the available rank, MRM2023's peel-off classified every
+  //   component as signal, or the noise part of a valid spectrum is identically zero. Both
+  //   populations become NaN in the noise level map and are imputed there, but conflating them in
+  //   the reporting would attribute a property of the data to a numerical failure.
   static std::atomic<ssize_t> pca_failure_counter;
+  static std::atomic<ssize_t> no_threshold_counter;
 
   void load_data(Image<F> &image);
 };
 
 template <typename F> std::mutex Estimate<F>::mutex;
 template <typename F> std::atomic<ssize_t> Estimate<F>::pca_failure_counter;
+template <typename F> std::atomic<ssize_t> Estimate<F>::no_threshold_counter;
 
 } // namespace MR::Denoise

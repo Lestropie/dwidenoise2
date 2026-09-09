@@ -25,6 +25,8 @@
 
 #include "algo/threaded_loop.h"
 #include "axes.h"
+#include "denoise/mask.h"
+#include "denoise/metadata.h"
 #include "exception.h"
 #include "filter/smooth.h"
 #include "mrtrix.h"

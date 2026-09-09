@@ -19,6 +19,7 @@
 
 #include <Eigen/Dense>
 #include <cassert>
+#include <cmath>
 #include <string>
 #include <vector>
 

@@ -26,6 +26,7 @@
 
 #include "exception.h"
 #include "mrtrix.h"
+#include "denoise/mask.h"
 
 namespace MR::Denoise {
 
@@ -257,6 +258,19 @@ void warn_if_metadata_precludes_mp(const Header &H) {
          " zero-filling of unacquired k-space correlates the noise between neighbouring voxels,"
          " so the eigenspectrum of each patch will not conform to the Marchenko-Pastur distribution"
          " and the noise level will be underestimated");
+}
+
+void report_imputed_noise_levels(const size_t imputed_count, const Header &H, const std::string &context) {
+  if (imputed_count == 0)
+    return;
+  const std::string message = "A total of " + str(imputed_count) +                     //
+                              " voxels of " + context +                                //
+                              " held no valid noise level estimate;"                   //
+                              " these were filled from their neighbouring voxels";     //
+  if (imputed_count > invalid_data_warning_threshold(H))
+    WARN(message);
+  else
+    INFO(message);
 }
 
 } // namespace MR::Denoise

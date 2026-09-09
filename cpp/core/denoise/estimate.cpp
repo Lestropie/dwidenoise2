@@ -239,6 +239,11 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     }
   }
 
+  // A decomposition that succeeded but yielded no usable threshold is a different event from one
+  //   that failed to converge, and is counted separately (see the two counters in Estimate).
+  if (successful_decomposition && !bool(threshold))
+    no_threshold_counter.fetch_add(1, std::memory_order_relaxed);
+
   // Store additional output maps if requested
   auto ss_index = subsample->in2ss(voxel);
   if (exports.noise_out.valid()) {
@@ -345,6 +350,14 @@ template <typename F> void Estimate<F>::report_warnings() const {
   const ssize_t count = pca_failure_counter.load(std::memory_order_acquire);
   if (count > 0) {
     WARN("A total of " + str(count) + " PCA kernels failed to converge");
+  }
+  const ssize_t no_threshold = no_threshold_counter.load(std::memory_order_acquire);
+  if (no_threshold > 0) {
+    // Not a numerical failure: these decompositions succeeded, and the estimator declined to place
+    //   a signal/noise boundary within them. Reported at INFO because for some configurations it is
+    //   the expected outcome (-fixed_rank set to the available rank produces it at every patch).
+    INFO("A total of " + str(no_threshold) +
+         " PCA kernels were decomposed successfully but yielded no usable signal/noise threshold");
   }
 }
 
