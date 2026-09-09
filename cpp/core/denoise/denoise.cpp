@@ -493,12 +493,12 @@ void normalised_convolution(Image<float> &x, const default_type fwhm) {
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type impute,
                                  const noise_pad_type pad,
-                                 const default_type smooth_fwhm,
+                                 const default_type fwhm,
                                  const Header *coverage,
                                  Image<float> *bound,
                                  const noise_unfilled_type unfilled,
                                  const std::string &context) {
-  assert(smooth_fwhm >= 0.0);
+  assert(fwhm >= 0.0);
   Header H(in);
   // Imputation weights are formed from the map's OWN voxel spacings, which for an iterative
   //   schedule differ from one iteration to the next; padding does not change them.
@@ -558,11 +558,11 @@ Image<float> condition_noise_map(Image<float> &in,
 
   size_t remaining = count_nonfinite(out);
   ssize_t passes = 0;
-  if (smooth_fwhm > 0.0) {
+  if (fwhm > 0.0) {
     // Pass zero is the requested smoothing, which -- being a normalised convolution -- fills every
     //   hole with any valid support inside its (much wider) kernel as a by-product. Passes one
     //   onward are the tight imputation kernel, which erodes whatever remains one voxel at a time.
-    normalised_convolution(out, smooth_fwhm);
+    normalised_convolution(out, fwhm);
     remaining = count_nonfinite(out);
     ++passes;
   }

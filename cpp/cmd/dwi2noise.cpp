@@ -208,7 +208,12 @@ void usage() {
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image").type_image_in()
-  + Argument("noise", "the output estimated noise level map").type_image_out();
+  + Argument("noise",
+             "the output estimated noise level map. "
+             "Voxels at which no valid noise level could be estimated are filled from their"
+             " neighbours rather than left empty; use -noise_valid to export a mask of those"
+             " voxels at which the level was estimated.")
+      .type_image_out();
 
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
@@ -356,7 +361,7 @@ void run(Header &dwi,
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NONE,
                                              noise_pad_type::PAD,
-                                             iterations[iteration].smooth_noiseout_fwhm,
+                                             iterations[iteration].condition_noiseout_fwhm,
                                              nullptr,
                                              &iteration_exports.noise_bound,
                                              noise_unfilled_type::THROW,
@@ -429,7 +434,7 @@ void run(Header &dwi,
     Image<float> conditioned = Denoise::condition_noise_map(final_exports.noise_out,
                                                             noise_impute_type::NONE,
                                                             noise_pad_type::NONE,
-                                                            iterations.back().smooth_noiseout_fwhm,
+                                                            iterations.back().condition_noiseout_fwhm,
                                                             nullptr,
                                                             &final_exports.noise_bound,
                                                             noise_unfilled_type::RETAIN,

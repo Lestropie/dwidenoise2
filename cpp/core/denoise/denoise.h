@@ -229,7 +229,7 @@ enum class noise_unfilled_type { THROW, RETAIN };
 //   externally-supplied map need not share the DWI voxel grid -- the estimator interpolates it --
 //   but it must be sampleable at every patch position the DWI grid can produce, which a map on a
 //   smaller or offset grid otherwise is not. Padded voxels replicate the nearest edge value.
-// "smooth_fwhm" is the full width at half maximum, in millimetres, of the isotropic Gaussian with
+// "fwhm" is the full width at half maximum, in millimetres, of the isotropic Gaussian with
 //   which the map is smoothed once conditioned; zero (the default) bypasses smoothing entirely.
 //   Expressing the width in millimetres rather than in voxels makes the extent of the smoothing a
 //   property of the anatomy rather than of the grid the map happens to be estimated on, which for
@@ -246,7 +246,7 @@ enum class noise_unfilled_type { THROW, RETAIN };
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type impute = noise_impute_type::NONE,
                                  const noise_pad_type pad = noise_pad_type::PAD,
-                                 const default_type smooth_fwhm = 0.0,
+                                 const default_type fwhm = 0.0,
                                  const Header *coverage = nullptr,
                                  Image<float> *bound = nullptr,
                                  const noise_unfilled_type unfilled = noise_unfilled_type::THROW,

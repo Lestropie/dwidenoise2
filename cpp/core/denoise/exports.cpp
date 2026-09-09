@@ -63,7 +63,7 @@ OptionGroup export_options(const option_scope_t scope) {
            "Export a binary mask of voxels at which a valid noise level was estimated. "
            "Voxels absent from this mask hold a value in the output noise level map"
            " that was derived from neighbouring voxels rather than estimated.")
-    + Argument("image").type_image_out()
+    + Argument("image").type_image_out();
   if (scope == option_scope_t::DENOISING) {
     result
     + Option("noise_out",

@@ -644,7 +644,7 @@ void run(Header &dwi,
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NONE,
                                              noise_pad_type::PAD,
-                                             iterations[iteration].smooth_noiseout_fwhm,
+                                             iterations[iteration].condition_noiseout_fwhm,
                                              nullptr,
                                              &iteration_exports.noise_bound,
                                              noise_unfilled_type::THROW,
@@ -1144,7 +1144,7 @@ void run() {
   //   without estimating (the final reconstruction row, whose update_noise defaults to false, is the
   //   only one that can reach here, as non-final rows are already required to have update_noise true).
   for (const auto &it : iterations)
-    if (it.smooth_noiseout_fwhm > 0.0 && !it.update_noise.value())
+    if (it.condition_noiseout_fwhm > 0.0 && !it.update_noise.value())
       throw Exception("A schedule iteration sets a non-zero smooth_noise FWHM but does not "
                       "(re)estimate the noise level in that iteration (update_noise false), so there "
                       "is no freshly estimated noise map to smooth; smooth_noise may be non-zero only "
