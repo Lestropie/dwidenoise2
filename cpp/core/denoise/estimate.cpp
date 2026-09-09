@@ -274,6 +274,13 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   //   -noise_out map, which it equals when the cut lands exactly on the edge.
   // Both are NaN, rather than the signalling NaN of a default-constructed Result, where no usable
   //   threshold was found; as for -noise_out.
+  // Whether a valid noise level was ESTIMATED here, recorded before any conditioning fills the
+  //   voxel in. This is the same test that decides what noise_out receives, evaluated at the same
+  //   moment, so the two cannot disagree.
+  if (exports.noise_valid.valid()) {
+    assign_pos_of(ss_index).to(exports.noise_valid);
+    exports.noise_valid.value() = bool(threshold);
+  }
   // The patch-derived upper bound on the noise level, where the estimator's classification was
   //   "every component is signal" and hence left no estimate (Result::sigma2_bound). Written as a
   //   noise level (its square root), on the same scale as noise_out, and NaN wherever noise_out

@@ -1264,6 +1264,15 @@ void run() {
     final_exports.set_noise_out(opt[0][0].as_text());
     final_exports.set_noise_bound();
   }
+  opt = get_options("noise_valid");
+  if (!opt.empty()) {
+    // The mask says which voxels of the noise level map were estimated rather than filled, so it
+    //   has nothing to describe without that map. dwi2noise always produces one; here it is
+    //   optional, so the pairing has to be required.
+    if (!final_exports.noise_out.valid())
+      throw Exception("-noise_valid describes the map exported by -noise_out, and requires it");
+    final_exports.set_noise_valid(opt[0][0].as_text());
+  }
   opt = get_options("lamplus");
   if (!opt.empty())
     final_exports.set_lamplus(opt[0][0].as_text());

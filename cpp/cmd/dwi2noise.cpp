@@ -575,6 +575,9 @@ void run() {
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1].as_text());
   final_exports.set_noise_bound();
+  opt = get_options("noise_valid");
+  if (!opt.empty())
+    final_exports.set_noise_valid(opt[0][0].as_text());
   opt = get_options("lamplus");
   if (!opt.empty())
     final_exports.set_lamplus(opt[0][0].as_text());

@@ -58,6 +58,12 @@ const char *const noise_boundary_description =
 
 OptionGroup export_options(const option_scope_t scope) {
   OptionGroup result("Options for exporting additional data regarding PCA behaviour");
+  result
+  + Option("noise_valid",
+           "Export a binary mask of voxels at which a valid noise level was estimated. "
+           "Voxels absent from this mask hold a value in the output noise level map"
+           " that was derived from neighbouring voxels rather than estimated.")
+    + Argument("image").type_image_out()
   if (scope == option_scope_t::DENOISING) {
     result
     + Option("noise_out",
@@ -215,6 +221,12 @@ void Exports::set_noise_out() { noise_out = Image<float>::scratch(*H_ss, "Scratc
 
 void Exports::set_noise_bound() {
   noise_bound = Image<float>::scratch(*H_ss, "Scratch image for patch-derived noise level bound");
+}
+
+void Exports::set_noise_valid(const std::string &path) {
+  Header H(*H_ss);
+  H.datatype() = DataType::Bit;
+  noise_valid = Image<bool>::create(path, H);
 }
 
 void Exports::set_lamplus(const std::string &path) { lamplus = Image<float>::create(path, *H_ss); }
