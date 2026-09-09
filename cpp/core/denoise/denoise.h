@@ -156,7 +156,9 @@ void warn_if_metadata_precludes_mp(const Header &H);
 inline bool noise_level_is_valid(const float value) { return std::isfinite(value) && value > 0.0F; }
 
 // Report the number of voxels of a noise level map at which no valid noise level was estimated and
-//   which were consequently filled from their neighbours, escalating from INFO to WARN by the same
+//   which conditioning consequently had to fill. It does not name the mechanism, because it is
+//   emitted before any of them has run and more than one may be involved; the INFO messages that
+//   follow report how many voxels each of them accounted for. Escalates from INFO to WARN by the same
 //   rule as Denoise::report_invalid_data(): the threshold is the largest number of voxels within a
 //   single slice orthogonal to any axis, excluding the slice-encoding axis where the metadata name
 //   it. "H" must be the header of the map being conditioned (the sub-sampled grid), so that "one

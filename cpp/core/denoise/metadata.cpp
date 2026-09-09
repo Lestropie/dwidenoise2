@@ -266,7 +266,7 @@ void report_imputed_noise_levels(const size_t imputed_count, const Header &H, co
   const std::string message = "A total of " + str(imputed_count) +                     //
                               " voxels of " + context +                                //
                               " held no valid noise level estimate;"                   //
-                              " these were filled from their neighbouring voxels";     //
+                              " these were filled during conditioning";                //
   if (imputed_count > invalid_data_warning_threshold(H))
     WARN(message);
   else
