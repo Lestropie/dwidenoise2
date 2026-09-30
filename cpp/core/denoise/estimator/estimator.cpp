@@ -35,7 +35,10 @@ const Option estimator_option =
                "), either: \n"
                "* Exp1: the original estimator used in Veraart et al. (2016); \n"
                "* Exp2: the improved estimator introduced in Cordero-Grande et al. (2019); \n"
-               "* Med: estimate based on the median eigenvalue as in Gavish and Donoho (2014); \n"
+               "* Med1: the noise level implied by the median eigenvalue alone, "
+               "as in Gavish and Donoho (2014); \n"
+               "* Med2: the median eigenvalue as in Gavish and Donoho (2014), "
+               "followed by one fixed point iteration to re-estimate the noise level from the spectrum noise bulk; "
                "* MRM2023: the alternative estimator introduced in Olesen et al. (2023); \n"
                "* TBME2022: the multiple-moment generalised-quarter-circle estimator of Zhu et al. (2022).")
       + Argument("algorithm").type_choice<estimator_type>();
@@ -80,8 +83,10 @@ std::shared_ptr<Base> make_estimator(Image<float> &vst_noise_in, const bool perm
     return std::make_shared<Exp<1>>();
   case estimator_type::EXP2:
     return std::make_shared<Exp<2>>();
-  case estimator_type::MED:
-    return std::make_shared<Med>();
+  case estimator_type::MED1:
+    return std::make_shared<Med1>();
+  case estimator_type::MED2:
+    return std::make_shared<Med2>();
   case estimator_type::MRM2023:
     return std::make_shared<MRM2023>();
   case estimator_type::TBME2022:

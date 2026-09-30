@@ -201,7 +201,7 @@ void usage() {
     "Denoise Functional Magnetic Resonance Imaging With Random Matrix Theory Based Principal Component Analysis. "
     "IEEE Transactions on Biomedical Engineering, 2022, 69(11), 3377-3388, doi: 10.1109/TBME.2022.3168592"
 
-  + "* If using -estimator med: "
+  + "* If using -estimator med1 or med2: "
     "Gavish, M.; Donoho, D.L. "
     "The Optimal Hard Threshold for Singular Values is 4/sqrt(3). "
     "IEEE Transactions on Information Theory, 2014, 60(8), 5040-5053.";

@@ -59,8 +59,8 @@
 // The mixture also forbids evaluating a Marchenko-Pastur shape constant at any single "average"
 // beta: the pooled sample is a mixture sum_p w_p MP(beta_p), which is not MP(beta) for any beta.
 // Constants that are *moments* average linearly over the mixture, so the weighted mean of the
-// per-partition constants is exact (TBME2022's quarter-circle moments; the median that Med
-// divides out); constants describing the *support* are set by the widest partition alone, so
+// per-partition constants is exact (TBME2022's quarter-circle moments; the median that
+// MedBase divides out); constants describing the *support* are set by the widest partition alone, so
 // max_beta() is the right one (the bulk width in Exp, the edge difference in TBME2022).
 // mean_beta() is consequently for reporting only.
 
@@ -114,7 +114,7 @@ std::vector<PooledEigenvalue> pool_standardized(const std::vector<Spectrum> &spe
 // The concatenated nonzero eigenspectrum in normalised units, each partition's values divided by
 //   a per-partition constant, sorted ascending. For the case where the statistic of interest is
 //   not the bulk edge but some other feature of each partition's law whose position depends on
-//   beta_p: in practice Med, which divides by the Marchenko-Pastur median mu(beta_p) so that
+//   beta_p: in practice MedBase, which divides by the Marchenko-Pastur median mu(beta_p) so that
 //   every partition contributes values whose own median is sigma^2.
 std::vector<double> pool_rescaled(const std::vector<Spectrum> &spectra, const std::vector<double> &divisor);
 
@@ -148,7 +148,7 @@ struct NoiseStats {
   //   one because partitions of unequal aspect ratio are commensurable only on that scale.
   double z_max = 0.0;
   bool empty() const { return count == 0; }
-  // Pooled noise level on the deflated degrees of freedom, ie. the refinement Estimator::Med
+  // Pooled noise level on the deflated degrees of freedom, ie. the refinement Estimator::Med2
   //   makes once the median has isolated the noise components. The undeflated counterpart has no
   //   accessor because its one reader, Estimator::Rank, forms its level from "sum" and "dof"
   //   under a further correction of its own.

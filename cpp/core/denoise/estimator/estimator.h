@@ -30,7 +30,7 @@ class Base;
 
 extern const App::Option estimator_option;
 extern const App::OptionGroup estimator_denoise_options;
-enum class estimator_type { EXP1, EXP2, MED, MRM2023, TBME2022 };
+enum class estimator_type { EXP1, EXP2, MED1, MED2, MRM2023, TBME2022 };
 // Default data-driven estimator, used both to populate the -estimator help text
 //   and as the fallback when the option is not specified. MRM2023 is preferred as the
 //   default because it reaches an acceptable noise-level estimate precision with fewer

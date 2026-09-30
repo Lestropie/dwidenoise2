@@ -30,7 +30,7 @@ namespace MR::Denoise::Estimator {
 
 // Intermediate base for the "imposed" (non-data-driven) noise-level classes.
 //
-// Unlike the data-driven estimators (-estimator exp1/exp2/med/mrm2023/tbme2022),
+// Unlike the data-driven estimators (-estimator exp1/exp2/med1/med2/mrm2023/tbme2022),
 //   which infer the noise level from the patch eigenvalue spectrum, these classes
 //   obtain a *known* noise level sigma^2 from an external source -- a fixed scalar
 //   (Fixed), an imported image (Import), or the unit level reached after iterative
