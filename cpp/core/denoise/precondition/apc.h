@@ -106,7 +106,8 @@ namespace MR::Denoise::Precondition {
 //   reduced budget). This is the dominant lever on APC's contribution to run time.
 //
 //   Regularisation strength lambda: the discrepancy criterion (Morozov), realised by default as
-//   Chambolle's (2004) fixed-point iteration on lambda (their eq. 6) seeded from eq. 7 --
+//   Pizzolato's eq. 6 fixed-point iteration on lambda (Chambolle's 2004 multiplicative update)
+//   seeded from their eq. 7 (Getreuer 2012; Duran et al. 2013) --
 //   Params::lambda_solver selects between that and two bracketing searches for the same
 //   condition -- targeting a weighted residual energy of 2 * N * sigmabar^2 (their eq. 11; the factor 2
 //   is the two real+imaginary channels of complex data), where the noise level entering that
@@ -283,7 +284,8 @@ public:
   //   All three target the same condition and differ only in how they search for it; see
   //   Params::lambda_solver.
   enum class lambda_solver_t {
-    // Chambolle's (2004) multiplicative fixed point (their eq. 6), seeded from their eq. 7.
+    // Pizzolato's eq. 6, which is Chambolle's (2004) multiplicative fixed point, seeded from
+    //   their eq. 7 (Getreuer 2012; Duran et al. 2013).
     FIXED_POINT,
     // Bracket the crossing by doubling or halving lambda from that same seed, then bisect.
     BISECTION,
@@ -701,7 +703,9 @@ public:
     //   nearly invariant to the intensity units of the data rather than merely insensitive to them.
     //   On real data scaled by 1e3 and by 1e-3 the estimated noise level tracks the scaling to
     //   within four parts in 1e5, even though the eq. 7 seed contains a term in 1/sigmabar^2 that is
-    //   not dimensionally consistent and reaches 13% of the seed at the smaller scaling: the lambda
+    //   not dimensionally consistent and reaches 84% of the seed at the smaller scaling (that
+    //   measurement predates the correction of the term's coefficient from 0.0547 to the published
+    //   2.0547, at which it was 13%, so it is a lower bound on the dependence): the lambda
     //   search converges away from its seed, so the inconsistency costs iterations rather than
     //   accuracy, and what residual scale dependence remains is a difference in where the search
     //   stops rather than in the minimiser it is approaching.
