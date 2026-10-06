@@ -90,7 +90,7 @@ SphereBase::Shared::Shared(const Header &voxel_grid,
   */
 }
 
-default_type SphereBase::compute_max_radius(const Header &voxel_grid, const ssize_t min_size) const {
+default_type SphereBase::compute_max_radius(const Header &voxel_grid, const ssize_t min_size) {
   const size_t values_per_voxel = Denoise::num_volumes(voxel_grid);
   const default_type voxel_volume = voxel_grid.spacing(0) * voxel_grid.spacing(1) * voxel_grid.spacing(2);
   // Consider the worst case scenario, where the corner of the FoV is being processed;

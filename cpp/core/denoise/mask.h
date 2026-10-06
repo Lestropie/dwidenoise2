@@ -75,10 +75,11 @@ inline void report_invalid_data(const size_t excluded_count, const Header &H) {
   const std::string message = "A total of " + str(excluded_count) +     //
                               " voxels were found with invalid data;"    //
                               " these will be excluded from processing"; //
-  if (excluded_count > invalid_data_warning_threshold(H))
+  if (excluded_count > invalid_data_warning_threshold(H)) {
     WARN(message);
-  else
+  } else {
     INFO(message);
+  }
 }
 
 // Need to sweep through the input data,
