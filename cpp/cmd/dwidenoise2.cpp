@@ -42,6 +42,7 @@
 #include "denoise/kernel/sphere_minvoxels.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/mask.h"
+#include "denoise/metadata.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/preconditioner.h"
@@ -940,6 +941,10 @@ void run() {
     throw Exception("input image must be at least 4-dimensional");
   if (Denoise::num_volumes(dwi) == 1)
     throw Exception("input image must be non-singleton across non-spatial dimensions");
+
+  // Report any evidence in the image metadata that upstream processing has already invalidated the
+  //   assumptions underpinning Marchenko-Pastur-based denoising.
+  Denoise::warn_if_metadata_precludes_mp(dwi);
 
   // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
   //   that header carries the transform-realignment metadata that -fslgrad import needs in order
