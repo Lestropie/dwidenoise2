@@ -27,6 +27,7 @@
 #include "denoise/iterative.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/mask.h"
+#include "denoise/metadata.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/preconditioner.h"
