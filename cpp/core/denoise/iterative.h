@@ -104,7 +104,9 @@ resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective, co
 // Internal function covering as much as possible for iterative implementation.
 //   num_partitions / partitioning describe the volume partitioning for this iteration (P == 1
 //   and a null assignment ⇒ no partitioning). volume_group carries the per-volume demeaning-group
-//   labels used for the per-partition demeaning performed within Estimate (empty ⇒ no demeaning).
+//   labels, which stratify the partitioning and name the means to subtract; whether Estimate is the
+//   component that subtracts them is stated by demean_site (the iteration's resolved site, the same
+//   value the caller imposed on the preconditioner), not inferred from either of those two.
 template <typename T>
 void estimate(Image<T> &input,
               Image<T> &input_preconditioned,
@@ -120,7 +122,8 @@ void estimate(Image<T> &input,
               Exports &exports,
               const ssize_t num_partitions = 1,
               std::shared_ptr<const Partitioning> partitioning = nullptr,
-              const std::vector<ssize_t> &volume_group = {}) {
+              const std::vector<ssize_t> &volume_group = {},
+              const demean_site_t demean_site = demean_site_t::NONE) {
   // Size the kernel from the preconditioned data, whose volume count is m' (reduced under
   //   temporal sub-sampling); this keeps the Casorati matrix aspect ratio consistent with the
   //   number of volumes actually decomposed. With partitioning the kernel is sized from the
@@ -158,6 +161,7 @@ void estimate(Image<T> &input,
                      false,
                      partitioning,
                      volume_group,
+                     demean_site,
                      num_partitions);
     ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
     func.report_warnings();

@@ -79,8 +79,6 @@ public:
     return result;
   }
 
-  bool supports_partitioning() const final { return true; }
-
 protected:
   // Provide sigma^2 at the patch centre `pos`; return false if it cannot be
   //   determined there (e.g. cubic interpolation outside the image FoV), in which

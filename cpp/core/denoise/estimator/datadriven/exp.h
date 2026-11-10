@@ -35,8 +35,6 @@ public:
                     const Eigen::Vector3d & /*unused*/) const final; //
   Result operator()(const std::vector<Spectrum> &spectra,            //
                     const Eigen::Vector3d & /*unused*/) const final; //
-  bool supports_partitioning() const final { return true; }
-
   // Predicted relative RMSE of the noise level estimate; calibrated by numerical simulation of
   //   log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n) over m in [30,2000],
   //   n >= m and rank density a in [0.25,4] (sigma = 1; conservative theta = 1.5 fit).

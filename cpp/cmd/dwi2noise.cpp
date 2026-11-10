@@ -27,6 +27,7 @@
 #include "denoise/iterative.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/mask.h"
+#include "denoise/metadata.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/preconditioner.h"
@@ -76,6 +77,15 @@ void usage() {
   + "Important note:"
     " noise level estimation should only be performed as the first step of an image processing pipeline."
     " The routine is invalid if interpolation or smoothing has been applied to the data prior to denoising."
+    " Where metadata of DICOM provenance are preserved in the image header,"
+    " they are interrogated for evidence of such prior processing"
+    "---specifically gradient non-linearity distortion correction,"
+    " and reconstruction of a finer image matrix than the acquired k-space supports"
+    " (k-space zero-filling)---"
+    "and a warning is issued for any that is found."
+    " The absence of such a warning is however not evidence that the data are suitable:"
+    " the relevant fields seldom survive conversion from DICOM,"
+    " and processing applied after that conversion leaves no trace in the image header at all."
 
   + "Note that on complex input data,"
     " the output will be the total noise level across real and imaginary channels,"
@@ -311,7 +321,10 @@ void run(Header &dwi,
       throw Exception("The selected noise level estimator does not support volume partitioning "
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
                       " partitions); choose a different -estimator or remove partitioning from the schedule");
-    preconditioner.set_partitioning_active(num_partitions > 1);
+    // With partitioning the demeaning moves into Estimate (per partition); impose the resolved site
+    //   before update_parameters() so the preconditioner skips the then-unused mean pass.
+    const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+    preconditioner.set_demean_site(demean_site);
     preconditioner.update_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
@@ -345,7 +358,8 @@ void run(Header &dwi,
                         iteration_exports,
                         num_partitions,
                         partitioning,
-                        volume_group);
+                        volume_group,
+                        demean_site);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
@@ -373,7 +387,8 @@ void run(Header &dwi,
     throw Exception("The selected noise level estimator does not support volume partitioning "
                     "(final schedule row requests " + str(num_partitions) +
                     " partitions); choose a different -estimator or remove partitioning from the schedule");
-  preconditioner.set_partitioning_active(num_partitions > 1);
+  const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+  preconditioner.set_demean_site(demean_site);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
   // -preconditioned exports the preconditioned data that are the input to PCA. The final
@@ -404,7 +419,8 @@ void run(Header &dwi,
                       final_exports,
                       num_partitions,
                       partitioning,
-                      volume_group);
+                      volume_group,
+                      demean_site);
 
   // Smooth the exported noise map if (and only if) the final schedule row requests it. The non-final
   //   iterations have their smoothing applied by condition_noise_map when propagating the estimate to
@@ -459,6 +475,10 @@ void run() {
   if (Denoise::num_volumes(dwi) == 1)
     throw Exception("input image must be non-singleton across non-spatial dimensions");
   bool complex = dwi.datatype().is_complex();
+
+  // Report any evidence in the image metadata that upstream processing has already invalidated the
+  //   assumptions underpinning Marchenko-Pastur-based noise level estimation.
+  Denoise::warn_if_metadata_precludes_mp(dwi);
 
   // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
   //   that header carries the transform-realignment metadata that -fslgrad import needs in order

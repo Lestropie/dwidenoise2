@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include <cassert>
 #include <limits>
 #include <vector>
 

@@ -42,6 +42,7 @@
 #include "denoise/kernel/sphere_minvoxels.h"
 #include "denoise/kernel/sphere_radius.h"
 #include "denoise/mask.h"
+#include "denoise/metadata.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/preconditioner.h"
@@ -642,9 +643,10 @@ void run(Header &dwi,
     //   level map. The preconditioned data then hold only the m' subset volumes, so the
     //   downstream Estimate / kernel sizing see m' volumes without any knowledge of sub-sampling.
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
-    // Resolve the partition count for this iteration from the (post-subsampling) volume count m'.
-    //   When partitioning, the preconditioner performs no demeaning (done per partition within
-    //   Estimate); set this before update_parameters so it skips the now-unused mean pass.
+    // Resolve the partition count for this iteration from the (post-subsampling) volume count m',
+    //   and from it the site of the demeaning: when partitioning, it is performed per partition
+    //   within Estimate rather than by the preconditioner. Impose the site before
+    //   update_parameters() so the preconditioner skips the then-unused mean pass.
     const ssize_t mprime = preconditioner.header().size(3);
     const ssize_t num_partitions =
         Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
@@ -652,7 +654,8 @@ void run(Header &dwi,
       throw Exception("The selected noise level estimator does not support volume partitioning "
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
                       " partitions); choose a different -estimator or remove partitioning from the schedule");
-    preconditioner.set_partitioning_active(num_partitions > 1);
+    const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+    preconditioner.set_demean_site(demean_site);
     preconditioner.update_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
@@ -687,7 +690,8 @@ void run(Header &dwi,
                         iteration_exports,
                         num_partitions,
                         partitioning,
-                        volume_group);
+                        volume_group,
+                        demean_site);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
@@ -711,12 +715,15 @@ void run(Header &dwi,
   //   the coarse bootstrap grid as the iterations above do.
   preconditioner.set_apc_refine_later(false);
   // Resolve partitioning for the reconstruction pass (sized from the full volume count, as the
-  //   final row's temporal_subsample is validated to be 1.0). Set before update_parameters
-  //   so the (unused) preconditioner-side demeaning pass is skipped when partitioning.
+  //   final row's temporal_subsample is validated to be 1.0), and with it the demeaning site.
+  //   Imposed before update_parameters so the (then-unused) preconditioner-side demeaning pass is
+  //   skipped when partitioning. This site governs the whole reconstruction pass: the forward
+  //   transform below, Recon, and the inverse transform that reverses it.
   const ssize_t mprime_final = preconditioner.header().size(3);
   const ssize_t num_partitions =
       Iterative::resolve_num_partitions(iterations.back(), mprime_final, "The final schedule row");
-  preconditioner.set_partitioning_active(num_partitions > 1);
+  const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+  preconditioner.set_demean_site(demean_site);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
 
@@ -803,6 +810,7 @@ void run(Header &dwi,
                 preconditioner.partition_null_rank(),
                 partitioning,
                 volume_group,
+                demean_site,
                 num_partitions);
 
   Header H_out (dwi);
@@ -933,6 +941,10 @@ void run() {
     throw Exception("input image must be at least 4-dimensional");
   if (Denoise::num_volumes(dwi) == 1)
     throw Exception("input image must be non-singleton across non-spatial dimensions");
+
+  // Report any evidence in the image metadata that upstream processing has already invalidated the
+  //   assumptions underpinning Marchenko-Pastur-based denoising.
+  Denoise::warn_if_metadata_precludes_mp(dwi);
 
   // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
   //   that header carries the transform-realignment metadata that -fslgrad import needs in order

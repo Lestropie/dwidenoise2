@@ -17,6 +17,7 @@
 
 #include "denoise/denoise.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -24,6 +25,7 @@
 
 #include "algo/threaded_loop.h"
 #include "axes.h"
+#include "exception.h"
 #include "filter/smooth.h"
 #include "mrtrix.h"
 #include "transform.h"
@@ -45,7 +47,16 @@ const char *first_step_description =
     "Important note:"
     " image denoising must be performed as the first step of the image processing pipeline."
     " The routine will not operate correctly if interpolation or smoothing"
-    " has been applied to the data prior to denoising.";
+    " has been applied to the data prior to denoising."
+    " Where metadata of DICOM provenance are preserved in the image header,"
+    " they are interrogated for evidence of such prior processing"
+    "---specifically gradient non-linearity distortion correction,"
+    " and reconstruction of a finer image matrix than the acquired k-space supports"
+    " (k-space zero-filling)---"
+    "and a warning is issued for any that is found."
+    " The absence of such a warning is however not evidence that the data are suitable:"
+    " the relevant fields seldom survive conversion from DICOM,"
+    " and processing applied after that conversion leaves no trace in the image header at all.";
 
 const char *non_gaussian_noise_description =
     "Magnitude-reconstructed MRI data exhibit non-Gaussian noise statistics"
@@ -144,6 +155,7 @@ size_t num_volumes(const Header& H) {
 }
 
 namespace {
+
 // Voxel-wise functors for ThreadedLoop. ThreadedLoop copies the functor per thread, so each
 //   thread receives independent Image voxel accessors (deep-copied); the operations below are
 //   strictly voxel-local, so no locking is required.

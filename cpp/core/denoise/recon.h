@@ -47,6 +47,7 @@ public:
         const ssize_t null_rank,
         std::shared_ptr<const Partitioning> level_partitioning = nullptr,
         std::vector<ssize_t> volume_group = {},
+        const demean_site_t demean_site = demean_site_t::NONE,
         const ssize_t kernel_num_partitions = 1);
 
   void operator()(Image<F> &dwi, Image<F> &out);
