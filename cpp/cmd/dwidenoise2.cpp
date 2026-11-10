@@ -191,7 +191,24 @@ void usage() {
             " Passing both maps is required for equivalence:"
             " -noise_in fixes the variance-stabilising transform and noise level,"
             " while -rankpermm_in reproduces the rank-adaptive kernel"
-            " (omitting it falls back to a fixed aspect-ratio kernel).");
+            " (omitting it falls back to a fixed aspect-ratio kernel).")
+
+  + Example("Export the effective degrees of freedom of the denoised data for downstream modelling",
+            "dwidenoise2 DWI.mif out.mif -trace_output trace.mif -dof_output dof.mif",
+            "Denoising confines the residual noise to a subspace of the volume space, so where a"
+            " statistical model with P parameters is subsequently fit to out.mif, the image volume count"
+            " overstates the number of independent observations and should not be used to set that"
+            " model's degrees of freedom. The two exported maps play distinct roles, and are not"
+            " interchangeable: divide a residual sum of squares by (trace.mif - P) to obtain an"
+            " unbiased noise level estimate, but use (dof.mif - P) as the degrees of freedom of the"
+            " reference distribution of any t- or F-statistic."
+            " Both maps are spatially varying, so a voxel-wise model fit should read the value at its"
+            " own voxel."
+            " With -filter truncate or -filter optthresh the two are identical and equal to the output"
+            " rank; they differ only under the default optimal shrinkage, where the eigenvector weights"
+            " are fractional. Note that both treat the PCA basis as given rather than as having been"
+            " estimated from the data, and so understate the true degrees of freedom; see the"
+            " description of -dof_output.");
 
   COPYRIGHT =
   "Copyright (c) 2026 Robert E. Smith <robert.smith@florey.edu.au>;"
@@ -346,8 +363,35 @@ void usage() {
   + Option("rank_input",
            "The estimated rank of the input data for each denoising patch")
     + Argument("image").type_image_out()
-  + Option("rank_output",
-           "An estimated rank for the output image data, accounting for multi-patch aggregation")
+  + Option("trace_output",
+           "The effective number of degrees of freedom retained per voxel in the output image data,"
+           " accounting for multi-patch aggregation:"
+           " the trace of the composite reconstruction filter (the sum of its eigenvector weights)."
+           " For a hard filter (-filter truncate or -filter optthresh) every weight is 0 or 1 and this"
+           " is exactly the rank of the output data;"
+           " under the default optimal shrinkage the weights are fractional and the trace is smaller"
+           " than the number of surviving components."
+           " This is the appropriate divisor for converting a residual sum of squares computed on the"
+           " denoised data into an unbiased noise level estimate (see also -dof_output)")
+    + Argument("image").type_image_out()
+  + Option("dof_output",
+           "The (approximate) degrees of freedom of the residual energy of a statistical model"
+           " subsequently fit to the output image data,"
+           " for use in place of the image volume count when setting that model's degrees of freedom."
+           " This is the chi-squared-matching (Satterthwaite) measure"
+           " (sum of squared filter weights, squared, divided by the sum of their fourth powers),"
+           " which is the quantity governing the reference distribution of a t- or F-statistic;"
+           " it is identical to -trace_output for a hard filter."
+           " Under optimal shrinkage the two differ, in a direction set by the shape of the weight"
+           " spectrum: many components of similar sub-unity weight drive it above the trace,"
+           " whereas a few near-unity weights accompanied by many small ones drive it below."
+           " Approximate in two respects:"
+           " the higher moments from which it is formed are averaged across the patches contributing"
+           " to each voxel, which neglects inter-patch cross terms"
+           " (it is exact for -aggregator exclusive only);"
+           " and, as for -trace_output, it treats the PCA basis as fixed rather than as having been"
+           " estimated from the same data, which understates the true degrees of freedom by a factor"
+           " of roughly 1 + (num_volumes - rank) / num_patch_voxels")
     + Argument("image").type_image_out()
   + Option("rankpermm_out",
            "Export the per-voxel signal-rank density (signal rank per mm of kernel radius) that was"
@@ -387,9 +431,9 @@ void usage() {
   + Option("sum_aggregation",
            "The sum of aggregation weights of those patches contributing to each output voxel")
     + Argument("image").type_image_out()
-  + Option("sum_optshrink",
-           "the sum of eigenvector weights computed for the denoising patch centred at each voxel "
-           "as a result of performing optimal shrinkage")
+  + Option("trace_patch",
+           "the sum of eigenvector weights computed for the denoising patch centred at each voxel; "
+           "the unaggregated, per-patch counterpart to -trace_output, on the sub-sampled grid")
     + Argument("image").type_image_out()
 
   + DWI::GradImportOptions();
@@ -449,11 +493,12 @@ private:
   Image<T> output_preconditioned;
 };
 
-// Divide the per-voxel output rank by its accumulated aggregation weight (0 where the weight is 0).
-struct RankOutputAggregationFunctor {
-  void operator()(Image<float> &rank_output, Image<float> &sum_aggregation) {
+// Divide an accumulated per-voxel filter-moment map by its accumulated aggregation weight
+//   (0 where the weight is 0).
+struct MomentAggregationFunctor {
+  void operator()(Image<float> &moment, Image<float> &sum_aggregation) {
     const float sum = sum_aggregation.value();
-    rank_output.value() = sum == 0.0F ? 0.0F : (rank_output.value() / sum);
+    moment.value() = sum == 0.0F ? 0.0F : (moment.value() / sum);
   }
 };
 
@@ -473,17 +518,37 @@ private:
   uint16_t max_rank;
 };
 
-// Add the preconditioner's demean null-rank back into the reported output rank (clamped).
-class RankOutputAddbackFunctor {
+// Add the preconditioner's demean null-rank back into a reported output filter moment (clamped).
+//   The regressed group-mean directions pass through reconstruction with unit weight, so they
+//   contribute the group count identically to every spectral moment.
+class MomentAddbackFunctor {
 public:
-  RankOutputAddbackFunctor(const float null_rank, const float max_rank)
-      : null_rank(null_rank), max_rank(max_rank) {}
-  void operator()(Image<float> &rank_output) {
-    rank_output.value() = std::min<float>(float(rank_output.value()) + null_rank, max_rank);
+  MomentAddbackFunctor(const float null_rank, const float max_rank) : null_rank(null_rank), max_rank(max_rank) {}
+  void operator()(Image<float> &moment) {
+    moment.value() = std::min<float>(float(moment.value()) + null_rank, max_rank);
   }
 
 private:
   float null_rank;
+  float max_rank;
+};
+
+// Combine the aggregated second and fourth spectral moments of the composite filter into the
+//   chi-squared-matching (Satterthwaite) degrees of freedom of the residual energy,
+//   nu = (sum_i w_i^2)^2 / (sum_i w_i^4). By Cauchy-Schwarz this cannot exceed the number of
+//   contributing components, hence never exceeds the volume count; it is clamped regardless against
+//   accumulated floating-point error. A vanishing fourth moment means no component survived at this
+//   voxel, for which the degrees of freedom are zero.
+class DofOutputFunctor {
+public:
+  explicit DofOutputFunctor(const float max_rank) : max_rank(max_rank) {}
+  void operator()(Image<float> &dof_output, Image<float> &trace2, Image<float> &trace4) {
+    const float t2 = trace2.value();
+    const float t4 = trace4.value();
+    dof_output.value() = t4 > 0.0F ? std::min<float>(Math::pow2(t2) / t4, max_rank) : 0.0F;
+  }
+
+private:
   float max_rank;
 };
 
@@ -776,9 +841,15 @@ void run(Header &dwi,
   if (aggregator != aggregator_type::EXCLUSIVE) {
     ThreadedLoop(final_exports.sum_aggregation)
         .run(AggregationRescaleFunctor<T>(output_preconditioned), final_exports.sum_aggregation);
-    if (final_exports.rank_output.valid()) {
+    if (final_exports.trace_output.valid()) {
       ThreadedLoop(final_exports.sum_aggregation)
-          .run(RankOutputAggregationFunctor(), final_exports.rank_output, final_exports.sum_aggregation);
+          .run(MomentAggregationFunctor(), final_exports.trace_output, final_exports.sum_aggregation);
+    }
+    if (final_exports.dof_output.valid()) {
+      ThreadedLoop(final_exports.sum_aggregation)
+          .run(MomentAggregationFunctor(), final_exports.trace2_accum, final_exports.sum_aggregation);
+      ThreadedLoop(final_exports.sum_aggregation)
+          .run(MomentAggregationFunctor(), final_exports.trace4_accum, final_exports.sum_aggregation);
     }
   }
 
@@ -798,11 +869,25 @@ void run(Header &dwi,
           .run(RankInputAddbackFunctor(uint16_t(preconditioner_null_rank), uint16_t(max_rank)),
                final_exports.rank_input);
     }
-    if (final_exports.rank_output.valid()) {
-      ThreadedLoop(final_exports.rank_output)
-          .run(RankOutputAddbackFunctor(float(preconditioner_null_rank), float(max_rank)),
-               final_exports.rank_output);
+    if (final_exports.trace_output.valid()) {
+      ThreadedLoop(final_exports.trace_output)
+          .run(MomentAddbackFunctor(float(preconditioner_null_rank), float(max_rank)), final_exports.trace_output);
     }
+    if (final_exports.dof_output.valid()) {
+      ThreadedLoop(final_exports.trace2_accum)
+          .run(MomentAddbackFunctor(float(preconditioner_null_rank), float(max_rank)), final_exports.trace2_accum);
+      ThreadedLoop(final_exports.trace4_accum)
+          .run(MomentAddbackFunctor(float(preconditioner_null_rank), float(max_rank)), final_exports.trace4_accum);
+    }
+  }
+  // Formed only once both moments are final (aggregated, and with the demeaning group count added
+  //   back): the ratio is non-linear, so it cannot be accumulated or corrected in place.
+  if (final_exports.dof_output.valid()) {
+    ThreadedLoop(final_exports.dof_output)
+        .run(DofOutputFunctor(float(max_rank)),
+             final_exports.dof_output,
+             final_exports.trace2_accum,
+             final_exports.trace4_accum);
   }
   if (vst_image.valid()) {
     if (final_exports.noise_out.valid()) {
@@ -1198,24 +1283,28 @@ void run() {
   opt = get_options("rank_input");
   if (!opt.empty())
     final_exports.set_rank_input(opt[0][0].as_text());
-  opt = get_options("rank_output");
+  opt = get_options("trace_output");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE && filter == filter_type::TRUNCATE) {
       WARN("When using -aggregator exclusive and -filter truncate, "
-           "the output of -rank_output will be identical to the output of -rank_input, "
+           "the output of -trace_output will be identical to the output of -rank_input, "
            "as there is no aggregation of multiple patches per output voxel "
-           "and no optimal shrinkage to reduce output rank relative to estimated input rank");
+           "and no optimal shrinkage to reduce the filter trace relative to estimated input rank");
     }
-    final_exports.set_rank_output(opt[0][0].as_text());
+    final_exports.set_trace_output(opt[0][0].as_text());
   }
-  opt = get_options("sum_optshrink");
+  opt = get_options("dof_output");
   if (!opt.empty()) {
-    if (filter == filter_type::TRUNCATE) {
-      WARN("Note that with a truncation filter, "
-           "output image from -sumweights option will be equivalent to rank_input");
+    if (filter != filter_type::OPTSHRINK) {
+      WARN("With a hard filter (-filter truncate or -filter optthresh), "
+           "all eigenvector weights are 0 or 1 and every spectral moment of the reconstruction filter "
+           "is equal; the output of -dof_output will therefore be identical to that of -trace_output");
     }
-    final_exports.set_sum_optshrink(opt[0][0].as_text());
+    final_exports.set_dof_output(opt[0][0].as_text());
   }
+  opt = get_options("trace_patch");
+  if (!opt.empty())
+    final_exports.set_trace_patch(opt[0][0].as_text());
   opt = get_options("max_dist");
   if (!opt.empty())
     final_exports.set_max_dist(opt[0][0].as_text());

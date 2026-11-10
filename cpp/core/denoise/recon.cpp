@@ -65,6 +65,23 @@ Recon<F>::Recon(const Image<F> &image,
       w(std::min(Estimate<F>::m, kernel->estimated_size())),
       Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
 
+// Note on the exactness of the exported spectral moments.
+//   Reconstruction applies to each voxel's own column a symmetric positive semi-definite contraction
+//   S_k = U_k W_k U_k^H in volume space, and aggregation forms the composite filter
+//   Sbar = (sum_k a_k S_k) / (sum_k a_k). Because tr() is linear, the aggregation-weighted mean of
+//   the per-patch first moments is exactly tr(Sbar), so trace_output is exact. The higher moments are
+//   not linear in the filter: tr(Sbar^2) involves inter-patch cross terms tr(S_j S_k) that do not
+//   factorise, so the weighted means accumulated into trace2_accum / trace4_accum neglect those terms
+//   and dof_output is correspondingly approximate (it is exact for -aggregator exclusive, where a
+//   single patch contributes per voxel). Computing them exactly would require materialising the
+//   m x m matrix Sbar per voxel, which is not affordable. The tractable exact route is Hutchinson
+//   probing: append K fixed random probe vectors (Rademacher or Gaussian, in R^m, shared globally
+//   across all voxels) as extra columns of X before the reconstruction multiply, and accumulate
+//   sum_k a_k S_k z_j per output voxel exactly as the data is accumulated, yielding Sbar z_j. Then
+//   tr(Sbar) = E[z^H Sbar z] and tr(Sbar^2) = E[||Sbar z||^2] are unbiased over the probes, with
+//   relative standard error ~sqrt(2 / (r K)) on the trace of a rank-r projector (~8% at r=10, K=32).
+//   Cost is K extra columns in an already-formed matmul plus K/m of the output image in storage; the
+//   probes also absorb the demeaning projector and the partition block structure automatically.
 template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
   if (!Estimate<F>::subsample->process({dwi.index(0), dwi.index(1), dwi.index(2)}))
@@ -94,7 +111,13 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 #endif
 
   // Generate weights vector
+  // sum_weights, sum_sqweights and sum_quadweights are the first, second and fourth spectral moments
+  //   of this patch's filter (sum_i w_i^q). The first is the patch's contribution to the effective
+  //   degrees of freedom retained; the latter two feed the chi-squared-matching degrees-of-freedom
+  //   measure. For a hard filter all three equal the output rank.
   double sum_weights = 0.0;
+  double sum_sqweights = 0.0;
+  double sum_quadweights = 0.0;
   double sum_variance = 0.0;
   ssize_t out_rank = 0;
   if (bool(Estimate<F>::threshold)) {
@@ -123,6 +146,8 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
         //   an invalid Result rather than caught by this assertion.
         assert(w[i] >= 0.0 && w[i] <= 1.0);
         sum_weights += w[i];
+        sum_sqweights += Math::pow2(w[i]);
+        sum_quadweights += Math::pow4(w[i]);
         sum_variance += w[i] * Estimate<F>::s[i];
       }
     } break;
@@ -149,13 +174,14 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
           w[i] = 0.0;
         }
       }
-      sum_weights = out_rank;
+      // Hard filter: every retained weight is exactly 1.0, so all spectral moments equal the rank.
+      sum_weights = sum_sqweights = sum_quadweights = double(out_rank);
     } break;
     case filter_type::TRUNCATE:
       out_rank = r - Estimate<F>::threshold.cutoff_p;
       w.head(Estimate<F>::threshold.cutoff_p).setZero();
       w.segment(Estimate<F>::threshold.cutoff_p, out_rank).setOnes();
-      sum_weights = double(out_rank);
+      sum_weights = sum_sqweights = sum_quadweights = double(out_rank);
       sum_variance += w.head(r).matrix().dot(Estimate<F>::s.head(r).matrix());
       break;
     default:
@@ -169,7 +195,7 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     //   regardless of whether performing overcomplete local PCA
     w.head(r).setOnes();
     out_rank = r;
-    sum_weights = r;
+    sum_weights = sum_sqweights = sum_quadweights = double(r);
     sum_variance = Estimate<F>::s.sum();
   }
   assert(w.head(r).allFinite());
@@ -231,9 +257,15 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.sum_aggregation);
       Estimate<F>::exports.sum_aggregation.value() = 1.0;
     }
-    if (Estimate<F>::exports.rank_output.valid()) {
-      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.rank_output);
-      Estimate<F>::exports.rank_output.value() = out_rank;
+    if (Estimate<F>::exports.trace_output.valid()) {
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.trace_output);
+      Estimate<F>::exports.trace_output.value() = sum_weights;
+    }
+    if (Estimate<F>::exports.dof_output.valid()) {
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.trace2_accum);
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.trace4_accum);
+      Estimate<F>::exports.trace2_accum.value() = sum_sqweights;
+      Estimate<F>::exports.trace4_accum.value() = sum_quadweights;
     }
   } break;
   default: { // All aggregators other than EXCLUSIVE
@@ -290,18 +322,25 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       }
       out.row(3) += weight * Xr.col(voxel_index);
       Estimate<F>::exports.sum_aggregation.value() += weight;
-      if (Estimate<F>::exports.rank_output.valid()) {
-        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
-        Estimate<F>::exports.rank_output.value() += weight * out_rank;
+      // First moment aggregates exactly; higher moments do not (see the note above operator()).
+      if (Estimate<F>::exports.trace_output.valid()) {
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.trace_output);
+        Estimate<F>::exports.trace_output.value() += weight * sum_weights;
+      }
+      if (Estimate<F>::exports.dof_output.valid()) {
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.trace2_accum);
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.trace4_accum);
+        Estimate<F>::exports.trace2_accum.value() += weight * sum_sqweights;
+        Estimate<F>::exports.trace4_accum.value() += weight * sum_quadweights;
       }
     }
   } break;
   }
 
   auto ss_index = Estimate<F>::subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
-  if (Estimate<F>::exports.sum_optshrink.valid()) {
-    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.sum_optshrink);
-    Estimate<F>::exports.sum_optshrink.value() = sum_weights;
+  if (Estimate<F>::exports.trace_patch.valid()) {
+    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.trace_patch);
+    Estimate<F>::exports.trace_patch.value() = sum_weights;
   }
   if (Estimate<F>::exports.variance_removed.valid()) {
     assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.variance_removed);
@@ -323,7 +362,11 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
   if (Xr.rows() != Estimate<F>::m || Xr.cols() < n_eff)
     Xr.resize(Estimate<F>::m, n_eff);
 
+  // Spectral moments of the composite filter for this patch. The per-partition filters occupy
+  //   disjoint blocks of volume rows, so the moments are additive across partitions.
   double sum_weights = 0.0;
+  double sum_sqweights = 0.0;
+  double sum_quadweights = 0.0;
   double sum_variance = 0.0;
   double total_s = 0.0;
   ssize_t out_rank = 0;
@@ -352,6 +395,8 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
       }
       out_rank += r_p;
       sum_weights += double(r_p);
+      sum_sqweights += double(r_p);
+      sum_quadweights += double(r_p);
       sum_variance += sp.head(r_p).sum();
       continue;
     }
@@ -360,6 +405,8 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
     if (w.size() < r_p)
       w.resize(r_p);
     double sw_p = 0.0;
+    double ssq_p = 0.0;
+    double squad_p = 0.0;
     double sv_p = 0.0;
     ssize_t orank_p = 0;
     switch (filter) {
@@ -376,6 +423,8 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
         }
         w[i] = lam > 0.0 ? (nu / y) : 0.0;
         sw_p += w[i];
+        ssq_p += Math::pow2(w[i]);
+        squad_p += Math::pow4(w[i]);
         sv_p += w[i] * sp[i];
       }
     } break;
@@ -401,14 +450,15 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
           w[i] = 0.0;
         }
       }
-      sw_p = double(orank_p);
+      // Hard filter: every retained weight is exactly 1.0, so all spectral moments equal the rank.
+      sw_p = ssq_p = squad_p = double(orank_p);
     } break;
     case filter_type::TRUNCATE: {
       const ssize_t cp = cutoff_part[p];
       orank_p = r_p - cp;
       w.head(cp).setZero();
       w.segment(cp, orank_p).setOnes();
-      sw_p = double(orank_p);
+      sw_p = ssq_p = squad_p = double(orank_p);
       sv_p = w.head(r_p).matrix().dot(sp.head(r_p).matrix());
     } break;
     default:
@@ -416,6 +466,8 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
     }
     out_rank += orank_p;
     sum_weights += sw_p;
+    sum_sqweights += ssq_p;
+    sum_quadweights += squad_p;
     sum_variance += sv_p;
 
     // Forward-project this partition's filtered spectrum (in the demeaned domain). The diagonal
@@ -490,9 +542,15 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
       assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.sum_aggregation);
       Estimate<F>::exports.sum_aggregation.value() = 1.0;
     }
-    if (Estimate<F>::exports.rank_output.valid()) {
-      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.rank_output);
-      Estimate<F>::exports.rank_output.value() = out_rank;
+    if (Estimate<F>::exports.trace_output.valid()) {
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.trace_output);
+      Estimate<F>::exports.trace_output.value() = sum_weights;
+    }
+    if (Estimate<F>::exports.dof_output.valid()) {
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.trace2_accum);
+      assign_pos_of(dwi, 0, 3).to(Estimate<F>::exports.trace4_accum);
+      Estimate<F>::exports.trace2_accum.value() = sum_sqweights;
+      Estimate<F>::exports.trace4_accum.value() = sum_quadweights;
     }
   } else {
     std::lock_guard<std::mutex> lock(Estimate<F>::mutex);
@@ -519,17 +577,24 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
       }
       out.row(3) += weight * Xr.col(voxel_index);
       Estimate<F>::exports.sum_aggregation.value() += weight;
-      if (Estimate<F>::exports.rank_output.valid()) {
-        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.rank_output);
-        Estimate<F>::exports.rank_output.value() += weight * out_rank;
+      // First moment aggregates exactly; higher moments do not (see the note above operator()).
+      if (Estimate<F>::exports.trace_output.valid()) {
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.trace_output);
+        Estimate<F>::exports.trace_output.value() += weight * sum_weights;
+      }
+      if (Estimate<F>::exports.dof_output.valid()) {
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.trace2_accum);
+        assign_pos_of(Estimate<F>::patch.voxels[voxel_index].index, 0, 3).to(Estimate<F>::exports.trace4_accum);
+        Estimate<F>::exports.trace2_accum.value() += weight * sum_sqweights;
+        Estimate<F>::exports.trace4_accum.value() += weight * sum_quadweights;
       }
     }
   }
 
   auto ss_index = Estimate<F>::subsample->in2ss({dwi.index(0), dwi.index(1), dwi.index(2)});
-  if (Estimate<F>::exports.sum_optshrink.valid()) {
-    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.sum_optshrink);
-    Estimate<F>::exports.sum_optshrink.value() = sum_weights;
+  if (Estimate<F>::exports.trace_patch.valid()) {
+    assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.trace_patch);
+    Estimate<F>::exports.trace_patch.value() = sum_weights;
   }
   if (Estimate<F>::exports.variance_removed.valid()) {
     assign_pos_of(ss_index, 0, 3).to(Estimate<F>::exports.variance_removed);
