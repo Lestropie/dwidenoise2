@@ -32,7 +32,7 @@ Recon<F>::Recon(const Image<F> &image,
                 aggregator_type aggregator,
                 const default_type aggregator_fwhm,
                 Exports &exports,
-                const ssize_t preconditioner_rank,
+                const ssize_t null_rank,
                 std::shared_ptr<const Partitioning> level_partitioning,
                 std::vector<ssize_t> volume_group,
                 const ssize_t kernel_num_partitions)
@@ -42,7 +42,7 @@ Recon<F>::Recon(const Image<F> &image,
                   decomposition,
                   estimator,
                   exports,
-                  preconditioner_rank,
+                  null_rank,
                   true,
                   level_partitioning,
                   std::move(volume_group),
@@ -57,11 +57,11 @@ Recon<F>::Recon(const Image<F> &image,
       //   so gaussian_multiplier = -4 ln2 / FWHM^2. The default aggregator_fwhm == 2 places the
       //   half-maximum exactly on the neighbouring patch centre and reproduces the width that was
       //   previously hard-coded (then written as "FWHM = 2 x cube root of spacings between kernels").
-      gaussian_multiplier(-4.0 * std::log(2.0) /                                                        //
-                          Math::pow2(aggregator_fwhm *                                                  //
-                                     std::cbrt(subsample->get_factors()[0] * image.spacing(0)           //
-                                               * subsample->get_factors()[1] * image.spacing(1)         //
-                                               * subsample->get_factors()[2] * image.spacing(2)))),     //
+      gaussian_multiplier(-4.0 * std::log(2.0) /                                                    //
+                          Math::pow2(aggregator_fwhm *                                              //
+                                     std::cbrt(subsample->get_factors()[0] * image.spacing(0)       //
+                                               * subsample->get_factors()[1] * image.spacing(1)     //
+                                               * subsample->get_factors()[2] * image.spacing(2)))), //
       w(std::min(Estimate<F>::m, kernel->estimated_size())),
       Xr(Estimate<F>::m, aggregator == aggregator_type::EXCLUSIVE ? 1 : kernel->estimated_size()) {}
 
@@ -79,9 +79,9 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
 
   const ssize_t n = Estimate<F>::patch.voxels.size();
   const ssize_t r = std::min(Estimate<F>::m, n);
-  const ssize_t rz = rank_zero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
-  const ssize_t rnz = rank_nonzero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
-  const ssize_t qnz = dimlong_nonzero(Estimate<F>::m, n, Estimate<F>::preconditioner_rank);
+  const ssize_t rz = rank_zero(Estimate<F>::m, n, Estimate<F>::null_rank);
+  const ssize_t rnz = rank_nonzero(Estimate<F>::m, n, Estimate<F>::null_rank);
+  const ssize_t qnz = dimlong_nonzero(Estimate<F>::m, n, Estimate<F>::null_rank);
   const double beta = double(rnz) / double(qnz);
 
   if (r > w.size())

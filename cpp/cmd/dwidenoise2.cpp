@@ -30,14 +30,17 @@
 #include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
+#include "denoise/estimator/imposed/constant.h"
+#include "denoise/estimator/imposed/import.h"
+#include "denoise/estimator/imposed/imposed.h"
 #include "denoise/estimator/imposed/unity.h"
 #include "denoise/exports.h"
 #include "denoise/iterative.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
-#include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/kernel/sphere_radius.h"
 #include "denoise/mask.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
@@ -693,13 +696,18 @@ void run(Header &dwi,
                                     rank_per_mm,
                                     Denoise::num_volumes(input),
                                     num_partitions,
-                                    final_prmse);
+                                    final_prmse,
+                                    preconditioner.partition_null_rank());
   kernel->set_mask(mask);
 
   // Unless the final schedule row is configured to (re)estimate the noise level, assume the
   //   variance-stabilising transform yields a noise level of 1.0 everywhere (dummy Unity
   //   estimator), carrying through the estimate refined by the preceding iterations.
-  if (!iterations.back().update_noise.value())
+  // An estimator that already imposes a noise level is left alone: substituting Unity would
+  //   discard it. This is what preserves Estimator::Import for -noise_in with -vst_method none,
+  //   where the data are never rescaled to unit noise level and Unity would be wrong.
+  if (!iterations.back().update_noise.value() &&
+      dynamic_cast<const Estimator::ImposedSigma *>(estimator.get()) == nullptr)
     estimator.reset(new Estimator::Unity());
 
   if (num_partitions > 1 && !estimator->supports_partitioning())
@@ -727,7 +735,7 @@ void run(Header &dwi,
                 aggregator,
                 aggregator_fwhm,
                 final_exports,
-                preconditioner.null_rank(),
+                preconditioner.partition_null_rank(),
                 partitioning,
                 volume_group,
                 num_partitions);
@@ -780,10 +788,10 @@ void run(Header &dwi,
   // Modify some optional outputs to better reflect utilisation of preconditioning. The
   //   group-mean components regressed out by demeaning are added back to the reported ranks here,
   //   on the final maps only (the per-iteration rank_input fed to the kernel sizing is kept
-  //   mean-free). demean_rank() gives the group count whether the demeaning was applied by the
+  //   mean-free). partition_null_rank() gives the group count whether the demeaning was applied by the
   //   preconditioner (no partitioning) or per partition within Estimate/Recon (partitioning), so
   //   the demean-induced rank contribution is identical in both regimes.
-  const ssize_t preconditioner_null_rank = preconditioner.demean_rank();
+  const ssize_t preconditioner_null_rank = preconditioner.partition_null_rank();
   if (preconditioner_null_rank > 0) {
     if (final_exports.rank_input.valid()) {
       ThreadedLoop(final_exports.rank_input)
@@ -880,16 +888,29 @@ void run() {
   //   noise level estimation, yielding sigma^2 ~ 1 on the stabilised data
   //   (equivalent to -estimator unity); see vst_plan.md section 6.2.
   Image<float> user_vst_image;
+  // A scalar -noise_in is imposed by Estimator::Constant rather than by materialising a
+  //   constant-valued image and interpolating it per patch.
+  std::optional<default_type> noise_in_scalar;
   auto opt = get_options("noise_in");
   if (!opt.empty()) {
-    if (vst_none)
-      throw Exception("Options -noise_in and -vst_method none are incompatible: "
-                      "a pre-estimated noise level is used to parameterise the variance-stabilising transform, "
-                      "which is disabled by -vst_method none");
-    if (demean == demean_type::NONE) {
+    noise_in_scalar = Denoise::imposed_scalar_value(opt[0][0]);
+    // The option's declared bound is inclusive and so admits zero, which is not a usable noise
+    //   level. import_vst_noise_map() rejects it, but that is bypassed on the path below where no
+    //   image is built, so the check has to be made here too.
+    if (noise_in_scalar.has_value() && noise_in_scalar.value() == 0.0)
+      throw Exception("Noise level provided via -noise_in must be greater than zero");
+    // Under -vst_method none the supplied level cannot be absorbed into a transform, and is
+    //   instead imposed directly on the data (see "impose_imported_noise" below). Whether that is
+    //   coherent depends on the schedule, which is not yet resolved here, so the decision is
+    //   deferred rather than refused outright.
+    if (!vst_none && demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
     }
-    user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
+    // With no transform to parameterise, a scalar needs no image at all; the estimator holds the
+    //   value directly. Every other combination still needs the map (to parameterise the VST, or
+    //   because the level varies over space).
+    if (!(vst_none && noise_in_scalar.has_value()))
+      user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
   }
 
   const aggregator_type aggregator = get_option_choice("aggregator", aggregator_type::GAUSSIAN);
@@ -918,11 +939,16 @@ void run() {
   if (bias_handling == bias_handling_t::PRESERVE) {
     const bool complex = dwi.datatype().is_complex();
     const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
-    if (complex || vst_none || vst_linear) {
-      const std::string reason =
-          vst_none    ? "-vst_method none applies no variance-stabilising transform"               //
-          : complex   ? "the input data are complex, for which the noise is Gaussian-distributed"   //
-                      : "-vst_method linear uses a linear (Gaussian) noise model";                  //
+    // For complex data there is no magnitude noise-floor bias in existence, so requesting a
+    //   policy for handling one is an incoherent combination and is refused. Selecting a linear
+    //   transform for magnitude data merely leaves the option inert, which remains a warning.
+    if (complex)
+      throw Exception("Option -preserve_noise_bias cannot be used with complex input data: "
+                      "the noise is Gaussian-distributed, so no magnitude noise-floor bias exists "
+                      "to either preserve or remove");
+    if (vst_none || vst_linear) {
+      const std::string reason = vst_none ? "-vst_method none applies no variance-stabilising transform" //
+                                          : "-vst_method linear uses a linear (Gaussian) noise model";   //
       WARN("Option -preserve_noise_bias has no effect: " + reason + ", "
            "so the noise model is linear and there is no estimated noise bias "
            "to either preserve or remove");
@@ -941,11 +967,15 @@ void run() {
   if (!get_options("debias_anchor").empty()) {
     const bool complex = dwi.datatype().is_complex();
     const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
-    if (bias_handling == bias_handling_t::PRESERVE || complex || vst_none || vst_linear) {
+    // As for -preserve_noise_bias: complex input admits no non-linear inverse at all, so choosing
+    //   its operating point is refused rather than warned about.
+    if (complex)
+      throw Exception("Option -debias_anchor cannot be used with complex input data: "
+                      "the noise is Gaussian-distributed, so the variance-stabilising transform is "
+                      "linear and there is no non-linear inverse for which to choose an operating point");
+    if (bias_handling == bias_handling_t::PRESERVE || vst_none || vst_linear) {
       const std::string reason = bias_handling == bias_handling_t::PRESERVE
                                      ? "-preserve_noise_bias retains the noise-floor bias rather than removing it" //
-                                 : complex  ? "the input data are complex, for which the noise is Gaussian-distributed "
-                                              "and there is no noise-floor bias"                                     //
                                  : vst_none ? "-vst_method none applies no variance-stabilising transform to invert" //
                                             : "-vst_method linear uses a linear (Gaussian) noise model";             //
       WARN("Option -debias_anchor has no effect: " + reason +
@@ -961,6 +991,22 @@ void run() {
   //   the coupling between iterations and likewise reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   const bool fixed_rank = !get_options("fixed_rank").empty();
+  // Catch an unattainable -fixed_rank here, before any multi-threaded processing begins, rather
+  //   than leaving every patch to discover it independently deep inside the PCA loop. A patch's
+  //   Casorati matrix has min(m', n) components, and m' (the volume count reaching the
+  //   decomposition) can only be reduced further by temporal sub-sampling and partitioning, so
+  //   the full volume count is a necessary upper bound and any request exceeding it is
+  //   guaranteed to be violated by every patch. Estimator::Rank enforces the exact per-patch
+  //   bound, which additionally accounts for the demeaning-induced zero components.
+  if (fixed_rank) {
+    const ssize_t r = ssize_t(get_options("fixed_rank")[0][0]);
+    const ssize_t m = ssize_t(Denoise::num_volumes(dwi));
+    if (r > m)
+      throw Exception("Option -fixed_rank " + str(r) + " exceeds the " + str(m) +
+                      " volumes in the input series; the signal rank of a patch cannot exceed its "
+                      "volume count. Specify -fixed_rank " +
+                      str(m) + " or fewer");
+  }
   // A signal-rank density supplied on the command line is what permits a schedule to open
   //   with a rank-derived kernel (the bundled "apriori" schedule does exactly that).
   const bool rank_density_supplied = !get_options("rankpermm_in").empty();
@@ -979,14 +1025,22 @@ void run() {
     // -fixed_rank selects the imposed (constant) fixed-rank estimator. A fixed rank does not yield
     //   a robust data-driven noise level, so its estimate is not used to refine the
     //   variance-stabilising transform: this is a single denoising pass, not an iterative schedule.
-    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_fixed"
+    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_imposed"
     //   kernel, which reads r from -fixed_rank).
     iterations = Schedule::load_bundled("dwidenoise2", "fixedrank", rank_density_supplied);
   } else if (vst_none) {
-    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-         "refining the noise level estimate would have no effect on subsequent iterations "
-         "and is therefore wasted computation; performing a single pass instead");
     const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
+    // The bundled "default" schedule is deliberately NOT loaded here. Because the user did not
+    //   choose the schedule that is used instead -- and because it is not any of the bundled
+    //   files, so cannot be inspected -- state its content explicitly rather than merely
+    //   announcing that a single pass is performed.
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively refining "
+         "the noise level estimate cannot influence subsequent iterations and would be wasted "
+         "computation. The bundled \"default\" schedule is therefore NOT used; a single pass is "
+         "performed instead, equivalent to the one-row schedule \"spatial_subsample " +
+         str(f) +
+         "  temporal_subsample 1.0  update_noise true  smooth_noise false  kernel aspect=2.0\". "
+         "Use -schedule to choose a different (single-row) schedule explicitly");
     Iterative::Iteration config;
     config.spatial_subsample_ratios = {f, f, f};
     // Single pass (no prior rank map): aspect ratio n ~ 2m.
@@ -1028,9 +1082,9 @@ void run() {
     throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
                     "volumes (temporal_subsample = 1); sub-sample only the noise-estimation iterations");
   // -fixed_rank is a single denoising pass with the imposed fixed-rank estimator, sized to the
-  //   n = m + r ("rank_fixed") kernel. Its noise level estimate is not robust enough to drive the
+  //   n = m + r ("rank_imposed") kernel. Its noise level estimate is not robust enough to drive the
   //   variance-stabilising transform, so multi-row (iterative) schedules are disallowed; and every
-  //   row must use the "rank_fixed" kernel (the default bundled "fixedrank" schedule satisfies
+  //   row must use the "rank_imposed" kernel (the default bundled "fixedrank" schedule satisfies
   //   both when -fixed_rank is given without -schedule).
   if (fixed_rank) {
     if (iterations.size() > 1)
@@ -1039,15 +1093,15 @@ void run() {
                       "be combined with a multi-row schedule; use the bundled single-row \"fixedrank\" "
                       "schedule (the default when -fixed_rank is given without -schedule)");
     for (const auto &it : iterations)
-      if (it.kernel.type != Kernel::kernel_spec_type::RANK_FIXED)
-        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_fixed\" (n = m + r) "
+      if (it.kernel.type != Kernel::kernel_spec_type::RANK_IMPOSED)
+        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_imposed\" (n = m + r) "
                         "kernel; use the bundled \"fixedrank\" schedule (the default when -fixed_rank "
                         "is given without -schedule)");
   } else {
-    // The "rank_fixed" kernel (n = m + r) has no defined r without an imposed fixed rank.
+    // The "rank_imposed" kernel (n = m + r) has no defined r without an imposed fixed rank.
     for (const auto &it : iterations)
-      if (it.kernel.type == Kernel::kernel_spec_type::RANK_FIXED)
-        throw Exception("A schedule uses the \"rank_fixed\" kernel (n = m + r) but no fixed signal rank "
+      if (it.kernel.type == Kernel::kernel_spec_type::RANK_IMPOSED)
+        throw Exception("A schedule uses the \"rank_imposed\" kernel (n = m + r) but no fixed signal rank "
                         "was provided; supply -fixed_rank <value> (or use a different kernel)");
   }
   // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.
@@ -1088,7 +1142,45 @@ void run() {
                     "patch are reconstructed); use unity spatial sub-sampling on the final iteration "
                     "(e.g. the bundled \"legacy\" schedule)");
 
-  auto estimator = Estimator::make_estimator(user_vst_image, true);
+  // Applying a pre-estimated noise level without re-estimating it.
+  //   With a variance-stabilising transform active, -noise_in parameterises that transform: the
+  //   stabilised data then have unit noise level and the dummy Unity estimator (substituted for
+  //   the final row when update_noise is false) carries it through correctly.
+  //   Under -vst_method none there is no such transform, so the data reach PCA in their native
+  //   scale and Unity's sigma == 1 would be wrong. The supplied level must instead be imposed on
+  //   the data directly, which is what Estimator::Import does.
+  bool impose_imported_noise = false;
+  if (!get_options("noise_in").empty() && vst_none) {
+    if (iterations.size() > 1)
+      throw Exception("Options -noise_in and -vst_method none cannot be combined with a -schedule of "
+                      "more than one row: without a variance-stabilising transform there is no "
+                      "coupling between iterations for the additional rows to refine, so the "
+                      "supplied noise level can only be imposed by a single pass; "
+                      "use a single-row schedule");
+    if (iterations.back().update_noise.value())
+      throw Exception("Options -noise_in and -vst_method none require a schedule row that does not "
+                      "re-estimate the noise level (update_noise false): with no "
+                      "variance-stabilising transform for the supplied level to parameterise, a row "
+                      "that re-estimates would discard it entirely");
+    if (!get_options("estimator").empty())
+      throw Exception("Options -noise_in and -vst_method none impose the supplied noise level "
+                      "directly on the data, which is incompatible with the data-driven estimator "
+                      "requested by -estimator; omit -estimator");
+    impose_imported_noise = true;
+    CONSOLE("Imposing the noise level supplied via -noise_in directly on the input data "
+            "(no variance-stabilising transform is active, and the schedule does not re-estimate)");
+  }
+  std::shared_ptr<Estimator::Base> estimator;
+  if (impose_imported_noise) {
+    // A scalar level is held by the estimator itself; only a spatially-varying level needs a map,
+    //   and the per-patch interpolation that comes with it.
+    if (noise_in_scalar.has_value())
+      estimator = std::make_shared<Estimator::Constant>(noise_in_scalar.value());
+    else
+      estimator = std::make_shared<Estimator::Import>(user_vst_image);
+  } else {
+    estimator = Estimator::make_estimator(user_vst_image, true);
+  }
 
   const filter_type filter = get_option_choice(
       "filter", get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE);

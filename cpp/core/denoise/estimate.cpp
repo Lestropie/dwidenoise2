@@ -34,7 +34,7 @@ Estimate<F>::Estimate(const Image<F> &image,
                       decomp_type decomp,
                       std::shared_ptr<Estimator::Base> estimator,
                       Exports &exports,
-                      const ssize_t preconditioner_rank,
+                      const ssize_t null_rank,
                       const bool enable_recon,
                       std::shared_ptr<const Partitioning> level_partitioning,
                       std::vector<ssize_t> volume_group,
@@ -44,7 +44,7 @@ Estimate<F>::Estimate(const Image<F> &image,
       kernel(kernel),
       decomp(decomp),
       estimator(estimator),
-      preconditioner_rank(preconditioner_rank),
+      null_rank(null_rank),
       enable_recon(enable_recon),
       X(m, kernel->estimated_size()),
       SVD(decomp == decomp_type::BDCSVD ? m : 0,
@@ -75,7 +75,7 @@ Estimate<F>::Estimate(const Estimate<F> &that)
       kernel(that.kernel),
       decomp(that.decomp),
       estimator(that.estimator),
-      preconditioner_rank(that.preconditioner_rank),
+      null_rank(that.null_rank),
       enable_recon(that.enable_recon),
       X(m, kernel->estimated_size()),
       SVD(decomp == decomp_type::BDCSVD ? m : 0,
@@ -221,7 +221,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
 
     if (successful_decomposition) {
       // Threshold determination, possibly via Marchenko-Pastur
-      threshold = (*estimator)(s.head(r), m, n, preconditioner_rank, patch.centre_realspace);
+      threshold = (*estimator)(s.head(r), m, n, null_rank, patch.centre_realspace);
     } else {
       s.head(r).fill(std::numeric_limits<double>::signaling_NaN());
       threshold = Estimator::Result();
@@ -250,7 +250,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
         total += rank_nonzero(part_m[p], part_n[p], part_rp[p]);
       exports.rank_pcanonzero.value() = total;
     } else {
-      exports.rank_pcanonzero.value() = rank_nonzero(m, n, preconditioner_rank);
+      exports.rank_pcanonzero.value() = rank_nonzero(m, n, null_rank);
     }
   }
   if (exports.rank_input.valid()) {

@@ -25,31 +25,36 @@
 
 namespace MR::Denoise::Kernel {
 
-class SphereRank : public SphereBase {
+class SphereRankAdaptive : public SphereBase {
 
-// TODO Get rank image estimate from prior iteration into here
-// From experimentation, rank approximately scales *linearly with respect to radius*
-//   (with an intercept of zero);
-//   rank image from early iterations will require rescaling
-//   if the kernel size changes between iterations
+  // TODO Get rank image estimate from prior iteration into here
+  // From experimentation, rank approximately scales *linearly with respect to radius*
+  //   (with an intercept of zero);
+  //   rank image from early iterations will require rescaling
+  //   if the kernel size changes between iterations
 
 public:
   // effective_num_volumes is the per-partition volume count (m'/P) from which the kernel is
   //   sized; with no partitioning it equals the full volume count Denoise::num_volumes(voxel_grid).
   //   Sizing to the smallest partition leaves that partition's noise block ~square.
-  SphereRank(const Header &voxel_grid,
-             const std::array<ssize_t, 3> &subsample_factors,
-             const Image<float> &rank_per_mm,
-             const ssize_t effective_num_volumes)
-      : SphereBase(voxel_grid,
-                   subsample_factors,
-                   SphereBase::compute_max_radius(voxel_grid, 2 * effective_num_volumes)),
-        rank_per_mm (rank_per_mm),
-        num_volumes (effective_num_volumes) {}
+  // num_nulls is the number of volume-space directions that preconditioning's group-mean
+  //   demeaning forces to zero within a partition (Preconditioner::partition_null_rank()). They carry
+  //   neither signal nor noise, so the square-noise-block target is formed from
+  //   (effective_num_volumes - num_nulls); see make_kernel().
+  SphereRankAdaptive(const Header &voxel_grid,
+                     const std::array<ssize_t, 3> &subsample_factors,
+                     const Image<float> &rank_per_mm,
+                     const ssize_t effective_num_volumes,
+                     const ssize_t num_nulls = 0)
+      : SphereBase(
+            voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, 2 * effective_num_volumes)),
+        rank_per_mm(rank_per_mm),
+        num_volumes(effective_num_volumes),
+        num_nondegenerate(std::max<ssize_t>(1, effective_num_volumes - num_nulls)) {}
 
-  SphereRank(const SphereRank &) = default;
+  SphereRankAdaptive(const SphereRankAdaptive &) = default;
 
-  ~SphereRank() override = default;
+  ~SphereRankAdaptive() override = default;
 
   Data operator()(const Voxel::index_type &pos) const override;
 
@@ -63,7 +68,9 @@ private:
   //   encapsulate this image information as a rank per millimetre kernel radius
   Image<float> rank_per_mm;
   ssize_t num_volumes;
-
+  // Volume-space dimensions carrying data once the regressed group means are removed; the
+  //   quantity the square noise block is targeted against.
+  ssize_t num_nondegenerate;
 };
 
 } // namespace MR::Denoise::Kernel

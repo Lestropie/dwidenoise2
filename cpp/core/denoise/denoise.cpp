@@ -258,6 +258,21 @@ Image<float> condition_noise_map(Image<float> &in,
   return out;
 }
 
+std::optional<default_type> imposed_scalar_value(const App::ParsedArgument &arg) {
+  bool is_scalar = false;
+  try {
+    to<default_type>(arg.as_text());
+    is_scalar = true;
+  } catch (Exception &) {
+  }
+  if (!is_scalar)
+    return std::nullopt;
+  // Deliberately outside the try: as_float() enforces the option's declared range, and that
+  //   "out of bounds" exception must reach the user rather than be caught and downgraded into an
+  //   attempt to open the value as an image.
+  return arg.as_float();
+}
+
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial) {
   // Detect whether a scalar value or an image path was provided,
   //   matching the dispatch used by Estimator::make_imposed().
@@ -267,18 +282,10 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
   //   parser's own "out of bounds (valid range: ...)" message. Doing the range check here
   //   instead would either duplicate the declared bound or, if omitted, send a negative number
   //   to the image loader to be misreported as an unreadable filename.
-  bool is_scalar = false;
-  try {
-    to<default_type>(arg.as_text());
-    is_scalar = true;
-  } catch (Exception &) {
-  }
+  const std::optional<default_type> scalar = imposed_scalar_value(arg);
   Image<float> in;
-  if (is_scalar) {
-    // Deliberately outside the try above: as_float() enforces the option's declared range, and
-    //   that "out of bounds" exception must reach the user rather than be caught and downgraded
-    //   into an attempt to open the value as an image.
-    const default_type scalar_value = arg.as_float();
+  if (scalar.has_value()) {
+    const default_type scalar_value = scalar.value();
     // The declared bound is inclusive, so it admits zero; a zero noise level is not a usable
     //   scale for the variance-stabilising transform and must still be excluded explicitly.
     if (scalar_value == 0.0)
@@ -311,18 +318,12 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial) {
   // Detect whether a scalar value or an image path was provided, matching import_vst_noise_map()
   //   (including its reason for deferring the range check to the declared bound).
-  bool is_scalar = false;
-  try {
-    to<default_type>(arg.as_text());
-    is_scalar = true;
-  } catch (Exception &) {
-  }
+  const std::optional<default_type> scalar = imposed_scalar_value(arg);
   Image<float> in;
-  if (is_scalar) {
-    // Outside the try: an out-of-range value must be reported as such, not reinterpreted as a
-    //   filename. Unlike -noise_in, zero is a legitimate rank density, so the declared
-    //   (inclusive) lower bound of zero expresses this option's domain exactly.
-    const default_type scalar_value = arg.as_float();
+  if (scalar.has_value()) {
+    // Unlike -noise_in, zero is a legitimate rank density, so the declared (inclusive) lower
+    //   bound of zero expresses this option's domain exactly and needs no further check.
+    const default_type scalar_value = scalar.value();
     Header H(H_spatial);
     H.ndim() = 3;
     H.reset_intensity_scaling();

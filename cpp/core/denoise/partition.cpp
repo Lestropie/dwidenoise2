@@ -22,6 +22,9 @@
 #include <numeric>
 #include <random>
 
+#include "exception.h"
+#include "mrtrix.h"
+
 namespace MR::Denoise {
 
 namespace {
@@ -181,22 +184,27 @@ Partitioning partition_volumes(const ssize_t m,
 
   // A partition holding no volumes has no Casorati matrix to decompose, and an empty block reaching
   //   Eigen aborts. The per-stratum spread above uses at most min(P, s/2) partitions per stratum, so
-  //   with several small strata (or with P close to m) partitions can be left unused however the
-  //   caller clamps P. Compact the plan so that the returned Partitioning never contains one.
+  //   with several small strata the demeaning grouping can leave partitions unused even when P is
+  //   within the m/2 bound that resolve_num_partitions() enforces.
+  // Terminate rather than compact: silently proceeding with fewer partitions than the schedule
+  //   asked for would perform a different decomposition from the one requested while reporting
+  //   success. The outcome is a deterministic function of the volume count, the demeaning group
+  //   sizes and P (the shuffle permutes which volumes land in a partition, not how many), so this
+  //   fires identically for every patch rather than intermittently.
   ssize_t populated = 0;
-  std::vector<ssize_t> remap(P, -1);
   for (ssize_t p = 0; p != P; ++p)
     if (load[p] > 0)
-      remap[p] = populated++;
+      ++populated;
   if (populated != P) {
     assert(populated >= 1);
-    for (ssize_t &p : v2p)
-      p = remap[p];
-    std::vector<ssize_t> compacted_groups(populated, 0);
-    for (ssize_t p = 0; p != P; ++p)
-      if (remap[p] >= 0)
-        compacted_groups[remap[p]] = groups_present[p];
-    return Partitioning(std::move(v2p), populated, std::move(compacted_groups));
+    throw Exception("Cannot split " + str(m) + " volumes into " + str(P) + " partitions: the demeaning grouping (" +
+                    str(strata.size()) +
+                    " group(s), which must each be spread across partitions holding at least two "
+                    "volumes) leaves only " +
+                    str(populated) +
+                    " partition(s) populated. "
+                    "Reduce the requested partition count to " +
+                    str(populated) + " or fewer, or use a coarser -demean grouping");
   }
 
   return Partitioning(std::move(v2p), P, std::move(groups_present));

@@ -56,16 +56,16 @@ extern const char *const cuboid_size_description;
 //                    automatic aspect-ratio sizing, growing the near-isotropic patch until it
 //                    holds at least param * m voxels (param defaults to 2.0). Replaces the former
 //                    -shape cuboid / -extent options.
-//   - RANK_FIXED   : spherical kernel of exactly n = m + r voxels, where r is the fixed signal
-//                    rank imposed via dwidenoise2 -fixed_rank (the "rank_fixed" schedule keyword).
+//   - RANK_IMPOSED   : spherical kernel of exactly n = m + r voxels, where r is the fixed signal
+//                    rank imposed via dwidenoise2 -fixed_rank (the "rank_imposed" schedule keyword).
 //                    r is read from the -fixed_rank option at kernel construction, so this type is
 //                    meaningful only in conjunction with -fixed_rank.
-enum class kernel_spec_type { ASPECT_RATIO, RMSE, RANK, RADIUS, VOXELS, CUBOID, RANK_FIXED };
+enum class kernel_spec_type { ASPECT_RATIO, RMSE, RANK, RADIUS, VOXELS, CUBOID, RANK_IMPOSED };
 struct KernelSpec {
   kernel_spec_type type{kernel_spec_type::ASPECT_RATIO};
   // Scalar free parameter: aspect ratio (ASPECT_RATIO), RMSE tolerance (RMSE), radius in mm
   //   (RADIUS), absolute voxel count (VOXELS), or the auto-size aspect ratio of an
-  //   extent-less CUBOID. Unused by RANK / RANK_FIXED and by a CUBOID with an explicit extent.
+  //   extent-less CUBOID. Unused by RANK / RANK_IMPOSED and by a CUBOID with an explicit extent.
   default_type param{2.0};
   // Explicit cuboid extent (per spatial axis) for CUBOID; {0,0,0} requests automatic aspect-ratio
   //   sizing (using param as the aspect ratio).
@@ -91,13 +91,24 @@ using predicted_rmse_func = std::function<double(ssize_t, ssize_t, double)>;
 //   rank_per_mm_image is required by the RMSE and RANK kernels (a rank density from a prior
 //   iteration); predicted_rmse is required by the RMSE kernel (built from the active estimator).
 //   Both may be empty/invalid for the rank-naive kernels (ASPECT_RATIO / RADIUS / VOXELS / CUBOID /
-//   RANK_FIXED).
+//   RANK_IMPOSED).
+// num_null_components is the number of singular values that group-mean demeaning forces to zero
+//   in every partition: Preconditioner::partition_null_rank() (0 when -demean none). It is a
+//   property of the matrix being decomposed, so it holds regardless of whether the demeaning was
+//   applied by the preconditioner or per partition inside Estimate/Recon
+//   (Preconditioner::demean_site()). The kernels that target a square noise block subtract it
+//   from the volume count, because those directions carry neither signal nor noise. Under
+//   partitioning each
+//   partition regresses the same group count, so this is simultaneously the common and the
+//   maximal per-partition value -- and the maximum is what the final reconstruction pass needs,
+//   since the kernel must be adequate for every partition individually rather than in aggregate.
 std::shared_ptr<Base> make_kernel(const Header &H,                                 //
                                   const std::array<ssize_t, 3> &subsample_factors, //
                                   const KernelSpec &kernel_spec,                   //
                                   const Image<float> &rank_per_mm_image,           //
                                   const ssize_t full_num_volumes,                  //
                                   const ssize_t num_partitions = 1,                //
-                                  const predicted_rmse_func &predicted_rmse = {}); //
+                                  const predicted_rmse_func &predicted_rmse = {},  //
+                                  const ssize_t num_null_components = 0);          //
 
 } // namespace MR::Denoise::Kernel

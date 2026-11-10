@@ -140,7 +140,7 @@ public:
   //   While active, null_rank() reports 0 (no globally-regressed mean) and the forward/inverse
   //   transforms skip the demean step. The GROUP_MEAN inverse anchor is unavailable in this mode.
   void set_partitioning_active(const bool active) { partitioning_active = active; }
-  bool demean_active() const { return vst_mean_image.valid() && !partitioning_active; }
+  bool demean_active() const { return demean_site() == demean_site_t::PRECONDITIONER; }
 
   // Declare whether a subsequent adaptive-phase-correction pass will refine the phase estimated by
   //   the next update_parameters() call. Every *cold* solve begins on a 2x-downsampled grid (its
@@ -179,14 +179,19 @@ public:
   //   temporal subset is active, the subset header (size(3) == m').
   const Header &header() const { return temporal_subset.empty() ? H_out : H_out_subset; }
 
-  // Rank removed by group-mean demeaning: the number of demeaning groups (1 for -demean all;
-  //   shell/volume-group count otherwise; 0 for -demean none). This is reported irrespective of
-  //   whether the demeaning is applied here (no partitioning) or per partition within
-  //   Estimate/Recon (partitioning) — the degrees of freedom regressed out are the same group
-  //   count either way (per the partitioned-model expectation that the demean-induced rank change
-  //   matches the non-partitioned case). Used to add the regressed-mean components back to the
-  //   final exported rank maps.
-  ssize_t demean_rank() const {
+  // The null rank of each Casorati matrix that is decomposed: the number of demeaning groups
+  //   (1 for -demean all; shell/volume-group count otherwise; 0 for -demean none), each of which
+  //   contributes one regressed-out, identically-zero component.
+  // This is a property of the matrix, not of whoever produced it, so it is reported irrespective
+  //   of where the demeaning is applied (see demean_site()); the degrees of freedom regressed are
+  //   the same group count either way, per the partitioned-model expectation that the
+  //   demean-induced rank change matches the non-partitioned case. It is named for the partition
+  //   because the partition is the unit that is decomposed -- and it remains correct at
+  //   num_partitions == 1, where the single partition is the whole series.
+  // Consumers: the square-noise-block kernel sizing (make_kernel), the rank arithmetic
+  //   rank_zero()/rank_nonzero()/dimlong_nonzero(), and the addback of the regressed-mean
+  //   components to the final exported rank maps.
+  ssize_t partition_null_rank() const {
     if (!vst_mean_image.valid())
       return 0;
     if (vst_mean_image.ndim() == 3)
@@ -194,12 +199,13 @@ public:
     return vst_mean_image.size(3);
   }
 
-  ssize_t null_rank() const {
-    // The rank that *this* (preconditioner-side) demeaning regresses out of the Casorati matrix.
-    //   When partitioning is active the preconditioner performs no demeaning (it is done per
-    //   partition inside Estimate/Recon, which account for it via their own per-partition rank),
-    //   so it is 0; otherwise it equals demean_rank().
-    return partitioning_active ? 0 : demean_rank();
+  // Where the group-mean demeaning is applied (see demean_site_t). Callers that need to know
+  //   whether *they* are responsible for the demeaning, or for accounting for the rank it
+  //   regresses, ask this rather than inferring it from the partition count.
+  demean_site_t demean_site() const {
+    if (!vst_mean_image.valid())
+      return demean_site_t::NONE;
+    return partitioning_active ? demean_site_t::ESTIMATOR : demean_site_t::PRECONDITIONER;
   }
 
   bool noop() const {

@@ -24,11 +24,11 @@
 # drive the variance-stabilising transform, so this is a single denoising pass: there is no
 # iterative multi-resolution refinement (that would only propagate an unreliable estimate).
 #
-# The single row uses the "rank_fixed" kernel, which sizes the spherical patch to exactly
+# The single row uses the "rank_imposed" kernel, which sizes the spherical patch to exactly
 # n = m + r voxels (m = number of volumes, r = the imposed fixed rank read from -fixed_rank),
 # so that the residual noise block of the Casorati matrix is approximately square. It performs
 # unity spatial sub-sampling so that every output voxel is reconstructed regardless of the
 # selected aggregator.
 #
 spatial_subsample   kernel       update_noise   smooth_noise
-1                   rank_fixed   true           false
+1                   rank_imposed   true           false

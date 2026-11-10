@@ -20,6 +20,16 @@
 # that was originally hard-coded into the source code.
 # It additionally provides a starting point for authoring bespoke schedules.
 #
+# Caveat: this schedule is NOT what dwidenoise2 selects automatically in every case.
+# It is used only when neither -vst_method none nor -fixed_rank is specified.
+#  - With -vst_method none there is no variance-stabilising transform, so nothing
+#    couples one iteration to the next and the per-iteration refinement below would
+#    be wasted computation; a single pass is performed instead (equivalent to a
+#    one-row schedule using an "aspect=2.0" kernel), and the command reports this.
+#    Passing this file explicitly via "-schedule default" alongside -vst_method none
+#    is therefore an error rather than a no-op: it is a multi-row schedule.
+#  - With -fixed_rank the bundled "fixedrank" schedule is used.
+#
 # Format:
 #  - One row per iteration of the multi-resolution noise level estimation.
 #  - The first non-comment line names the columns; columns may appear in any
@@ -43,7 +53,7 @@
 #                          aspect ratio. Default: 1 (no partitioning). Mutually exclusive
 #                          with max_partition_size. The partition count is capped at half the
 #                          number of volumes available to the iteration (each partition must hold
-#                          at least two volumes); a larger request is reduced, with a warning.
+#                          at least two volumes); a larger request is an error, not silently reduced.
 #  - max_partition_size  : an alternative to "partitions": the maximum number of volumes
 #                          per partition, from which the partition count is derived as
 #                          ceil(num_volumes / max_partition_size) (after any temporal
@@ -72,7 +82,7 @@
 #                              n x n x n), "cuboid=<ratio>x" (auto-size to >= ratio*m voxels, e.g.
 #                              "cuboid=2x"), or bare "cuboid" (= "cuboid=2x").
 #                          The sliding-window kernel (shape and size) is configured entirely here;
-#                          there are no command-line kernel options. ("rank_fixed", an n=m+r kernel,
+#                          there are no command-line kernel options. ("rank_imposed", an n=m+r kernel,
 #                          also exists but is specific to dwidenoise2 -fixed_rank.)
 #                          Default (column omitted): "aspect=2.0". (Replaces the former
 #                          kernel_multiplier column; a larger patch is now requested directly via

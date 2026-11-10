@@ -54,7 +54,7 @@ public:
            decomp_type decomp,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports,
-           const ssize_t preconditioner_rank = 0,
+           const ssize_t null_rank = 0,
            const bool enable_recon = false,
            std::shared_ptr<const Partitioning> level_partitioning = nullptr,
            std::vector<ssize_t> volume_group = {},
@@ -74,7 +74,7 @@ protected:
   std::shared_ptr<Kernel::Base> kernel;
   decomp_type decomp;
   std::shared_ptr<Estimator::Base> estimator;
-  ssize_t preconditioner_rank;
+  ssize_t null_rank;
   bool enable_recon;
 
   // Reusable memory
