@@ -18,6 +18,7 @@
 #include "denoise/precondition/precondition.h"
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
 #include <string>
 #include <vector>
@@ -296,6 +297,16 @@ demean_type select_demean(const Header &H, const Eigen::MatrixXd &grad) {
   if (user_selection == demean_type::VOLUME_GROUPS && !volume_groups_available)
     throw Exception("Cannot demean by volume groups as image does not possess volume groups");
   return user_selection;
+}
+
+// Partitioning is what moves the demeaning: each partition's own mean subtraction must be
+//   orthogonal to that partition's decomposition, which a single subtraction over the whole volume
+//   series does not achieve. Without partitioning the preconditioner does it once for the series.
+demean_site_t resolve_demean_site(const demean_type demean, const ssize_t num_partitions) {
+  assert(num_partitions >= 1);
+  if (demean == demean_type::NONE)
+    return demean_site_t::NONE;
+  return num_partitions > 1 ? demean_site_t::ESTIMATOR : demean_site_t::PRECONDITIONER;
 }
 
 } // namespace MR::Denoise::Precondition

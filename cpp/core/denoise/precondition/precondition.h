@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "app.h"
+#include "denoise/denoise.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "header.h"
 
@@ -46,22 +47,6 @@ extern const char *const demodulation_description;
 enum class demodulation_t { NONE, LINEAR, HANN, APC };
 
 enum class demean_type { NONE, VOLUME_GROUPS, SHELLS, ALL };
-
-// Which component actually subtracts the group means, and hence which one is responsible for
-//   accounting for the rank they regress out.
-// The rank removed is the same in either case -- Preconditioner::partition_null_rank() -- because
-//   the same group count is regressed from each Casorati matrix that is decomposed. What differs
-//   is where it happens, and that must be stated rather than inferred from the partition count:
-//   reading a zero from a "how much rank did the preconditioner remove" query is indistinguishable
-//   from "no demeaning was performed at all" unless the caller already knows the partitioning
-//   state.
-// - NONE          : -demean none; no group means are regressed anywhere.
-// - PRECONDITIONER: subtracted once over the whole volume series by Preconditioner::operator(),
-//                     so the data reaching PCA are already mean-free.
-// - ESTIMATOR     : subtracted per partition inside Estimate/Recon, keeping each partition's mean
-//                     subtraction orthogonal to that partition's own decomposition. Used whenever
-//                     volume partitioning is active.
-enum class demean_site_t { NONE, PRECONDITIONER, ESTIMATOR };
 
 // Handling of the noise-distribution bias when reversing preconditioning
 //   (the inverse variance-stabilising transform); see vst_plan.md section 3.3.
@@ -117,5 +102,13 @@ Demodulation select_demodulation(const Header &);
 //   -fslgrad import needs, and a table supplied on the command line has already been validated by
 //   the caller, so a failure to obtain one here would hide a user error.
 demean_type select_demean(const Header &, const Eigen::MatrixXd &grad);
+
+// Resolve which component is to subtract the group means for one iteration (see demean_site_t),
+//   from the demeaning mode and that iteration's partition count. This is the sole place the rule is
+//   applied: the resulting value is then handed to every component whose behaviour depends on it
+//   (Preconditioner::set_demean_site(), Estimate / Recon, Iterative::estimate), so that all of them
+//   act on one decision rather than each re-deriving it from a proxy such as the partition count or
+//   the presence of the demeaning-group labels.
+demean_site_t resolve_demean_site(const demean_type demean, const ssize_t num_partitions);
 
 } // namespace MR::Denoise::Precondition

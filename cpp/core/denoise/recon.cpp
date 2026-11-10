@@ -35,6 +35,7 @@ Recon<F>::Recon(const Image<F> &image,
                 const ssize_t null_rank,
                 std::shared_ptr<const Partitioning> level_partitioning,
                 std::vector<ssize_t> volume_group,
+                const demean_site_t demean_site,
                 const ssize_t kernel_num_partitions)
     : Estimate<F>(image,
                   subsample,
@@ -46,6 +47,7 @@ Recon<F>::Recon(const Image<F> &image,
                   true,
                   level_partitioning,
                   std::move(volume_group),
+                  demean_site,
                   kernel_num_partitions),
       filter(filter),
       aggregator(aggregator),
@@ -513,7 +515,8 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
     }
 
     // Re-add the per-(group) stabilised-domain means subtracted prior to decomposition.
-    if (!Estimate<F>::volume_group.empty()) {
+    if (Estimate<F>::demean_site == demean_site_t::ESTIMATOR) {
+      assert(!Estimate<F>::volume_group.empty());
       const MatrixType &means = Estimate<F>::means_partition[p];
       for (ssize_t li = 0; li != m_p; ++li) {
         const ssize_t g = Estimate<F>::volume_group[rows[li]];

@@ -86,6 +86,8 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
                                   const Eigen::MatrixXd &grad)
     : H_in(image),                 //
       H_out(image),                //
+      // The un-partitioned resolution; an iteration that partitions imposes ESTIMATOR before use.
+      demean_site(demean == demean_type::NONE ? demean_site_t::NONE : demean_site_t::PRECONDITIONER), //
       num_volume_groups(1),        //
       noise_model(noise_model),    //
       vst_noise_image(vst_noise) { //
@@ -495,9 +497,11 @@ public:
     // Steps 1 & 2: serialise, phase demodulation, variance-stabilising transform
     pre.serialise_and_stabilise(input, phase, serialise, transform, vst ? &vst.value() : nullptr, data);
 
-    // Step 3: demeaning (in the stabilised domain). Skipped when partitioning is active (the
-    //   per-partition per-group demeaning is then performed within Estimate/Recon).
-    if (mean.valid() && !pre.partitioning_active) {
+    // Step 3: demeaning (in the stabilised domain). Performed only if this component is the one
+    //   responsible for it; under the ESTIMATOR site the per-partition per-group demeaning is
+    //   performed within Estimate/Recon instead, and the mean storage this branch reads is unused.
+    if (pre.demean_active()) {
+      assert(mean.valid());
       assign_pos_of(input, 0, 3).to(mean);
       if (mean.ndim() == 3) {
         const T mean_value = mean.value();
@@ -707,12 +711,12 @@ private:
 } // namespace detail
 
 template <typename T> void Preconditioner<T>::compute_means(Image<T> input_arg) {
-  if (!vst_mean_image.valid())
+  // Means are formed only for the site that subtracts them: with no demeaning at all there is no
+  //   storage to fill, and under the ESTIMATOR site the demeaning is performed per partition inside
+  //   Estimate/Recon, so any values written here would go unused.
+  if (!demean_active())
     return;
-  // When partitioning is active, demeaning is performed per partition inside Estimate/Recon, so
-  //   no preconditioner-side means are needed (and the stored values are left unused).
-  if (partitioning_active)
-    return;
+  assert(vst_mean_image.valid());
 
   // One independent problem per spatial voxel: serialise + stabilise the voxel's volume column and
   //   write its per-group stabilised-domain mean(s). The subset / grouping / divisor handling (and
@@ -751,10 +755,12 @@ void Preconditioner<T>::operator()(Image<T> input,
     // Where no noise level map is available (the demean-only bootstrap),
     //   reversal reduces to re-addition of the stored (empirical) mean.
 
-    // When partitioning is active the demean offset was applied (and is reversed) per partition
-    //   inside Estimate/Recon; the preconditioner therefore reverses only the VST (pointwise),
-    //   exactly as for -demean none. Treat the stored mean as absent in that case.
-    const bool use_mean = mean.valid() && !partitioning_active;
+    // Only the site that applied the demean offset reverses it. Under the ESTIMATOR site it was
+    //   applied (and is re-added) per partition inside Estimate/Recon, so the preconditioner
+    //   reverses only the VST (pointwise), exactly as for -demean none: the stored mean, if any, is
+    //   treated as absent.
+    const bool use_mean = demean_active();
+    assert(!use_mean || mean.valid());
 
     // Per-group quantities (the stabilised-domain demean offset for SAMPLE, and the mapped DC
     //   value + local gain for GROUP_MEAN legacy debiasing) are sized per thread inside the functor.
