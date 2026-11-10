@@ -352,6 +352,11 @@ template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
       }
       for (ssize_t g = 0; g != num_demean_groups; ++g) {
         if (counts[g] > 0) {
+          // A group represented in this partition by a single volume cannot be demeaned: the
+          //   subtraction below would zero that row outright. partition_volumes() guarantees that
+          //   every populated (group, partition) cell holds at least two volumes, refusing the
+          //   partitioning outright where the group sizes make that unachievable.
+          assert(counts[g] >= 2);
           means.row(g) /= F(double(counts[g]));
           ++rp_p;
         }

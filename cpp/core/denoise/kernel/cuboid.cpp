@@ -29,6 +29,15 @@ Cuboid::Cuboid(const Header &header,
       //   with no overcomplete local PCA (aggregator == EXCLUSIVE)
       centre_index(subsample_factors == std::array<ssize_t, 3>({1, 1, 1}) ? (size / 2) : -1) {
   for (ssize_t axis = 0; axis != 3; ++axis) {
+    // shape_description promises that the entire volume of a cuboid kernel resides within the
+    //   image FoV; an extent larger than the image cannot satisfy that for any offset, and
+    //   wrapindex() below would reflect out of the image and trip its own assertion. Validate
+    //   here so that the invariant holds for every caller, not only the explicit-extent branch
+    //   of the kernel factory.
+    if (extent[axis] > header.size(axis))
+      throw Exception("Cuboid kernel extent along axis " + str(axis) + " (" + str(extent[axis]) +
+                      " voxels) exceeds the image dimension (" + str(header.size(axis)) +
+                      " voxels); the entire kernel must reside within the image field of view");
     if (subsample_factors[axis] % 2) {
       if (!(extent[axis] % 2))
         throw Exception("For no subsampling / subsampling by an odd number, "

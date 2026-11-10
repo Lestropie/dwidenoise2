@@ -69,6 +69,9 @@ private:
 //   for that are concentrated into fewer partitions), avoiding singleton (group, partition)
 //   cells. Partition total sizes are kept as balanced as the group constraints allow.
 //   num_partitions is clamped to [1, max(1, m)].
+//   Throws if the requested combination cannot be realised: if any demeaning group holds just one
+//   volume (no assignment can give that group two volumes in the partition it lands in, so it
+//   could not be demeaned there), or if the group constraints leave any partition unpopulated.
 Partitioning partition_volumes(const ssize_t m,
                                const std::vector<ssize_t> &group_per_volume,
                                const ssize_t num_partitions,

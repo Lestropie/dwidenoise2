@@ -72,11 +72,18 @@ template <typename T> class Preconditioner {
   friend class detail::InverseApplyFunctor<T>;
 
 public:
+  // "grad" is the DW gradient table resolved once by the calling command from the Header it
+  //   opened. It cannot be re-derived from any header held here: H_in / H_out are constructed
+  //   from an Image rather than a Header and therefore lose the transform-realignment metadata
+  //   that -fslgrad import requires (Header's "copy from a type other than Header" constructor
+  //   documents this), leaving orig_transform() uninitialised. Pass an empty matrix when the
+  //   image has no gradient table; demean_type::SHELLS is then refused.
   Preconditioner(Image<T> &image,
                  const Demodulation &demodulation,
                  const demean_type demean,
                  Image<float> &vst_noise,
-                 std::shared_ptr<NoiseModel::Base> noise_model);
+                 std::shared_ptr<NoiseModel::Base> noise_model,
+                 const Eigen::MatrixXd &grad);
   Preconditioner(Preconditioner &) = default;
   // Refresh the preconditioning parameters together, each iteration of the noise-estimation
   //   schedule: the noise level map (VST scale), the stabilised-domain per-group means (VST

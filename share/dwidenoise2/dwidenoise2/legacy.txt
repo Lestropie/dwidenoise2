@@ -28,5 +28,9 @@
 # -shape cuboid command-line option; "=1x" replaces its implicit n >= m sizing (bare "cuboid"
 # would instead target n >= 2m).
 #
+# The auto-selected extent is clamped to the image dimensions along each axis, so that the patch
+# always resides within the image field of view: on a thin slab this yields a within-plane patch
+# (e.g. 3 x 3 x 1 for a two-slice image), and the requested aspect ratio may then be unachievable.
+#
 spatial_subsample    temporal_subsample   partitions     smooth_noise    update_noise    kernel
 1                    1                    1              false           true            cuboid=1x

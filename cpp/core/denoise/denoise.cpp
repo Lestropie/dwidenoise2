@@ -17,11 +17,15 @@
 
 #include "denoise/denoise.h"
 
+#include <array>
+#include <cmath>
+#include <limits>
 #include <optional>
 
 #include "algo/threaded_loop.h"
 #include "axes.h"
 #include "filter/smooth.h"
+#include "mrtrix.h"
 #include "transform.h"
 
 namespace MR::Denoise {
@@ -149,12 +153,17 @@ namespace {
 //   Holds its own copy of the source image so each thread samples it independently.
 class ConditionNoiseMapFunctor {
 public:
-  ConditionNoiseMapFunctor(Image<float> &in, const noise_impute_type nan_to_zero, const noise_pad_type pad)
-      : in(in), nan_to_zero(nan_to_zero), pad(pad) {}
+  ConditionNoiseMapFunctor(Image<float> &in,
+                           const noise_impute_type nan_to_zero,
+                           const noise_pad_type pad,
+                           const std::array<ssize_t, 3> &pad_lo)
+      : in(in), nan_to_zero(nan_to_zero), pad(pad), pad_lo(pad_lo) {}
   void operator()(Image<float> &out) {
     if (pad == noise_pad_type::PAD) {
-      for (ssize_t axis = 0; axis != 3; ++axis)
-        in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - 2));
+        // Padding may be asymmetric (sized per edge to reach the coverage target), so the offset
+        //   is per-axis. Clamping replicates the nearest edge value into the padded region.
+        for (ssize_t axis = 0; axis != 3; ++axis)
+          in.index(axis) = std::max(ssize_t(0), std::min(in.size(axis) - 1, out.index(axis) - pad_lo[axis]));
     } else {
       assign_pos_of(out).to(in);
     }
@@ -168,6 +177,7 @@ private:
   Image<float> in;
   noise_impute_type nan_to_zero;
   noise_pad_type pad;
+  std::array<ssize_t, 3> pad_lo;
 };
 
 // Fill every voxel of a scratch image with a fixed value.
@@ -197,17 +207,50 @@ private:
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type nan_to_zero,
                                  const noise_pad_type pad,
-                                 const noise_smooth_type smooth) {
+                                 const noise_smooth_type smooth,
+                                 const Header *coverage) {
   Header H(in);
+  // Margin required either side for cubic interpolation to be well-posed.
+  constexpr ssize_t interp_margin = 2;
+  std::array<ssize_t, 3> pad_lo{0, 0, 0};
+  std::array<ssize_t, 3> pad_hi{0, 0, 0};
   if (pad == noise_pad_type::PAD) {
-    // Just pad by 2 voxels at all edges;
-    //   that should make cubic interpolation safe
+    pad_lo = {interp_margin, interp_margin, interp_margin};
+    pad_hi = pad_lo;
+    if (coverage != nullptr) {
+      // A supplied map need not share the DWI voxel grid, but every position the DWI grid can
+      //   present must lie within the map's sampleable region. Project the eight corners of the
+      //   target field of view into this map's voxel space and widen the padding until they are
+      //   all enclosed with the interpolation margin to spare. Expressing the requirement in the
+      //   map's own voxel space handles differing voxel sizes, offsets and orientations alike.
+      const Transform T_target(*coverage);
+      const Transform T_map(H);
+      Eigen::Vector3d vmin = Eigen::Vector3d::Constant(std::numeric_limits<default_type>::infinity());
+      Eigen::Vector3d vmax = Eigen::Vector3d::Constant(-std::numeric_limits<default_type>::infinity());
+      for (ssize_t c = 0; c != 8; ++c) {
+        // Voxel-centre indices are 0 .. size-1; the sampled extent runs half a voxel beyond each.
+        const Eigen::Vector3d corner((c & 1) ? coverage->size(0) - 0.5 : -0.5,  //
+                                     (c & 2) ? coverage->size(1) - 0.5 : -0.5,  //
+                                     (c & 4) ? coverage->size(2) - 0.5 : -0.5); //
+        const Eigen::Vector3d in_map = T_map.scanner2voxel * (T_target.voxel2scanner * corner);
+        vmin = vmin.cwiseMin(in_map);
+        vmax = vmax.cwiseMax(in_map);
+      }
+      for (ssize_t axis = 0; axis != 3; ++axis) {
+        pad_lo[axis] = std::max(pad_lo[axis], ssize_t(std::ceil(interp_margin - vmin[axis])));
+        pad_hi[axis] = std::max(pad_hi[axis], ssize_t(std::ceil(vmax[axis] + interp_margin - (H.size(axis) - 1))));
+        pad_lo[axis] = std::max<ssize_t>(0, pad_lo[axis]);
+        pad_hi[axis] = std::max<ssize_t>(0, pad_hi[axis]);
+      }
+    }
     for (ssize_t axis = 0; axis != 3; ++axis)
-      H.size(axis) += 4;
-    H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{-2.0, -2.0, -2.0};
+      H.size(axis) += pad_lo[axis] + pad_hi[axis];
+    H.transform().translation() = Transform(H).voxel2scanner * Eigen::Vector3d{default_type(-pad_lo[0]), //
+                                                                               default_type(-pad_lo[1]), //
+                                                                               default_type(-pad_lo[2])};
   }
   Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
-  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, nan_to_zero, pad), out);
+  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, nan_to_zero, pad, pad_lo), out);
   if (smooth == noise_smooth_type::SMOOTH) {
     Filter::Smooth smooth_filter(out);
     smooth_filter(out);
@@ -218,14 +261,27 @@ Image<float> condition_noise_map(Image<float> &in,
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial) {
   // Detect whether a scalar value or an image path was provided,
   //   matching the dispatch used by Estimator::make_imposed().
-  std::optional<default_type> scalar_value;
+  // The raw text decides only *which* interpretation applies; once it is known to be a number,
+  //   the conversion goes through ParsedArgument::as_float() so that the range declared on the
+  //   option itself (Argument::type_float) is what rejects an out-of-range value, with the
+  //   parser's own "out of bounds (valid range: ...)" message. Doing the range check here
+  //   instead would either duplicate the declared bound or, if omitted, send a negative number
+  //   to the image loader to be misreported as an unreadable filename.
+  bool is_scalar = false;
   try {
-    scalar_value = default_type(arg);
+    to<default_type>(arg.as_text());
+    is_scalar = true;
   } catch (Exception &) {
   }
   Image<float> in;
-  if (scalar_value.has_value()) {
-    if (scalar_value.value() <= 0.0)
+  if (is_scalar) {
+    // Deliberately outside the try above: as_float() enforces the option's declared range, and
+    //   that "out of bounds" exception must reach the user rather than be caught and downgraded
+    //   into an attempt to open the value as an image.
+    const default_type scalar_value = arg.as_float();
+    // The declared bound is inclusive, so it admits zero; a zero noise level is not a usable
+    //   scale for the variance-stabilising transform and must still be excluded explicitly.
+    if (scalar_value == 0.0)
       throw Exception("Noise level provided via -noise_in must be greater than zero");
     Header H(H_spatial);
     H.ndim() = 3;
@@ -233,13 +289,15 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
     H.datatype() = DataType::Float32;
     H.datatype().set_byte_order_native();
     in = Image<float>::scratch(H, "Spatially-constant noise level map");
-    ThreadedLoop(in).run(FillFloatFunctor(float(scalar_value.value())), in);
+    ThreadedLoop(in).run(FillFloatFunctor(float(scalar_value)), in);
   } else {
     in = Image<float>::open(std::string(arg));
     if (in.ndim() != 3)
       throw Exception("Noise level image provided via -noise_in must be 3-dimensional");
   }
-  return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, noise_smooth_type::NONE);
+  // Pad out to cover the DWI field of view: the map is interpolated at patch centres drawn from
+  //   the DWI grid, so it need not share that grid but must be sampleable across all of it.
+  return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, noise_smooth_type::NONE, &H_spatial);
 }
 
 Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_dist, const ssize_t num_partitions) {
@@ -251,29 +309,36 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 }
 
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial) {
-  // Detect whether a scalar value or an image path was provided, matching import_vst_noise_map().
-  std::optional<default_type> scalar_value;
+  // Detect whether a scalar value or an image path was provided, matching import_vst_noise_map()
+  //   (including its reason for deferring the range check to the declared bound).
+  bool is_scalar = false;
   try {
-    scalar_value = default_type(arg);
+    to<default_type>(arg.as_text());
+    is_scalar = true;
   } catch (Exception &) {
   }
   Image<float> in;
-  if (scalar_value.has_value()) {
-    if (scalar_value.value() < 0.0)
-      throw Exception("Rank-per-mm value provided via -rankpermm_in must not be negative");
+  if (is_scalar) {
+    // Outside the try: an out-of-range value must be reported as such, not reinterpreted as a
+    //   filename. Unlike -noise_in, zero is a legitimate rank density, so the declared
+    //   (inclusive) lower bound of zero expresses this option's domain exactly.
+    const default_type scalar_value = arg.as_float();
     Header H(H_spatial);
     H.ndim() = 3;
     H.reset_intensity_scaling();
     H.datatype() = DataType::Float32;
     H.datatype().set_byte_order_native();
     in = Image<float>::scratch(H, "Spatially-constant rank-per-mm map");
-    ThreadedLoop(in).run(FillFloatFunctor(float(scalar_value.value())), in);
+    ThreadedLoop(in).run(FillFloatFunctor(float(scalar_value)), in);
   } else {
     in = Image<float>::open(std::string(arg));
     if (in.ndim() != 3)
       throw Exception("Rank-per-mm image provided via -rankpermm_in must be 3-dimensional");
   }
-  return condition_noise_map(in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, noise_smooth_type::NONE);
+  // As for the noise level map: cover the DWI field of view so interpolation is well-posed at
+  //   every patch position, rather than requiring the supplied map to be grid-conformant.
+  return condition_noise_map(
+      in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, noise_smooth_type::NONE, &H_spatial);
 }
 
 } // namespace MR::Denoise
