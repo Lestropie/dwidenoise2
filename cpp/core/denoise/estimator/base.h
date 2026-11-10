@@ -17,13 +17,11 @@
 
 #pragma once
 
-#include <cassert>
 #include <limits>
 #include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/result.h"
-#include "exception.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -48,20 +46,14 @@ public:
   //   contributing an independent ascending eigenspectrum eigenvalues[p] (length min(m[p],n[p]))
   //   from a decomposition of dimensions (m[p], n[p]) and preconditioner rank rp[p]. The pooled
   //   spectrum yields a single noise level (Result::sigma2) shared by the patch, with a
-  //   per-partition signal/noise cutoff (Result::cutoff_p_partition). Estimators that support
-  //   partitioning override this; the default rejects it (callers must gate on
-  //   supports_partitioning()).
+  //   per-partition signal/noise cutoff (Result::cutoff_p_partition). Every estimator must
+  //   implement this: partitioning is a property of the schedule, not of the estimator, and
+  //   callers are free to combine any -estimator with any partition count.
   virtual Result operator()(const std::vector<eigenvalues_type> &eigenvalues, //
                             const std::vector<ssize_t> &m,                     //
                             const std::vector<ssize_t> &n,                     //
                             const std::vector<ssize_t> &rp,                    //
-                            const Eigen::Vector3d &pos) const {                //
-    assert(false);
-    throw Exception("Selected noise level estimator does not support volume partitioning");
-  }
-
-  // Whether operator() for multiple partitions is implemented for this estimator.
-  virtual bool supports_partitioning() const { return false; }
+                            const Eigen::Vector3d &pos) const = 0;             //
 
   // Predicted relative RMSE of this estimator's noise level estimate for a Casorati matrix of m
   //   volumes, n voxels and signal rank r (sigma = 1). Used by the RMSE-tolerance kernel to decide
