@@ -18,6 +18,7 @@
 #include "denoise/recon.h"
 
 #include "denoise/denoise.h"
+#include "denoise/spectrum.h"
 #include "math/math.h"
 
 namespace MR::Denoise {
@@ -163,9 +164,13 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
       } else {
         lambda_star = it->second;
       }
+      // Gavish & Donoho (2014) optimal hard threshold, tau* = lambda*(beta) sqrt(qnz) sigma. It is
+      //   a threshold on *singular values*; "s" holds their squares, so the two are compared as
+      //   tau*^2 = lambda*(beta)^2 qnz sigma^2. Equivalently, and consistently with the optimal
+      //   shrinkage branch above, this retains a component iff its scaled singular value
+      //   y = sqrt(lambda / sigma^2) exceeds lambda*(beta).
       const double tau_star = lambda_star * std::sqrt(qnz) * std::sqrt(Estimate<F>::threshold.sigma2);
-      // TODO Unexpected requisite square applied to qnz here
-      const double threshold = tau_star * Math::pow2(qnz);
+      const double threshold = Math::pow2(tau_star);
       w.head(rz).setZero();
       for (ssize_t i = rz; i != r; ++i) {
         if (Estimate<F>::s[i] >= threshold) {
@@ -375,15 +380,16 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
 
   for (ssize_t p = 0; p != P; ++p) {
     const std::vector<ssize_t> &rows = Estimate<F>::active_partitioning().volumes(p);
-    const ssize_t m_p = Estimate<F>::part_m[p];
-    const ssize_t rp_p = Estimate<F>::part_rp[p];
-    const ssize_t r_p = std::min(m_p, n);
-    const ssize_t rz = rank_zero(m_p, n, rp_p);
-    const ssize_t rnz = rank_nonzero(m_p, n, rp_p);
-    const ssize_t qnz = dimlong_nonzero(m_p, n, rp_p);
-    const double beta = double(rnz) / double(qnz);
-    const eigenvalues_type &sp = Estimate<F>::s_partition[p];
-    total_s += sp.head(r_p).sum();
+    // Every dimension of this partition's decomposition, in correspondence with its eigenvalues,
+    //   as resolved once by Estimate when the decomposition was performed.
+    const Spectrum &spectrum = Estimate<F>::spectra[p];
+    const ssize_t m_p = spectrum.m();
+    const ssize_t r_p = spectrum.r();
+    const ssize_t rz = spectrum.rz();
+    const ssize_t qnz = spectrum.qnz();
+    const double beta = spectrum.beta();
+    const auto &sp = spectrum.eigenvalues();
+    total_s += sp.sum();
 
     Xr_partition.resize(m_p, n_eff);
 
@@ -399,7 +405,7 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
       sum_weights += double(r_p);
       sum_sqweights += double(r_p);
       sum_quadweights += double(r_p);
-      sum_variance += sp.head(r_p).sum();
+      sum_variance += sp.sum();
       continue;
     }
 
@@ -440,8 +446,10 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
       } else {
         lambda_star = it->second;
       }
+      // Threshold on singular values, compared against their squares; see the equivalent branch of
+      //   the non-partitioned reconstruction.
       const double tau_star = lambda_star * std::sqrt(double(qnz)) * std::sqrt(sigma2);
-      const double thresh = tau_star * Math::pow2(double(qnz));
+      const double thresh = Math::pow2(tau_star);
       w.head(rz).setZero();
       for (ssize_t i = rz; i != r_p; ++i) {
         if (sp[i] >= thresh) {
@@ -461,7 +469,7 @@ template <typename F> void Recon<F>::recon_partitioned(Image<F> &dwi, Image<F> &
       w.head(cp).setZero();
       w.segment(cp, orank_p).setOnes();
       sw_p = ssq_p = squad_p = double(orank_p);
-      sv_p = w.head(r_p).matrix().dot(sp.head(r_p).matrix());
+      sv_p = w.head(r_p).matrix().dot(sp);
     } break;
     default:
       assert(false);

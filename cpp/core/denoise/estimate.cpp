@@ -125,9 +125,9 @@ template <typename F> void Estimate<F>::allocate_partition_storage() {
   const ssize_t P = configured_partitions();
   Xsub_partition.resize(P);
   s_partition.resize(P);
-  part_m.assign(P, 0);
-  part_n.assign(P, 0);
-  part_rp.assign(P, 0);
+  // Spectrum is not default-constructible (it has no meaning without eigenvalues to describe),
+  //   so only the capacity is claimed here; the entries themselves are emplaced per patch.
+  spectra.reserve(P);
   // means_partition is used as demean scratch in both the estimation and reconstruction passes
   //   (and read back by Recon to re-add the per-group means), so allocate it unconditionally.
   means_partition.resize(P);
@@ -196,7 +196,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     //   noise level (with a per-partition rank) from the pooled spectrum.
     successful_decomposition = compute_partitions(n);
     if (successful_decomposition)
-      threshold = (*estimator)(s_partition, part_m, part_n, part_rp, patch.centre_realspace);
+      threshold = (*estimator)(spectra, patch.centre_realspace);
     else {
       threshold = Estimator::Result();
       pca_failure_counter.fetch_add(1, std::memory_order_relaxed);
@@ -227,8 +227,10 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     }
 
     if (successful_decomposition) {
-      // Threshold determination, possibly via Marchenko-Pastur
-      threshold = (*estimator)(s.head(r), m, n, null_rank, patch.centre_realspace);
+      // Threshold determination, possibly via Marchenko-Pastur.
+      // The whole patch is described as the single partition that it is; "s" is the reusable
+      //   eigenvalue buffer, which the Spectrum truncates to this patch's r components.
+      threshold = (*estimator)(Spectrum(s, m, n, null_rank), patch.centre_realspace);
     } else {
       s.head(r).fill(std::numeric_limits<double>::signaling_NaN());
       threshold = Estimator::Result();
@@ -251,10 +253,10 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   if (exports.rank_pcanonzero.valid()) {
     assign_pos_of(ss_index).to(exports.rank_pcanonzero);
     if (partitioned()) {
-      // Pooled count of nonzero components across partitions (sum_p rank_nonzero(m_p,n,rp_p)).
+      // Pooled count of nonzero components across partitions.
       ssize_t total = 0;
-      for (ssize_t p = 0; p != active_part->num_partitions(); ++p)
-        total += rank_nonzero(part_m[p], part_n[p], part_rp[p]);
+      for (const auto &spectrum : spectra)
+        total += spectrum.rnz();
       exports.rank_pcanonzero.value() = total;
     } else {
       exports.rank_pcanonzero.value() = rank_nonzero(m, n, null_rank);
@@ -272,8 +274,8 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
       //   Keeping this value mean-free also makes it the correct per-partition signal density once
       //   divided by the partition count when forming rank_per_mm for the next iteration's kernel.
       ssize_t total_r = 0;
-      for (ssize_t p = 0; p != active_part->num_partitions(); ++p)
-        total_r += std::min(part_m[p], part_n[p]);
+      for (const auto &spectrum : spectra)
+        total_r += spectrum.r();
       exports.rank_input.value() = bool(threshold) ? (total_r - threshold.cutoff_p) : total_r;
     } else if (bool(threshold))
       exports.rank_input.value() = r - threshold.cutoff_p;
@@ -301,15 +303,13 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
         // Export the pooled, descending, qnz-normalised spectrum across partitions (raw
         //   per-partition eigenvalues are on incommensurable scales).
         ssize_t total = 0;
-        for (ssize_t p = 0; p != active_part->num_partitions(); ++p)
-          total += std::min(part_m[p], part_n[p]);
+        for (const auto &spectrum : spectra)
+          total += spectrum.r();
         eigenvalues_type pooled(total);
         ssize_t idx = 0;
-        for (ssize_t p = 0; p != active_part->num_partitions(); ++p) {
-          const ssize_t qnz = dimlong_nonzero(part_m[p], part_n[p], part_rp[p]);
-          const ssize_t rp_r = std::min(part_m[p], part_n[p]);
-          for (ssize_t i = 0; i != rp_r; ++i)
-            pooled[idx++] = s_partition[p][i] / double(qnz);
+        for (const auto &spectrum : spectra) {
+          for (ssize_t i = 0; i != spectrum.r(); ++i)
+            pooled[idx++] = spectrum.normalized(i);
         }
         std::sort(pooled.data(), pooled.data() + pooled.size(), std::greater<double>());
         exports.add_eigenspectrum(pooled);
@@ -331,11 +331,10 @@ template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
   assert(active_part->num_volumes() == m);
   const ssize_t P = active_part->num_partitions();
   bool all_ok = true;
+  spectra.clear();
   for (ssize_t p = 0; p != P; ++p) {
     const std::vector<ssize_t> &rows = active_part->volumes(p);
     const ssize_t m_p = ssize_t(rows.size());
-    part_m[p] = m_p;
-    part_n[p] = n;
 
     // Extract this partition's sub-block: its m_p volume rows, all n patch-voxel columns.
     MatrixType &Xp = Xsub_partition[p];
@@ -372,11 +371,14 @@ template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
       for (ssize_t li = 0; li != m_p; ++li)
         Xp.row(li) -= means.row(volume_group[rows[li]]);
     }
-    part_rp[p] = rp_p;
 
     const ssize_t r_p = std::min(m_p, n);
     if (s_partition[p].size() < r_p)
       s_partition[p].resize(r_p);
+    // Bind this partition's eigenvalue storage to the dimensions of the decomposition about to
+    //   fill it. Deferred until after any resize of that storage, which would otherwise leave the
+    //   Spectrum's view of it dangling.
+    spectra.emplace_back(s_partition[p], m_p, n, rp_p);
 
     bool ok = false;
     switch (decomp) {
