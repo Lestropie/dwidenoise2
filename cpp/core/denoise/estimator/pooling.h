@@ -64,15 +64,11 @@
 // max_beta() is the right one (the bulk width in Exp, the edge difference in TBME2022).
 // mean_beta() is consequently for reporting only.
 
-#include <algorithm>
-#include <cassert>
-#include <cmath>
 #include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/result.h"
 #include "denoise/spectrum.h"
-#include "math/math.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -94,80 +90,33 @@ struct PooledEigenvalue {
 //   this header exists to prevent. Its legitimate use is converting a standardised boundary into
 //   a single representative normalised value for export (Result::lamplus), for which it
 //   reproduces the single-PCA value exactly when P == 1.
-inline double mean_beta(const std::vector<Spectrum> &spectra) {
-  double num = 0.0;
-  double den = 0.0;
-  for (const auto &spectrum : spectra) {
-    num += double(spectrum.rnz()) * spectrum.beta();
-    den += double(spectrum.rnz());
-  }
-  return den > 0.0 ? num / den : 0.0;
-}
+double mean_beta(const std::vector<Spectrum> &spectra);
 
 // Ratio of the representative Marchenko-Pastur edge to the noise level, for converting a
 //   standardised quantity into one normalised value for export.
-inline double mean_edge(const std::vector<Spectrum> &spectra) {
-  return Math::pow2(1.0 + std::sqrt(mean_beta(spectra)));
-}
+double mean_edge(const std::vector<Spectrum> &spectra);
 
 // Largest per-partition aspect ratio. The support of the pooled mixture is that of the widest
 //   partition alone -- (1 + sqrt(beta))^2 increases and (1 - sqrt(beta))^2 decreases with beta,
 //   so both extremes come from the same partition -- so any statistic formed from the observed
 //   *range* of the pool (a Marchenko-Pastur bulk width 4 sigma^2 sqrt(beta), or a quarter-circle
 //   edge difference) must use this rather than an average.
-inline double max_beta(const std::vector<Spectrum> &spectra) {
-  double result = 0.0;
-  for (const auto &spectrum : spectra)
-    result = std::max(result, spectrum.beta());
-  return result;
-}
+double max_beta(const std::vector<Spectrum> &spectra);
 
-inline ssize_t total_rnz(const std::vector<Spectrum> &spectra) {
-  ssize_t s = 0;
-  for (const auto &spectrum : spectra)
-    s += spectrum.rnz();
-  return s;
-}
+ssize_t total_rnz(const std::vector<Spectrum> &spectra);
 
-inline ssize_t total_qnz(const std::vector<Spectrum> &spectra) {
-  ssize_t s = 0;
-  for (const auto &spectrum : spectra)
-    s += spectrum.qnz();
-  return s;
-}
+ssize_t total_qnz(const std::vector<Spectrum> &spectra);
 
 // The concatenated nonzero eigenspectrum, ascending in standardised value z, each entry tagged
 //   with its partition of origin.
-inline std::vector<PooledEigenvalue> pool_standardized(const std::vector<Spectrum> &spectra) {
-  std::vector<PooledEigenvalue> pooled;
-  pooled.reserve(size_t(std::max<ssize_t>(0, total_rnz(spectra))));
-  for (size_t p = 0; p != spectra.size(); ++p) {
-    const Spectrum &spectrum = spectra[p];
-    for (ssize_t i = spectrum.rz(); i < spectrum.r(); ++i)
-      pooled.push_back({spectrum.standardized(i), spectrum.normalized(i), ssize_t(p), i});
-  }
-  std::sort(
-      pooled.begin(), pooled.end(), [](const PooledEigenvalue &a, const PooledEigenvalue &b) { return a.z < b.z; });
-  return pooled;
-}
+std::vector<PooledEigenvalue> pool_standardized(const std::vector<Spectrum> &spectra);
 
 // The concatenated nonzero eigenspectrum in normalised units, each partition's values divided by
 //   a per-partition constant, sorted ascending. For the case where the statistic of interest is
 //   not the bulk edge but some other feature of each partition's law whose position depends on
 //   beta_p: in practice Med, which divides by the Marchenko-Pastur median mu(beta_p) so that
 //   every partition contributes values whose own median is sigma^2.
-inline std::vector<double> pool_rescaled(const std::vector<Spectrum> &spectra, const std::vector<double> &divisor) {
-  assert(divisor.size() == spectra.size());
-  std::vector<double> pooled;
-  pooled.reserve(size_t(std::max<ssize_t>(0, total_rnz(spectra))));
-  for (size_t p = 0; p != spectra.size(); ++p) {
-    const Spectrum &spectrum = spectra[p];
-    for (ssize_t i = spectrum.rz(); i < spectrum.r(); ++i)
-      pooled.push_back(spectrum.normalized(i) / divisor[p]);
-  }
-  std::sort(pooled.begin(), pooled.end());
-  return pooled;
-}
+std::vector<double> pool_rescaled(const std::vector<Spectrum> &spectra, const std::vector<double> &divisor);
 
 // Pooled noise statistics accumulated over a classification: the raw eigenvalue energy of the
 //   noise components and the degrees of freedom they carry, from which the noise level follows as
@@ -191,25 +140,6 @@ struct NoiseStats {
 //   normalised threshold to every partition (correct only where every beta_p is equal), and
 //   applying an explicitly-constructed vector of per-partition Marchenko-Pastur edges (which is
 //   what the choice z == sigma^2 amounts to here).
-inline NoiseStats apply_threshold_standardized(const std::vector<Spectrum> &spectra, const double z, Result &result) {
-  const size_t P = spectra.size();
-  result.cutoff_p_partition.assign(P, 0);
-  result.lamplus_partition.assign(P, 0.0);
-  NoiseStats stats;
-  ssize_t total_cutoff = 0;
-  for (size_t p = 0; p != P; ++p) {
-    const Spectrum &spectrum = spectra[p];
-    const ssize_t c = spectrum.noise_count(z);
-    const ssize_t nonzero = c - spectrum.rz();
-    stats.sum += spectrum.raw_sum(spectrum.rz(), nonzero);
-    stats.dof += spectrum.dof(nonzero);
-    stats.count += nonzero;
-    result.cutoff_p_partition[p] = c;
-    result.lamplus_partition[p] = spectrum.lambda_of(z);
-    total_cutoff += c;
-  }
-  result.cutoff_p = total_cutoff;
-  return stats;
-}
+NoiseStats apply_threshold_standardized(const std::vector<Spectrum> &spectra, const double z, Result &result);
 
 } // namespace MR::Denoise::Estimator

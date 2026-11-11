@@ -31,10 +31,7 @@ namespace MR::Denoise::Kernel {
 class SphereBase : public Base {
 
 public:
-  SphereBase(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const default_type max_radius)
-      : Base(voxel_grid, subsample_factors),
-        shared(new Shared(voxel_grid, subsample_factors, halfvoxel_offsets, max_radius)),
-        centre_index(subsample_factors == std::array<ssize_t, 3>({1, 1, 1}) ? 0 : -1) {}
+  SphereBase(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const default_type max_radius);
 
   SphereBase(const SphereBase &) = default;
 

@@ -30,10 +30,7 @@ constexpr default_type default_aspect_ratio = 1.0 / 0.85;
 class SphereMinVoxels : public SphereBase {
 
 public:
-  SphereMinVoxels(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const ssize_t min_voxels)
-      : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, min_voxels)),
-        min_size(min_voxels),
-        min_truncated_size(0) {}
+  SphereMinVoxels(const Header &voxel_grid, const std::array<ssize_t, 3> &subsample_factors, const ssize_t min_voxels);
 
   SphereMinVoxels(const SphereMinVoxels &) = default;
 

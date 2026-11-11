@@ -18,6 +18,7 @@
 #include "denoise/precondition/preconditioner.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -38,6 +39,8 @@
 using namespace MR::App;
 
 namespace MR::Denoise::Precondition {
+
+Image<cfloat> DummyDemodulator::operator()() { return Image<cfloat>(); }
 
 namespace {
 // Private functions to prevent compiler attempting to create complex functions for real types
@@ -230,6 +233,28 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
   //   immediately overwritten before use; doing so previously manifested as two back-to-back
   //   "Computing stabilised-domain mean intensities" passes. Callers must invoke
   //   update_parameters() to populate the means before applying the forward/inverse transform.
+}
+
+template <typename T> void Preconditioner<T>::update_parameters(Image<float> new_vst_noise, Image<T> input) {
+  vst_noise_image = new_vst_noise;
+  if constexpr (is_complex<T>::value) {     // (1)
+    if (apc_enabled && phase_image.valid()) // (2), (3)
+      update_phase(input);
+  }
+  compute_means(input);
+}
+
+template <typename T> void Preconditioner<T>::set_demean_site(const demean_site_t site) {
+  assert((site == demean_site_t::NONE) == !vst_mean_image.valid());
+  demean_site = site;
+}
+
+template <typename T> ssize_t Preconditioner<T>::partition_null_rank() const {
+  if (!vst_mean_image.valid())
+    return 0;
+  if (vst_mean_image.ndim() == 3)
+    return 1;
+  return vst_mean_image.size(3);
 }
 
 // Adaptive phase correction: re-estimate phase_image in place from the empirical complex

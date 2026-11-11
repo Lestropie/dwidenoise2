@@ -17,19 +17,16 @@
 
 #pragma once
 
-#include <cassert>
 #include <cmath>
-#include <limits>
 #include <vector>
+
+#include "types.h"
 
 namespace MR::Denoise::Estimator {
 
 class Result {
 public:
-  Result()
-      : cutoff_p(-1),
-        sigma2(std::numeric_limits<double>::signaling_NaN()),
-        lamplus(std::numeric_limits<double>::signaling_NaN()) {}
+  Result();
   // A noise level of zero is not a usable threshold: lambda+ = (1 + sqrt(beta))^2 * sigma^2 is then
   //   zero, so every component is classified as signal, and the optimal-shrinkage weights divide by
   //   sigma2 (yielding NaN weights, and hence NaN output data in a build without assertions).
@@ -60,10 +57,7 @@ public:
   //   patch's single decomposition where that index is -1 (for which the pooled cutoff_p is that
   //   decomposition's own count). Consumers of a decomposition are written once against this,
   //   rather than once per partitioning state against the two members separately.
-  ssize_t cutoff(const ssize_t partition) const {
-    assert(partition < 0 || partition < ssize_t(cutoff_p_partition.size()));
-    return partition < 0 ? cutoff_p : cutoff_p_partition[partition];
-  }
+  ssize_t cutoff(const ssize_t partition) const;
 };
 
 } // namespace MR::Denoise::Estimator

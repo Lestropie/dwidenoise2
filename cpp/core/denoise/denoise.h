@@ -154,13 +154,8 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
 //   voxel-to-scanner transform (the sub-sample grid).
 class NoiseMapVSTRescaleFunctor {
 public:
-  NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid)
-      : vst_interp(vst_image), transform(grid) {}
-  void operator()(Image<float> &map) {
-    vst_interp.scanner(transform.voxel2scanner *
-                       Eigen::Vector3d({double(map.index(0)), double(map.index(1)), double(map.index(2))}));
-    map.value() *= vst_interp.value();
-  }
+  NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid) : vst_interp(vst_image), transform(grid) {}
+  void operator()(Image<float> &map);
 
 private:
   Interp::Cubic<Image<float>> vst_interp;

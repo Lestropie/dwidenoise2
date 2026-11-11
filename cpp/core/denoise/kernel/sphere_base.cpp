@@ -31,6 +31,13 @@ default_type SphereBase::fov_bounding_radius(const Header &voxel_grid) {
                    + Math::pow2(voxel_grid.size(2) * voxel_grid.spacing(2))); //
 }
 
+SphereBase::SphereBase(const Header &voxel_grid,
+                       const std::array<ssize_t, 3> &subsample_factors,
+                       const default_type max_radius)
+    : Base(voxel_grid, subsample_factors),
+      shared(new Shared(voxel_grid, subsample_factors, halfvoxel_offsets, max_radius)),
+      centre_index(subsample_factors == std::array<ssize_t, 3>({1, 1, 1}) ? 0 : -1) {}
+
 SphereBase::Shared::Shared(const Header &voxel_grid,
                            const std::array<ssize_t, 3> &subsample_factors,
                            const std::array<default_type, 3> &halfvoxel_offsets,

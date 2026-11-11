@@ -37,15 +37,7 @@ public:
   Moments()
       : sum_weights(0.0), sum_sqweights(0.0), sum_quadweights(0.0), sum_variance(0.0), sum_eigenvalues(0.0), rank(0) {}
 
-  Moments &operator+=(const Moments &that) {
-    sum_weights += that.sum_weights;
-    sum_sqweights += that.sum_sqweights;
-    sum_quadweights += that.sum_quadweights;
-    sum_variance += that.sum_variance;
-    sum_eigenvalues += that.sum_eigenvalues;
-    rank += that.rank;
-    return *this;
-  }
+  Moments &operator+=(const Moments &that);
 
   // Fraction of the decomposition's total eigenvalue energy that the filter discarded.
   double variance_removed() const { return 1.0 - sum_variance / sum_eigenvalues; }

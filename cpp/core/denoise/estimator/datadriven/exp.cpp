@@ -149,6 +149,17 @@ Result Exp<version>::operator()(const std::vector<Spectrum> &spectra, //
   return result;
 }
 
+template <ssize_t version>
+double Exp<version>::predicted_rmse(const ssize_t m, const ssize_t n, const double r) const {
+  const double lm = std::log(double(m));
+  const double ln = std::log(double(n));
+  const double lr = std::log(std::max(r, 1.0));
+  if (version == 1) // Exp1 (Veraart 2016): R^2 = 0.96
+    return std::exp(0.02654 - 0.42175 * lm - 0.70154 * ln + 0.73385 * lr + 0.019899 * lm * ln);
+  // Exp2 (Cordero-Grande 2019): R^2 = 0.94
+  return std::exp(0.48522 - 0.60721 * lm - 0.72413 * ln + 0.68613 * lr + 0.039857 * lm * ln);
+}
+
 template class Exp<1>;
 template class Exp<2>;
 

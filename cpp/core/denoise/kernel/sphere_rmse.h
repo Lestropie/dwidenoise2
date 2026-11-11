@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include <cmath>
-
 #include "denoise/denoise.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
@@ -49,17 +47,7 @@ public:
              const default_type rmse_tolerance,
              const predicted_rmse_func &predicted_rmse,
              const ssize_t num_nulls = 0,
-             const default_type cap_multiplier = 12.0)
-      : SphereBase(
-            voxel_grid,
-            subsample_factors,
-            SphereBase::compute_max_radius(voxel_grid, ssize_t(std::ceil(cap_multiplier * effective_num_volumes)))),
-        rank_per_mm(rank_per_mm),
-        num_volumes(effective_num_volumes),
-        num_nondegenerate(std::max<ssize_t>(1, effective_num_volumes - num_nulls)),
-        rmse_tolerance(rmse_tolerance),
-        cap_multiplier(cap_multiplier),
-        predicted_rmse(predicted_rmse) {}
+             const default_type cap_multiplier = 12.0);
 
   SphereRMSE(const SphereRMSE &) = default;
 

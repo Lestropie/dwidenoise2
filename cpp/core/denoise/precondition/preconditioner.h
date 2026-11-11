@@ -46,7 +46,7 @@ public:
   void operator()(InputImageType &, OutputImageType &, const bool) {
     assert(false);
   }
-  Image<cfloat> operator()() { return Image<cfloat>(); }
+  Image<cfloat> operator()();
 };
 template <typename T> struct DemodulatorSelector {
   using type = DummyDemodulator;
@@ -112,14 +112,7 @@ public:
   //   subset for the first time at a later iteration -- or first reached at the final, full-data
   //   pass -- is correctly solved cold rather than being handed warm-start parameters it cannot
   //   honour (an uninformative unit-phase seed with a fraction of the necessary sweeps).
-  void update_parameters(Image<float> new_vst_noise, Image<T> input) {
-    vst_noise_image = new_vst_noise;
-    if constexpr (is_complex<T>::value) {          // (1)
-      if (apc_enabled && phase_image.valid())      // (2), (3)
-        update_phase(input);
-    }
-    compute_means(input);
-  }
+  void update_parameters(Image<float> new_vst_noise, Image<T> input);
   // The bias_handling and debias_anchor arguments apply only to the inverse transform
   //   (inverse == true) and are ignored for the forward transform:
   // - bias_handling selects how the noise-distribution bias is treated in the
@@ -143,10 +136,7 @@ public:
   // The site must be congruent with the demeaning mode this object was constructed with, which is
   //   what the assertion checks: mean storage exists (and hence a mean can be subtracted here) for
   //   every mode other than -demean none.
-  void set_demean_site(const demean_site_t site) {
-    assert((site == demean_site_t::NONE) == !vst_mean_image.valid());
-    demean_site = site;
-  }
+  void set_demean_site(const demean_site_t site);
   bool demean_active() const { return demean_site == demean_site_t::PRECONDITIONER; }
 
   // Declare whether a subsequent adaptive-phase-correction pass will refine the phase estimated by
@@ -198,17 +188,11 @@ public:
   // Consumers: the square-noise-block kernel sizing (make_kernel), the rank arithmetic
   //   rank_zero()/rank_nonzero()/dimlong_nonzero(), and the addback of the regressed-mean
   //   components to the final exported rank maps.
-  ssize_t partition_null_rank() const {
-    if (!vst_mean_image.valid())
-      return 0;
-    if (vst_mean_image.ndim() == 3)
-      return 1;
-    return vst_mean_image.size(3);
-  }
+  ssize_t partition_null_rank() const;
 
   bool noop() const {
-    return (temporal_subset.empty() && num_volume_groups == 1 && !phase_image.valid() &&
-            !vst_mean_image.valid() && !vst_noise_image.valid());
+    return (temporal_subset.empty() && num_volume_groups == 1 && !phase_image.valid() && !vst_mean_image.valid() &&
+            !vst_noise_image.valid());
   }
 
 private:

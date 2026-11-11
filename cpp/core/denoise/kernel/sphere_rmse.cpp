@@ -17,9 +17,31 @@
 
 #include "denoise/kernel/sphere_rmse.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "interp/linear.h"
 
 namespace MR::Denoise::Kernel {
+
+SphereRMSE::SphereRMSE(const Header &voxel_grid,
+                       const std::array<ssize_t, 3> &subsample_factors,
+                       const Image<float> &rank_per_mm,
+                       const ssize_t effective_num_volumes,
+                       const default_type rmse_tolerance,
+                       const predicted_rmse_func &predicted_rmse,
+                       const ssize_t num_nulls,
+                       const default_type cap_multiplier)
+    : SphereBase(
+          voxel_grid,
+          subsample_factors,
+          SphereBase::compute_max_radius(voxel_grid, ssize_t(std::ceil(cap_multiplier * effective_num_volumes)))),
+      rank_per_mm(rank_per_mm),
+      num_volumes(effective_num_volumes),
+      num_nondegenerate(std::max<ssize_t>(1, effective_num_volumes - num_nulls)),
+      rmse_tolerance(rmse_tolerance),
+      cap_multiplier(cap_multiplier),
+      predicted_rmse(predicted_rmse) {}
 
 Data SphereRMSE::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());

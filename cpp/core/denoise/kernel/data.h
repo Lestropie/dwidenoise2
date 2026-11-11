@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <limits>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -30,14 +31,8 @@ class Data {
 public:
   Data(const Eigen::Vector3d &pos, const ssize_t i)
       : centre_realspace(pos), centre_index(i), max_distance(-std::numeric_limits<default_type>::infinity()) {}
-  Data(const ssize_t i)
-      : centre_realspace(Eigen::Vector3d::Constant(std::numeric_limits<double>::signaling_NaN())),
-        centre_index(i),
-        max_distance(-std::numeric_limits<default_type>::infinity()) {}
-  Data()
-      : centre_realspace(Eigen::Vector3d::Constant(std::numeric_limits<double>::signaling_NaN())),
-        centre_index(-1),
-        max_distance(-std::numeric_limits<default_type>::infinity()) {}
+  Data(const ssize_t i);
+  Data();
   Eigen::Vector3d centre_realspace;
   std::vector<Voxel> voxels;
   ssize_t centre_index;
