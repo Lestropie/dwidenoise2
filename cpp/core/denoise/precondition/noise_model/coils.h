@@ -80,6 +80,8 @@ namespace MR::Denoise::Precondition::NoiseModel {
 //    "CoilString" is consulted in its place, as on some data it is that field that carries the
 //    element selection.
 //
+//    The table itself is in coil_database.{h,cpp}, which also documents how to add an entry.
+//
 //    The table holds values of two kinds, which the software keeps distinct at every point:
 //    - MEASURED: an effective channel count established experimentally for that coil under
 //      sum-of-squares combination.

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "denoise/metadata.h"
+#include "denoise/precondition/noise_model/coil_database.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "exception.h"
 #include "mrtrix.h"
@@ -44,6 +45,7 @@ enum class combination_t { UNKNOWN, PHASE_SENSITIVE, SUM_OF_SQUARES };
 
 // Reduce a free-form identifier to a form in which incidental differences of punctuation, spacing
 //   and case do not defeat comparison: upper case with every non-alphanumeric character removed.
+//   The name fields of the coil database (coil_database.h) are written in this form.
 //   Applied both to coil names ("HeadNeck_64", "HeadNeck 64" and "Head/Neck-64" all become
 //   "HEADNECK64") and to the value of "CoilCombinationMethod" ("Sum of Squares" -> "SUMOFSQUARES").
 std::string alphanumeric(const std::string &text) {
@@ -56,7 +58,8 @@ std::string alphanumeric(const std::string &text) {
 }
 
 // Canonical form of a string of active coil-element groups, so that the several spellings under
-//   which the same selection reaches the header all resolve to one table key:
+//   which the same selection reaches the header all resolve to one table key (the element
+//   selections of the coil database, coil_database.h, are written in this form):
 // - Some values carry a coil-connector prefix ("T:HEA;HEP", "C:A32"), which names the plug rather
 //   than the elements and is discarded.
 // - The "CoilString" field substitutes an underscore for the comma that separates the members of
@@ -125,7 +128,7 @@ constexpr size_t max_plausible_clusters = 64;
 //
 // Returning nullopt is a substantive outcome rather than a parse failure. An element string such
 //   as "HEA;HEP" names two anatomical halves of the array, not its clusters, and how many clusters
-//   lie within them cannot be recovered from the string; see coil_database() for why that
+//   lie within them cannot be recovered from the string; see coil_database.h for why that
 //   distinction decides whether a coil may be given a hypothesised count at all.
 std::optional<size_t> count_element_clusters(const std::string &canonical, std::vector<std::string> &clusters) {
   std::set<std::string> unique;
@@ -154,160 +157,10 @@ std::optional<size_t> count_element_clusters(const std::string &canonical, std::
   return unique.size();
 }
 
-// One selection of coil element groups, the measured effective channel count for it, and where
-//   that measurement comes from. The provenance is not decoration: it is quoted back to the user
-//   in the message reporting the inference, because the number is an experimental result whose
-//   applicability to their acquisition they must be able to judge.
-class CoilConfiguration {
-public:
-  const char *elements; // as returned by canonical_elements()
-  // Degrees of freedom, in common with the rest of the noise model. Sources report an effective
-  //   CHANNEL count, so entries are written as an explicit doubling of the published figure: the
-  //   value transcribed from the source and the one conversion applied to it are then both visible
-  //   at the point of entry, and no conversion is left to happen anywhere downstream.
-  default_type dof;
-  const char *source;
-};
-
-// One receive coil on one family of systems. The key is all four of manufacturer, system model,
-//   coil name and active elements, none of which identifies the coil on its own:
-//   - "ReceiveCoilName" is a marketing name, unique only within a vendor and generation. Nothing
-//     stops two vendors, or two generations of one vendor, from shipping different hardware under
-//     names that reduce to the same string.
-//   - The element string is a selection within a named coil, and the same string denotes different
-//     hardware on different coils: both the 32-element Head_32 and the 12-element Tim Head Matrix
-//     report "HEA;HEP".
-//   - Even one coil design does not have one effective channel count: the count is a property of
-//     the coil TOGETHER WITH the receiver hardware and the reconstruction, so the same coil on a
-//     different system generation need not behave the same way. This is not hypothetical -- the
-//     one measured entry below owes its value to the receiver grouping of the Trio generation
-//     rather than to the coil.
-//   Requiring the system to be identified as well as the coil is what keeps a tabulated value from
-//   being applied to hardware it was never established on.
-class CoilDefinition {
-public:
-  const char *manufacturer;         // alphanumeric(); sought within the header "Manufacturer"
-  std::vector<const char *> models; // alphanumeric(); one must appear within the header model name
-  const char *name;                 // alphanumeric() of "ReceiveCoilName"; matched in full
-  // Element selections for which an effective channel count has been MEASURED. Consulted first,
-  //   as a measurement always outranks the hypothesis below.
-  std::vector<CoilConfiguration> measured;
-  // Where the coil's element string enumerates the clusters of the array (see
-  //   count_element_clusters()), a description of that naming; nullptr where it does not, which
-  //   suppresses the hypothesised count entirely for this coil. The string is quoted in the
-  //   message reporting a hypothesised value, so it should say what the families are and how many
-  //   physical elements they hold, that being the information from which the user can judge the
-  //   hypothesis.
-  const char *clusters;
-};
-
-// The built-in lookup table from receive coil to effective channel count, holding entries of two
-// kinds, which are never conflated and which the user is never left to tell apart by inspection:
-//
-// 1. MEASURED. An effective channel count established experimentally for that coil under
-//    sum-of-squares combination and reported -- in the literature, or by measurement contributed
-//    to this software. Applied without apology, and reported with its source.
-//
-// 2. HYPOTHESISED, from the clustering of the elements within the receive array. Where the header
-//    enumerates the active element clusters ("HC1-7;NC1,2"), the count of those clusters is taken
-//    as the effective channel count: 7 for "HC1-7", 9 for "HC1-7;NC1,2". The reasoning is that the
-//    elements within one cluster are adjacent, strongly correlated, and read out together, so a
-//    cluster is much closer to one independent channel than the elements within it are; the
-//    element count is known to be far too large (see coils.h), and the cluster count is the next
-//    quantity down that the header actually reports.
-//    THIS IS A HYPOTHESIS, NOT A MEASUREMENT, and the software says so every time it applies one
-//    (see resolve_noise_dof()). The single calibration point available bounds neither its accuracy
-//    nor even its direction: on the Tim Head Matrix the header names two element groups where 3.76
-//    effective channels were measured, i.e. the array's own clustering (four receiver groups of
-//    three elements) is not what its element string enumerates. That coil's element string is
-//    consequently NOT cluster-enumerated, and no coil whose string names only regions of the array
-//    ("HEA;HEP") is given a hypothesised count -- the count of such groups is not a cluster count
-//    and is known to understate the measured value.
-//
-// Values NOT admitted under either heading, recorded here so that they are not mistakenly added:
-//   - Element counts of any coil (Head_32 = 32 elements, HeadNeck_64 = 64 elements of which 52
-//     cover the head, HeadNeck_20 = 16 head + 4 neck). These are physical element counts, larger
-//     than the effective count by a factor that is neither known nor constant.
-//   - Any scaling of an element count (its square root, its division by a fixed factor): observed
-//     effective counts are not monotone in element count, so no function of it alone can serve.
-//   - "N = 4 for a 12-channel head coil with GRAPPA" and "around N = 9 seems to work for a
-//     32-channel head coil" (NLSAM documentation, citing Brion et al. and Varadarajan et al.).
-//     The first is the coil's receiver-group count rather than a measurement; the second is an
-//     acknowledged working value, is not attributed to a named coil, and describes a GRAPPA
-//     reconstruction, whose effective count is a property of the reconstruction rather than of the
-//     coil and varies over space.
-//   - Degrees of freedom of roughly 4 to 10 estimated on a 64-channel Prisma head coil (Bas et al.
-//     2024): the coil combination mode is not reported, so the value cannot be attributed to
-//     sum of squares.
-//   - The Siemens 32-channel head coil (Head_32). It reports "HEA;HEP", which names the anterior
-//     and posterior halves of the array rather than its clusters, so neither kind of entry can be
-//     made for it: no measurement exists, and the hypothesised rule has nothing to count.
-//
-// The list of system models against which an entry may match names the systems on which that coil
-//   is known to be offered, and is not exhaustive; the same coil on a system not listed simply
-//   fails to match, and the command falls back to the Rician default with a message naming what it
-//   saw. Extending an entry to a further system is therefore as legitimate a contribution as adding
-//   a coil, and carries the same requirement that the coil be known to ship with it.
-//
-// Adding a measured entry requires the four identifying fields as they appear in the header, the
-//   element selection (canonicalised as above), the measured effective channel count, and a source
-//   string naming the measurement; that string should be specific enough for a user to judge
-//   whether the measurement transfers to their data. Adding a hypothesised entry requires only the
-//   identifying fields and a description of the coil's cluster naming, but should be made only
-//   where that naming has been confirmed against real headers from the coil.
-const std::vector<CoilDefinition> &coil_database() {
-  static const std::vector<CoilDefinition> result{
-      // Siemens Tim Head Matrix, the 12-element head coil of the Tim Trio generation. Sakaie & Lowe
-      //   (2017) reconstructed raw diffusion data from five subjects twice -- once by sum of
-      //   squares, once by adaptive combine -- and fitted a central chi to the background of the
-      //   b = 0 images, obtaining 3.76 +/- 0.07 effective channels for the sum-of-squares
-      //   reconstruction (and 1.03 +/- 0.01 for adaptive combine, consistent with the Rician case
-      //   that any phase-sensitive combination produces).
-      //   Note that the figure is close to four rather than twelve because on that generation the
-      //   twelve elements are read out through four groups of three; a Tim Head Matrix on a system
-      //   presenting one channel per element would not be expected to give the same value, which is
-      //   why the entry is confined to the Trio. Data from this coil have been observed to carry
-      //   the element string in "CoilString" ("T:HEA;HEP") with "ReceiveCoilActiveElements" absent,
-      //   which the caller's fallback accommodates. No cluster rule: "HEA;HEP" names the two halves
-      //   of the array, not the four receiver groups through which it is read.
-      {"SIEMENS",
-       {"TRIO"},
-       "HEADMATRIX",
-       {{"HEA;HEP",
-         2.0 * 3.76,
-         "Sakaie & Lowe 2017, sum-of-squares reconstruction of diffusion data from a "
-         "12-element Tim Head Matrix on a 3T Siemens Magnetom Tim Trio"}},
-       nullptr},
-      // Siemens Head/Neck 20, the 20-channel head/neck coil of the Tim 4G generation onwards
-      //   (Aera, Avanto fit, Skyra, Prisma, and the BioMatrix systems that followed). Its 16 head
-      //   elements are read out as the four clusters "HE1" to "HE4" and its 4 neck elements as the
-      //   two clusters "NE1" and "NE2"; a whole-coil acquisition therefore reports "HE1-4;NE1,2"
-      //   and is hypothesised at 6 effective channels. No effective count has been measured for it.
-      {"SIEMENS",
-       {"AERA", "AVANTO", "SKYRA", "PRISMA", "VIDA", "SOLA", "LUMINA", "ALTEA"},
-       "HEADNECK20",
-       {},
-       "the 16 head elements are read out as the four clusters HE1 to HE4, and the 4 neck elements "
-       "as the two clusters NE1 and NE2"},
-      // Siemens Head/Neck 64, the 64-channel head/neck coil introduced with the Prisma. Its 52 head
-      //   elements are read out as the seven clusters "HC1" to "HC7" and its 12 neck elements as the
-      //   two clusters "NC1" and "NC2", so a whole-coil acquisition reports "HC1-7;NC1,2" and is
-      //   hypothesised at 9 effective channels, and the common head-only selection "HC1-7" at 7. No
-      //   effective count has been measured for it.
-      {"SIEMENS",
-       {"PRISMA", "SKYRA", "VIDA", "CIMA"},
-       "HEADNECK64",
-       {},
-       "the 52 head elements are read out as the seven clusters HC1 to HC7, and the 12 neck elements "
-       "as the two clusters NC1 and NC2"},
-  };
-  return result;
-}
-
-// Outcome of consulting the table above. The ways of failing are distinguished because they call
-//   for different advice: an unrecognised coil (or system) is a gap in the table, whereas a
-//   recognised coil that could not be resolved tells the user either which selections would have
-//   been resolved or that its element string does not enumerate clusters.
+// Outcome of consulting the database of known coils (coil_database.h). The ways of failing are
+//   distinguished because they call for different advice: an unrecognised coil (or system) is a gap
+//   in the table, whereas a recognised coil that could not be resolved tells the user either which
+//   selections would have been resolved or that its element string does not enumerate clusters.
 class Lookup {
 public:
   std::optional<default_type> dof;
