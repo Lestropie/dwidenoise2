@@ -17,9 +17,21 @@
 
 #include "denoise/kernel/sphere_rank_adaptive.h"
 
+#include <algorithm>
+
 #include "interp/linear.h"
 
 namespace MR::Denoise::Kernel {
+
+SphereRankAdaptive::SphereRankAdaptive(const Header &voxel_grid,
+                                       const std::array<ssize_t, 3> &subsample_factors,
+                                       const Image<float> &rank_per_mm,
+                                       const ssize_t effective_num_volumes,
+                                       const ssize_t num_nulls)
+    : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, 2 * effective_num_volumes)),
+      rank_per_mm(rank_per_mm),
+      num_volumes(effective_num_volumes),
+      num_nondegenerate(std::max<ssize_t>(1, effective_num_volumes - num_nulls)) {}
 
 Data SphereRankAdaptive::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());

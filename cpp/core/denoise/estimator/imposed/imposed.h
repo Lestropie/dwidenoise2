@@ -17,18 +17,14 @@
 
 #pragma once
 
-#include <algorithm>
-#include <cassert>
-#include <cmath>
 #include <memory>
+#include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/base.h"
-#include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
 #include "denoise/spectrum.h"
 #include "image.h"
-#include "math/math.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -47,37 +43,13 @@ namespace MR::Denoise::Estimator {
 //   the per-patch sigma^2 via get_sigma_sq().
 class ImposedSigma : public Base {
 public:
-  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const final {
-    Result result;
-    double sigma_sq;
-    if (!get_sigma_sq(pos, sigma_sq))
-      return result;
-    result.sigma2 = sigma_sq;
-    // From this noise level,
-    //   get the upper bound of the MP distribution and rank of signal
-    //   given the ordered list of eigenvalues.
-    // On the standardised scale the Marchenko-Pastur boundary is the noise level itself, so the
-    //   known sigma^2 doubles as the cut and lambda+ need only be formed for export.
-    result.lamplus = sigma_sq * spectrum.edge();
-    result.cutoff_p = spectrum.noise_count(sigma_sq);
-    return result;
-  }
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const final;
 
   // Partitioned form: a single externally-provided sigma^2 applies to the whole patch, but the
   //   signal/noise boundary it implies is each partition's own Marchenko-Pastur edge
   //   sigma^2 (1+sqrt(beta_p))^2, since partitions of unequal volume count have unequal beta_p.
   //   That family of boundaries is exactly the standardised cut z == sigma^2.
-  Result operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const final {
-    Result result;
-    double sigma_sq;
-    if (!get_sigma_sq(pos, sigma_sq))
-      return result;
-    result.sigma2 = sigma_sq;
-    apply_threshold_standardized(spectra, sigma_sq, result);
-    // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
-    result.lamplus = sigma_sq * mean_edge(spectra);
-    return result;
-  }
+  Result operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const final;
 
 protected:
   // Provide sigma^2 at the patch centre `pos`; return false if it cannot be

@@ -18,13 +18,10 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
-#include <cmath>
 
 #include <Eigen/Dense>
 
 #include "denoise/denoise.h"
-#include "math/math.h"
 
 namespace MR::Denoise {
 
@@ -73,21 +70,7 @@ public:
   // - m       : number of image volumes (rows of the Casorati matrix) in this partition
   // - n       : number of voxels in the patch (columns)
   // - rp      : preconditioner / null rank, ie. number of means regressed from these volumes
-  Spectrum(const eigenvalues_type &storage, const ssize_t m, const ssize_t n, const ssize_t rp)
-      : s(storage.data(), std::min(m, n)),  //
-        m_(m),                              //
-        n_(n),                              //
-        rp_(rp),                            //
-        r_(std::min(m, n)),                 //
-        rz_(rank_zero(m, n, rp)),           //
-        rnz_(rank_nonzero(m, n, rp)),       //
-        qnz_(dimlong_nonzero(m, n, rp)),    //
-        beta_(double(rnz_) / double(qnz_)), //
-        sqrtbeta_(std::sqrt(beta_)),        //
-        edge_(Math::pow2(1.0 + sqrtbeta_)) {
-    assert(storage.size() >= r_);
-    assert(rz_ + rnz_ == r_);
-  }
+  Spectrum(const eigenvalues_type &storage, const ssize_t m, const ssize_t n, const ssize_t rp);
 
   // Ascending eigenvalues of this partition's Casorati matrix; length r, of which the leading
   //   rz are those that the preconditioner's demeaning forces to zero.
@@ -134,23 +117,12 @@ public:
   //   count of leading (ascending) eigenvalues with standardized() <= z. The rz components that
   //   demeaning forces to zero are always noise, as in the single-PCA estimators. Monotone in z,
   //   since edge() is constant within a partition.
-  ssize_t noise_count(const double z) const {
-    ssize_t c = rz_;
-    for (ssize_t i = rz_; i != r_; ++i) {
-      if (standardized(i) > z)
-        break;
-      c = i + 1;
-    }
-    return c;
-  }
+  ssize_t noise_count(const double z) const;
 
   // Sum of raw eigenvalues over [first, first + count). Raw rather than normalised because sums
   //   are accumulated across partitions of differing qnz: a raw sum is an energy, and energies
   //   are additive where normalised eigenvalues are not.
-  double raw_sum(const ssize_t first, const ssize_t count) const {
-    assert(first >= 0 && count >= 0 && first + count <= r_);
-    return count > 0 ? s.segment(first, count).sum() : 0.0;
-  }
+  double raw_sum(const ssize_t first, const ssize_t count) const;
 
   // Degrees of freedom carried by "count" of this partition's noise components: under Gaussian
   //   noise of variance sigma^2 each carries qnz, so the sum of count raw eigenvalues has

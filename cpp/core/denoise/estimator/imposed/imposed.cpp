@@ -19,8 +19,10 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "denoise/estimator/imposed/rank.h"
+#include "denoise/estimator/pooling.h"
 
 #include "app.h"
 #include "exception.h"
@@ -28,6 +30,34 @@
 namespace MR::Denoise::Estimator {
 
 using namespace App;
+
+Result ImposedSigma::operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const {
+  Result result;
+  double sigma_sq;
+  if (!get_sigma_sq(pos, sigma_sq))
+    return result;
+  result.sigma2 = sigma_sq;
+  // From this noise level,
+  //   get the upper bound of the MP distribution and rank of signal
+  //   given the ordered list of eigenvalues.
+  // On the standardised scale the Marchenko-Pastur boundary is the noise level itself, so the
+  //   known sigma^2 doubles as the cut and lambda+ need only be formed for export.
+  result.lamplus = sigma_sq * spectrum.edge();
+  result.cutoff_p = spectrum.noise_count(sigma_sq);
+  return result;
+}
+
+Result ImposedSigma::operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const {
+  Result result;
+  double sigma_sq;
+  if (!get_sigma_sq(pos, sigma_sq))
+    return result;
+  result.sigma2 = sigma_sq;
+  apply_threshold_standardized(spectra, sigma_sq, result);
+  // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
+  result.lamplus = sigma_sq * mean_edge(spectra);
+  return result;
+}
 
 // Only -fixed_rank bypasses data-driven estimation (imposing a fixed signal rank).
 //   -noise_in no longer bypasses estimation: it merely seeds the variance-stabilising

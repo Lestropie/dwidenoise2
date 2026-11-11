@@ -17,26 +17,20 @@
 
 #pragma once
 
-#include <algorithm>
 #include <array>
-#include <cassert>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
-#include "algo/threaded_copy.h"
-#include "algo/threaded_loop.h"
 #include "denoise/denoise.h"
-#include "denoise/estimate.h"
 #include "denoise/estimator/base.h"
-#include "denoise/estimator/estimator.h"
 #include "denoise/exports.h"
 #include "denoise/kernel/kernel.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/preconditioner.h"
 #include "denoise/spatial_subsample.h"
-#include "filter/smooth.h"
 #include "image.h"
-#include "interp/cubic.h"
 #include "types.h"
 
 namespace MR::Denoise::Iterative {
@@ -80,26 +74,7 @@ struct Iteration {
 //   "context" names the schedule row responsible.
 // The max_partition_size assertion is an implementation invariant: the schedule parser rejects
 //   any value below 1, so it cannot be reached from the command line.
-inline ssize_t
-resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective, const std::string &context) {
-  ssize_t p = iteration.num_partitions;
-  if (iteration.max_partition_size.has_value()) {
-    const ssize_t maxsize = iteration.max_partition_size.value();
-    assert(maxsize >= 1);
-    p = (m_effective + maxsize - 1) / maxsize;
-  }
-  const ssize_t capacity = std::max<ssize_t>(1, m_effective / 2);
-  if (p > capacity)
-    throw Exception(
-        context + " requests " + str(p) + " volume partitions, but the " + str(m_effective) +
-        " volumes available to that iteration support at most " + str(capacity) +
-        " (each partition must hold at least two volumes). " +
-        (iteration.max_partition_size.has_value()
-             ? "Raise \"max_partition_size\" (currently " + str(iteration.max_partition_size.value()) + ") or remove it"
-             : "Reduce \"partitions\" to " + str(capacity) + " or fewer") +
-        " in the schedule");
-  return std::max<ssize_t>(1, p);
-}
+ssize_t resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective, const std::string &context);
 
 // Internal function covering as much as possible for iterative implementation.
 //   num_partitions / partitioning describe the volume partitioning for this iteration (P == 1
@@ -123,60 +98,6 @@ void estimate(Image<T> &input,
               const ssize_t num_partitions = 1,
               std::shared_ptr<const Partitioning> partitioning = nullptr,
               const std::vector<ssize_t> &volume_group = {},
-              const demean_site_t demean_site = demean_site_t::NONE) {
-  // Size the kernel from the preconditioned data, whose volume count is m' (reduced under
-  //   temporal sub-sampling); this keeps the Casorati matrix aspect ratio consistent with the
-  //   number of volumes actually decomposed. With partitioning the kernel is sized from the
-  //   smallest partition (m'/P). The full volume count is passed for the shape warning only.
-  //   make_kernel reads only the header, so it is valid to call before the preconditioned data
-  //   are filled below.
-  // The per-iteration kernel type and free parameter come from this schedule row (config.kernel):
-  //   typically an aspect-ratio kernel for the first iteration (no rank map yet) and an RMSE-
-  //   tolerance kernel thereafter. An RMSE kernel is supplied the active estimator's predicted-RMSE
-  //   model so it can grow the patch until the noise level is estimated precisely enough.
-  Kernel::predicted_rmse_func prmse;
-  if (config.kernel.type == Kernel::kernel_spec_type::RMSE)
-    prmse = [estimator](ssize_t mm, ssize_t nn, double rr) { return estimator->predicted_rmse(mm, nn, rr); };
-  auto kernel = Kernel::make_kernel(input_preconditioned,
-                                    subsample->get_factors(),
-                                    config.kernel,
-                                    rank_per_mm_image,
-                                    Denoise::num_volumes(input),
-                                    num_partitions,
-                                    prmse,
-                                    preconditioner.partition_null_rank());
-  kernel->set_mask(mask);
-  if (preconditioner.noop())
-    threaded_copy(input, input_preconditioned);
-  else
-    preconditioner(input, input_preconditioned, false);
-  {
-    Estimate<T> func(input_preconditioned,
-                     subsample,
-                     kernel,
-                     decomposition,
-                     estimator,
-                     exports,
-                     preconditioner.partition_null_rank(),
-                     false,
-                     partitioning,
-                     volume_group,
-                     demean_site,
-                     num_partitions);
-    ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
-    func.report_warnings();
-  }
-  // If a VST was applied to the input data for this iteration,
-  //   need to remove its effect from the estimated noise map.
-  // Under the nonlinear variance-stabilising transform the stabilised data are
-  //   homoscedastic with variance ~ 1 by construction, so the estimate on the
-  //   stabilised data is a unit-less correction factor; multiplying by the noise
-  //   level used for stabilisation (sigma_{k-1}) yields the first-order refinement
-  //   sigma_k = sigma_{k-1} * (post-VST sigma) (vst_plan.md section 5).
-  if (vst_image.valid()) {
-    ThreadedLoop(exports.noise_out)
-        .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header()), exports.noise_out);
-  }
-}
+              const demean_site_t demean_site = demean_site_t::NONE);
 
 } // namespace MR::Denoise::Iterative

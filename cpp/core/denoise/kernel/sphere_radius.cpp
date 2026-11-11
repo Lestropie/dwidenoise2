@@ -17,7 +17,29 @@
 
 #include "denoise/kernel/sphere_radius.h"
 
+#include <algorithm>
+#include <iterator>
+
+#include "exception.h"
+#include "mrtrix.h"
+
 namespace MR::Denoise::Kernel {
+
+SphereFixedRadius::SphereFixedRadius(const Header &voxel_grid,                        //
+                                     const std::array<ssize_t, 3> &subsample_factors, //
+                                     const default_type radius)                       //
+    : SphereBase(voxel_grid, subsample_factors, radius),                              //
+      maximum_size(std::distance(shared->begin(), shared->end())) {                    //
+  // A fixed-radius kernel does not expand at the image edges, so a radius exceeding the image
+  //   is not merely wasteful: every patch becomes the whole image. Report that explicitly,
+  //   since the request itself is silently capped at the image bounding radius.
+  const default_type effective_radius = std::min(radius, fov_bounding_radius(voxel_grid));
+  if (effective_radius < radius)
+    WARN("Fixed-radius kernel of " + str(radius) +
+         "mm exceeds the image field of view; "
+         "every patch will contain the whole image");
+  INFO("Maximum number of voxels in " + str(effective_radius) + "mm fixed-radius kernel is " + str(maximum_size));
+}
 
 Data SphereFixedRadius::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());

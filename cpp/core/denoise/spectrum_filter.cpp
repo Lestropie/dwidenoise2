@@ -24,6 +24,16 @@
 
 namespace MR::Denoise {
 
+Moments &Moments::operator+=(const Moments &that) {
+  sum_weights += that.sum_weights;
+  sum_sqweights += that.sum_sqweights;
+  sum_quadweights += that.sum_quadweights;
+  sum_variance += that.sum_variance;
+  sum_eigenvalues += that.sum_eigenvalues;
+  rank += that.rank;
+  return *this;
+}
+
 bool SpectrumFilter::weights(const Spectrum &spectrum,
                              const Estimator::Result &threshold,
                              const ssize_t partition,

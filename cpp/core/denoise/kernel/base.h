@@ -27,12 +27,7 @@ namespace MR::Denoise::Kernel {
 
 class Base {
 public:
-  Base(const Header &H, const std::array<ssize_t, 3> &subsample_factors)
-      : H(H),
-        transform(H),
-        halfvoxel_offsets({subsample_factors[0] & 1 ? 0.0 : 0.5,
-                           subsample_factors[1] & 1 ? 0.0 : 0.5,
-                           subsample_factors[2] & 1 ? 0.0 : 0.5}) {}
+  Base(const Header &H, const std::array<ssize_t, 3> &subsample_factors);
   Base(const Base &) = default;
   virtual ~Base() = default;
 

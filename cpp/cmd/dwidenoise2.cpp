@@ -17,6 +17,8 @@
 
 #include <string>
 
+#include "algo/loop.h"
+#include "algo/threaded_loop.h"
 #include "command.h"
 #include "filter/demodulate.h"
 #include "header.h"

@@ -18,7 +18,6 @@
 #pragma once
 
 #include <cassert>
-#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -38,20 +37,7 @@ public:
     assert(grid_spacing > default_type(0));
   }
   bool empty() const { return y.empty(); }
-  default_type operator()(const default_type x) const {
-    assert(!y.empty());
-    if (y.size() == 1)
-      return y[0];
-    const default_type t = (x - grid_origin) / grid_spacing;
-    if (t <= default_type(0))
-      return y[0] + t * (y[1] - y[0]);
-    const ssize_t n = ssize_t(y.size());
-    const ssize_t i = ssize_t(std::floor(t));
-    if (i >= n - 1)
-      return y[n - 1] + (t - default_type(n - 1)) * (y[n - 1] - y[n - 2]);
-    const default_type frac = t - default_type(i);
-    return y[i] * (default_type(1) - frac) + y[i + 1] * frac;
-  }
+  default_type operator()(const default_type x) const;
   default_type origin() const { return grid_origin; }
   default_type spacing() const { return grid_spacing; }
   const std::vector<default_type> &values() const { return y; }

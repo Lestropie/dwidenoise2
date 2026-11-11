@@ -19,6 +19,13 @@
 
 namespace MR::Denoise::Kernel {
 
+SphereMinVoxels::SphereMinVoxels(const Header &voxel_grid,
+                                 const std::array<ssize_t, 3> &subsample_factors,
+                                 const ssize_t min_voxels)
+    : SphereBase(voxel_grid, subsample_factors, SphereBase::compute_max_radius(voxel_grid, min_voxels)),
+      min_size(min_voxels),
+      min_truncated_size(0) {}
+
 SphereMinVoxels::~SphereMinVoxels() {
   auto guard = min_truncated_size.lock();
   if (*guard != 0) {

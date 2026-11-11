@@ -371,4 +371,10 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
       in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, noise_smooth_type::NONE, &H_spatial);
 }
 
+void NoiseMapVSTRescaleFunctor::operator()(Image<float> &map) {
+  vst_interp.scanner(transform.voxel2scanner *
+                     Eigen::Vector3d({double(map.index(0)), double(map.index(1)), double(map.index(2))}));
+  map.value() *= vst_interp.value();
+}
+
 } // namespace MR::Denoise
