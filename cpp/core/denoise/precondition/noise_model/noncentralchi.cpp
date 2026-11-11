@@ -25,9 +25,13 @@
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "enum.h"
 #include "exception.h"
+#include "math/noncentral_chi.h"
 #include "mrtrix.h"
 
 namespace MR::Denoise::Precondition::NoiseModel {
+
+using Math::NonCentralChi::normalised_mean;
+using Math::NonCentralChi::normalised_variance;
 
 namespace {
 
@@ -57,20 +61,6 @@ constexpr default_type GRID_STEP_THETA = 128.0 / 16383.0;   // normalised-intens
 constexpr default_type GRID_STEP_A = 64.0 / 4095.0;         // normalised-SNR step (nu/sigma), ~0.0156
 constexpr default_type GRID_STEP_U = 2.0 * GRID_STEP_THETA; // stabilised-domain step
 constexpr default_type A_POISSON = 64.0;                    // SNR cap for the exact (Poisson-mixture) eta
-
-// 1F1(alpha; gamma; w) (confluent hypergeometric / Kummer) for w >= 0,
-//   evaluated as a positive-term series (no catastrophic cancellation).
-default_type oneF1_pos(const default_type alpha, const default_type gamma, const default_type w) {
-  default_type term = 1.0;
-  default_type sum = 1.0;
-  for (ssize_t k = 0; k != 100000; ++k) {
-    term *= (alpha + default_type(k)) / ((gamma + default_type(k)) * default_type(k + 1)) * w;
-    sum += term;
-    if (term <= 1.0e-15 * sum)
-      break;
-  }
-  return sum;
-}
 
 // Linear interpolation of ytab(xtab) with monotonically-increasing xtab,
 //   clamping to the end values outside the tabulated range.
@@ -116,29 +106,6 @@ std::vector<default_type> derivative(const std::vector<default_type> &y, const d
 }
 
 } // namespace
-
-// E[m | nu] / sigma as a function of a = nu / sigma for a non-central chi
-//   distribution with "dof" = 2N degrees of freedom:
-//     mean = sqrt(2) * Gamma(N+1/2)/Gamma(N) * 1F1(-1/2; N; -a^2/2)
-// The Kummer transform 1F1(-1/2; N; -w) = e^{-w} 1F1(N+1/2; N; w), w = a^2/2,
-//   is used to avoid cancellation; for large w the asymptotic sqrt(a^2 + 2N - 1)
-//   (which yields the correct leading mean correction and Var -> 1) is used.
-default_type normalised_mean(const default_type a, const default_type dof) {
-  const default_type N = 0.5 * dof;
-  const default_type w = 0.5 * a * a;
-  if (w <= 350.0) {
-    const default_type gamma_ratio = std::exp(std::lgamma(N + 0.5) - std::lgamma(N));
-    return std::sqrt(2.0) * gamma_ratio * std::exp(-w) * oneF1_pos(N + 0.5, N, w);
-  }
-  return std::sqrt(a * a + (dof - 1.0));
-}
-
-// Var[m | nu] / sigma^2 = (a^2 + dof) - normalised_mean(a)^2.
-default_type normalised_variance(const default_type a, const default_type dof) {
-  const default_type mu = normalised_mean(a, dof);
-  const default_type v = (a * a + dof) - mu * mu;
-  return std::max(v, 1.0e-12);
-}
 
 NonCentralChi::NonCentralChi(const default_type dof, const vst_method_t vst_method)
     : ndof(dof), vst_method(vst_method) {

@@ -73,22 +73,12 @@ enum class distribution_t { GAUSSIAN, RICIAN, NONCENTRALCHI };
 //   bias-free underlying level (the inverse / debias step).
 enum class vst_method_t { NONE, LINEAR, FOI, KOAY, MOM };
 
-// Moments of the non-central chi magnitude distribution, in normalised form: as functions of the
-//   normalised underlying signal level a = nu / sigma, and of the degrees of freedom alone, with
-//   the noise level scaled out (mean / sigma and variance / sigma^2 respectively). Both are
-//   analytically valid for any real dof > 0; dof == 2 is the Rician case.
-//
-// They are stated here, as free functions, rather than being reachable only through a constructed
-//   model, because the degrees of freedom are something to be *estimated*: evaluating a candidate
-//   value must not require building that value's tabulations (a one-time cost per model, and the
-//   dominant cost by far relative to a single evaluation of either function here).
-//
-// The variance in particular carries all of the information about the degrees of freedom that
-//   magnitude data contain: both moments tend to their dof-independent high-SNR limits
-//   (mean -> a, variance -> 1), so it is only near the noise floor that one value of dof is
-//   distinguishable from another.
-default_type normalised_mean(const default_type a, const default_type dof);
-default_type normalised_variance(const default_type a, const default_type dof);
+// The normalised moments of the non-central chi distribution are free functions in
+//   math/noncentral_chi.h (Math::NonCentralChi::normalised_mean() / normalised_variance()) rather
+//   than being reachable only through a constructed model, because the degrees of freedom are
+//   something to be *estimated*: evaluating a candidate value must not require building that
+//   value's tabulations (a one-time cost per model, and the dominant cost by far relative to a
+//   single evaluation of either function).
 
 // Constrain a degrees-of-freedom value to the range within which the magnitude noise model is
 //   well-posed (see NonCentralChi::min_dof), returning the value that will actually be used.

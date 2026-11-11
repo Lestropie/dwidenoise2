@@ -96,6 +96,7 @@
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/spectrum.h"
 #include "denoise/spectrum_filter.h"
+#include "math/noncentral_chi.h"
 
 using MR::Denoise::eigenvalues_type;
 using MR::Denoise::filter_type;
@@ -107,9 +108,9 @@ using MR::Denoise::Estimator::MRM2023;
 using MR::Denoise::Precondition::NoiseModel::Base;
 using MR::Denoise::Precondition::NoiseModel::distribution_t;
 using MR::Denoise::Precondition::NoiseModel::make;
-using MR::Denoise::Precondition::NoiseModel::normalised_mean;
-using MR::Denoise::Precondition::NoiseModel::normalised_variance;
 using MR::Denoise::Precondition::NoiseModel::vst_method_t;
+using MR::Math::NonCentralChi::normalised_mean;
+using MR::Math::NonCentralChi::normalised_variance;
 
 namespace {
 

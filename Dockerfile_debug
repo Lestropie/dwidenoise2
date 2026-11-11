@@ -31,6 +31,10 @@ RUN git clone https://github.com/MRtrix3/mrtrix3.git . \
 COPY cpp/cmd/dwidenoise2.cpp /src/mrtrix3/cpp/cmd/dwidenoise2.cpp
 COPY cpp/cmd/dwi2noise.cpp /src/mrtrix3/cpp/cmd/dwi2noise.cpp
 COPY cpp/core/denoise /src/mrtrix3/cpp/core/denoise
+# General-purpose maths (MR::Math) destined for MRtrix3 core: copied file by file into the
+#   existing upstream cpp/core/math/ directory, so that nothing upstream is replaced; names
+#   must not collide with upstream files.
+COPY cpp/core/math/noncentral_chi.h cpp/core/math/noncentral_chi.cpp /src/mrtrix3/cpp/core/math/
 # Place the per-command noise estimation schedules alongside the other MRtrix3 shared data
 #   files (share/mrtrix3/<command>/), so the MRtrix3 cmake build copies them into the build
 #   tree (build/share/mrtrix3/) where the commands locate them relative to the executable.
