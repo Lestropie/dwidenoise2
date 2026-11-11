@@ -170,10 +170,10 @@ template <typename F> void Recon<F>::operator()(Image<F> &dwi, Image<F> &out) {
     w.head(r).setOnes();
     out_rank = r;
     sum_weights = r;
-    sum_variance = Estimate<F>::s.sum();
+    sum_variance = Estimate<F>::s.head(r).sum();
   }
   assert(w.head(r).allFinite());
-  const double variance_removed = 1.0 - sum_variance / Estimate<F>::s.sum();
+  const double variance_removed = 1.0 - sum_variance / Estimate<F>::s.head(r).sum();
 
   // Recombine data using only eigenvectors above threshold
   // If only the data computed when this voxel was the centre of the patch
