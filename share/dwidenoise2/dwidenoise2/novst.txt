@@ -30,9 +30,9 @@
 #
 # The reconstruction grid is the command's default spatial sub-sampling factor. Because this row
 # is therefore also the final (reconstruction) row, this schedule cannot be combined with
-# -aggregator exclusive, which requires unity spatial sub-sampling on the final row; use
-# -schedule legacy (or another single-row schedule with "spatial_subsample 1") for that
-# combination.
+# -aggregator exclusive, which requires unity spatial sub-sampling on the final row; for that
+# combination the bundled "novst_exclusive" schedule, which differs only in performing no
+# spatial sub-sampling, is engaged automatically instead.
 #
 spatial_subsample   temporal_subsample   kernel        update_noise   smooth_noise
 2                   1                    aspect=2.0    true           false
