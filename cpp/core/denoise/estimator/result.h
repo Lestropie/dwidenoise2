@@ -43,6 +43,10 @@ public:
   //   sigma2 is the single noise level shared by the patch; and lamplus is a representative
   //   (normalised) signal/noise boundary.
   ssize_t cutoff_p;
+  // Noise variance on the normalised eigenvalue scale, and PER CHANNEL: for complex input the
+  //   eigenvalues reaching the estimator have already been halved (Estimate::to_per_channel), so
+  //   sqrt(sigma2) is the standard deviation of one real channel and not that of the complex sample
+  //   as a whole. This is the currency in which every noise level in this software is expressed.
   double sigma2;
   double lamplus;
   // Partitioned results (empty for the single-PCA path; otherwise length P). With the patch

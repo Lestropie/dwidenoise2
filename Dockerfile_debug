@@ -46,6 +46,36 @@ COPY share/dwidenoise2 /src/mrtrix3/share/mrtrix3
 RUN cmake -Bbuild -GNinja -DMRTRIX_BUILD_GUI=OFF -DMRTRIX_BUILD_GUI=OFF --preset=debug \
     && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2 dwi2noise mrcalc mrcat mrconvert mrinfo copy-share-data
 
+# Compile and run this module's unit tests.
+#
+# testing/unit_tests holds plain executables, each with its own main() and returning non-zero on a
+#   failed check, together with a CMakeLists.txt that builds them. That directory is grafted in
+#   alongside the MRtrix3 sources and pulled into the configuration by appending a single
+#   add_subdirectory() line to the top-level CMakeLists.txt; every target it needs (mrtrix::core,
+#   mrtrix::executable-version, mrtrix::common) is defined by then. Letting CMake build them, rather
+#   than invoking the compiler here, is what keeps them compiled against the same Eigen, the same
+#   include paths and -- decisively, for the debug preset -- the same STL debug flags as the library
+#   they test.
+#
+# Re-running cmake on the existing build directory re-globs the sources while keeping the cached
+#   settings, so the preset need not (and must not) be named again.
+#
+# Not part of the "final" image; build and run the tests with:
+#   docker build -f Dockerfile_debug --target unit-tests -t dwidenoise2:unit-tests --build-arg MAKE_JOBS=4 .
+FROM mrtrix3-builder AS unit-tests
+
+COPY testing/unit_tests /src/mrtrix3/dwidenoise2_tests
+
+ARG MAKE_JOBS
+WORKDIR /src/mrtrix3
+RUN echo 'add_subdirectory(dwidenoise2_tests)' >> CMakeLists.txt \
+    && cmake -S . -B build \
+    && cmake --build build -j ${MAKE_JOBS} --target dwidenoise2-unit-tests \
+    && for exe in build/unit_tests/*; do \
+           echo "=== $(basename "${exe}") ==="; \
+           "${exe}" || exit 1; \
+       done
+
 # Build final image.
 FROM base AS final
 

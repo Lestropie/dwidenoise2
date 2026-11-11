@@ -227,6 +227,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     }
 
     if (successful_decomposition) {
+      to_per_channel(s, r);
       // Threshold determination, possibly via Marchenko-Pastur.
       // The whole patch is described as the single partition that it is; "s" is the reusable
       //   eigenvalue buffer, which the Spectrum truncates to this patch's r components.
@@ -241,6 +242,8 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   // Store additional output maps if requested
   auto ss_index = subsample->in2ss(voxel);
   if (exports.noise_out.valid()) {
+    // Per-channel noise level, for complex input as much as for magnitude: the eigenvalues from
+    //   which sigma2 was derived were rescaled on that basis at to_per_channel() above.
     assign_pos_of(ss_index).to(exports.noise_out);
     exports.noise_out.value() = bool(threshold)                                //
                                     ? float(std::sqrt(threshold.sigma2))       //
@@ -410,12 +413,25 @@ template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
       }
     } break;
     }
-    if (!ok) {
+    if (ok) {
+      to_per_channel(s_partition[p], r_p);
+    } else {
       all_ok = false;
       s_partition[p].head(r_p).fill(std::numeric_limits<double>::signaling_NaN());
     }
   }
   return all_ok;
+}
+
+template <typename F> void Estimate<F>::to_per_channel(eigenvalues_type &s, const ssize_t count) {
+  // Exactly 1.0 for real-valued input and exactly 0.5 for complex. Both are binary powers, so this
+  //   is an exact scaling of every eigenvalue in either case: real-valued data are left
+  //   bit-identical, and the complex rescaling introduces no rounding of its own.
+  // Applied unconditionally rather than under "if constexpr": one pass over min(m, n) doubles is
+  //   negligible beside the decomposition that produced them, and a branch here would only invite
+  //   the two data types' handling to drift apart.
+  constexpr double scale = 1.0 / casorati_entry_channels<F>();
+  s.head(count) *= scale;
 }
 
 template <typename F>

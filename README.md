@@ -216,7 +216,16 @@ Three approaches are available:
 -   `linear`: regression of a strictly *linear* phase term from each *k*-space.
 
 The default noise-adaptive `apc` approach follows
-[Pizzolato et al. (2020)](#pizzolato2020).
+[Pizzolato et al. (2020)](#pizzolato2020),
+with two deliberate departures:
+the regularised image is obtained by a fixed-budget primal-dual solver
+rather than by driving their diffusion PDE to steady state,
+and the discrepancy criterion that sets the regularisation strength
+targets a residual larger than the noise energy that criterion nominally prescribes.
+The latter is empirically calibrated:
+what is consumed here is the *argument* of the regularised image rather than the image itself,
+and an image-calibrated estimate yields a phase that still follows the noise,
+which biases the estimated noise level downwards.
 The *linear* phase demodulation approach is similar to that shown in
 [Cordero-Grande et al. (2019)](#cordero-grande2019).
 Inclusion of *non-linear* phase demodulation was motivated by description in
@@ -358,6 +367,47 @@ Several estimators are available through the `-estimator` option:
     and its refinement in [Cordero-Grande et al. (2019)](#cordero-grande2019);
     note that these two estimators are subject to the [patent](#patent) noted above.
 
+### Noise level convention
+
+Wherever a noise level appears in this software---exported by `dwi2noise`,
+exported from `dwidenoise2` using the `-noise_out` option,
+supplied to either command using the `-noise_in` option,
+or passed internally between the components of one command---
+it is the standard deviation of the noise in a ***single real-valued channel***.
+This is the case for complex input data exactly as it is for magnitude input data.
+
+The practical consequence is that a noise level estimated from one representation of a dataset
+can be applied directly to the other, with no rescaling:
+one may estimate the noise level from magnitude data
+and use the resulting map to denoise the corresponding complex data,
+or estimate it from complex data and use it to variance-stabilise the magnitude data.
+At high SNR the two estimates converge to the same value;
+at low SNR they diverge, since the magnitude data are no longer Gaussian,
+and it is precisely that divergence that the non-linear
+[variance-stabilising transform](#variance-stabilising-transform) below exists to absorb.
+
+**This differs from the `dwidenoise` command in *MRtrix3*.**
+There, the noise level reported for complex input data
+is the *aggregate* level across the real and imaginary channels,
+which is larger by a factor of &radic;2.
+A noise level map produced by *MRtrix3* `dwidenoise` from complex data
+must therefore be divided by &radic;2 before being supplied to `dwidenoise2` or `dwi2noise`
+via the `-noise_in` option.
+No such adjustment is required for a map produced from magnitude data,
+for which the two commands agree.
+
+The reason for the departure is that in `dwidenoise` the noise map is an output,
+produced for inspection at the end of processing,
+whereas in `dwidenoise2` it is an internal currency:
+it parameterises the variance-stabilising transform,
+sets the signal / noise boundary of the eigenspectrum,
+drives the regularisation of
+[adaptive phase correction](#complex-data-demodulation),
+propagates between the iterations of the multi-resolution schedule,
+and is passed between the `dwi2noise` and `dwidenoise2` commands.
+A quantity interpreted by that many components cannot carry
+two different meanings depending on the type of the input data.
+
 ### Variance-stabilising transform
 
 PCA-based denoising assumes that the noise is additive, Gaussian-distributed and homoscedastic
@@ -381,9 +431,13 @@ This deviation from the Gaussian model is most pronounced for data close to the 
 For magnitude input data `dwidenoise2` therefore applies a *non-linear*, noise-model-aware
 variance-stabilising transform (VST) prior to PCA,
 which renders the data approximately Gaussian and homoscedastic across the full intensity range.
-The number of receive channels *N* (such that the noise has 2*N* degrees of freedom)
-is specified using the `-noise_dof` option (default 1, i.e. Rician),
-and the form of the transform is selected using the `-vst_method` option.
+The effective number of receive channels *N* combined by the reconstruction
+(such that the noise has 2*N* degrees of freedom)
+may be specified either as that count, using the `-noise_channels` option,
+or as the degrees of freedom themselves, using the `-noise_dof` option;
+where neither is given, the value is inferred from the image header metadata where those permit it,
+falling back to *N* = 1 (i.e. Rician) with a warning where they do not.
+The form of the transform is selected using the `-vst_method` option.
 
 The default transform (`-vst_method foi`) uses the exact-unbiased forward transform and inverse of
 [Foi (2011)](#foi2011).

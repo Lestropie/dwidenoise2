@@ -48,7 +48,13 @@ const OptionGroup estimator_denoise_options =
     + Option("noise_in",
              "import a pre-estimated noise level, either as a scalar value or as a 3D image, "
              "to be used directly rather than estimated from the data; "
-             "this bypasses noise level estimation and also parameterises the variance-stabilising transform")
+             "this bypasses noise level estimation and also parameterises the variance-stabilising transform. "
+             "The value or map must be the noise level of a single real-valued channel, "
+             "which is the convention in which this software both exports (-noise_out) and "
+             "interprets a noise level, for complex input data as much as for magnitude; "
+             "a map produced by the \"dwidenoise\" command in MRtrix3 from complex data is instead "
+             "the aggregate level across the real and imaginary channels, "
+             "and must be divided by sqrt(2) before being supplied here")
       + Argument("value/image").type_float(0.0).type_image_in()
 
     + Option("fixed_rank",
