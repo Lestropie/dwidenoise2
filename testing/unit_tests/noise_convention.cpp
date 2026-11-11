@@ -54,7 +54,12 @@
 //   6. The Unity estimator remains exact for complex data stabilised by a per-channel map, which
 //      is what the final (reconstruction-only) row of a schedule relies on.
 //   7. Adaptive phase correction's two calibration branches now agree: the noise level it is
-//      handed and the one it self-calibrates from the data are on the same scale.
+//      handed and the one it self-calibrates from the data are on the same scale, and on the same
+//      functional. The second half matters only where the noise is non-stationary, so the case is
+//      made twice: on a stationary phantom, where every reasonable functional coincides, and on a
+//      phantom whose noise level spans the range a parallel-imaging acquisition produces, where a
+//      root mean square and a robust centre differ by six-fold and only one of them is what the
+//      criterion needs.
 //
 // Tolerances are set against Monte Carlo error at the fixed seeds below; the SNR sweep tables are
 //   printed in full rather than asserted term by term.
@@ -722,6 +727,53 @@ double phase_discrepancy(const Array2D &ar, const Array2D &ai, const Array2D &br
   return acc / double(ar.rows() * ar.cols());
 }
 
+// The noise level solve_plane() self-calibrated for a plane, recovered through the public
+//   interface rather than re-implemented. The self-calibration branch and a CONSTANT noise map
+//   differ in exactly one quantity: with a constant sigma the fidelity weights sigmabar^2/sigma^2
+//   are identically one and the calibration domain is the whole plane, which is precisely what the
+//   self-calibrated branch imposes unconditionally. So the two solves differ only in the noise
+//   level driving the discrepancy criterion, and the constant map that reproduces the
+//   self-calibrated solve is the level that solve_plane calibrated for itself.
+// The budget is cut to one lambda evaluation with no polish, so that the phase depends on the noise
+//   level through the eq. 7 seed alone. That makes the bisected statistic -- how far the solved
+//   phase has moved from the raw data phase, which grows monotonically with the level, since a
+//   larger level means a smaller lambda and more smoothing -- monotone, and each evaluation cheap.
+double measure_self_calibrated_sigma(const Array2D &fr, const Array2D &fi, const double lo, const double hi) {
+  const ssize_t Nx = fr.rows();
+  const ssize_t Ny = fr.cols();
+  AdaptivePhaseEstimator::Params params;
+  params.cp_iter = 16;
+  params.max_lambda_iter = 1;
+  params.polish_iter = 0;
+  const AdaptivePhaseEstimator apc(std::vector<size_t>{0, 1}, params);
+  auto departure = [&](const Array2D &sigma) {
+    Array2D pr = Array2D::Ones(Nx, Ny);
+    Array2D pi = Array2D::Zero(Nx, Ny);
+    if (!apc.solve_plane(fr, fi, sigma, pr, pi, false))
+      return std::numeric_limits<double>::quiet_NaN();
+    double acc = 0.0;
+    for (ssize_t j = 0; j != Ny; ++j) {
+      for (ssize_t i = 0; i != Nx; ++i) {
+        const double dot = pr(i, j) * fr(i, j) + pi(i, j) * fi(i, j);
+        const double cross = pr(i, j) * fi(i, j) - pi(i, j) * fr(i, j);
+        acc += std::fabs(std::atan2(cross, dot));
+      }
+    }
+    return acc / double(Nx * Ny);
+  };
+  const double target = departure(Array2D::Constant(Nx, Ny, -1.0)); // -1 routes to self-calibration
+  double a = lo;
+  double b = hi;
+  for (int iteration = 0; iteration != 24; ++iteration) { // geometric bisection: the level spans decades
+    const double m = std::sqrt(a * b);
+    if (departure(Array2D::Constant(Nx, Ny, m)) < target)
+      a = m;
+    else
+      b = m;
+  }
+  return std::sqrt(a * b);
+}
+
 void test_apc_scale() {
   std::printf("\n== 7. Adaptive phase correction: supplied level versus self-calibration ==\n");
   RNG rng(20260809);
@@ -730,8 +782,8 @@ void test_apc_scale() {
   const double sigma_true = 6.0;
 
   // A smooth magnitude field and a smooth background phase: what APC is designed for, and what
-  //   makes its median-absolute-difference self-calibration an unbiased measure of the noise level
-  //   (tissue structure would inflate it, confounding the comparison being made here).
+  //   keeps its self-calibration from the data an honest measure of the noise level (tissue
+  //   structure would inflate it, confounding the comparison being made here).
   Array2D fr(Nx, Ny), fi(Nx, Ny);
   std::normal_distribution<double> nd(0.0, sigma_true);
   for (ssize_t j = 0; j != Ny; ++j) {
@@ -772,6 +824,79 @@ void test_apc_scale() {
   //   which inflated its regularisation and put the first row of a schedule -- which has no map and
   //   self-calibrates -- on a different scale to every row after it.
   check(d_ok < d_aggregate, "a per-channel map agrees with self-calibration more closely than an aggregate one");
+
+  // And the same statement quantitatively: what the self-calibration actually estimated. The
+  //   residual few per cent is the phantom's own smooth magnitude and phase gradient, which any
+  //   estimator built from finite differences counts as noise; it is present for every functional
+  //   and is not what this test is about.
+  const double sigma_self = measure_self_calibrated_sigma(fr, fi, 0.05 * sigma_true, 20.0 * sigma_true);
+  std::printf("   stationary phantom: self-calibrated sigma = %.4f, supplied %.4f (ratio %.4f)\n",
+              sigma_self,
+              sigma_true,
+              sigma_self / sigma_true);
+  check_relative(sigma_self, sigma_true, 0.15, "self-calibration recovers the supplied level on a stationary plane");
+}
+
+// A noise level that varies smoothly across the plane by the two orders of magnitude that parallel
+//   imaging produces in vivo. Here the two branches' functionals part company: the map branch forms
+//   sqrt(mean(sigma^2)), which is what the discrepancy criterion needs -- with unit weights it
+//   targets a residual energy of Npix * sigmabar^2, and that equals the plane's noise energy
+//   sum_x sigma^2(x) only for the mean of sigma^2 -- while a robust centre of the same field lands
+//   near its median, six-fold lower. A stationary phantom cannot see the difference.
+void test_apc_nonstationary() {
+  std::printf("\n== 7b. Adaptive phase correction on a non-stationary noise field ==\n");
+  RNG rng(20260810);
+  const ssize_t Nx = 96;
+  const ssize_t Ny = 96;
+  const double sigma_lo = 7.0;   // periphery
+  const double sigma_hi = 400.0; // centre, where parallel-imaging amplification peaks
+
+  Array2D fr(Nx, Ny), fi(Nx, Ny), sigma(Nx, Ny);
+  std::normal_distribution<double> nd(0.0, 1.0);
+  for (ssize_t j = 0; j != Ny; ++j) {
+    for (ssize_t i = 0; i != Nx; ++i) {
+      const double x = (double(i) - 0.5 * double(Nx - 1)) / double(Nx);
+      const double y = (double(j) - 0.5 * double(Ny - 1)) / double(Ny);
+      const double r2 = x * x + y * y;
+      const double s = sigma_lo * std::pow(sigma_hi / sigma_lo, std::exp(-12.0 * r2));
+      const double magnitude = 1400.0 * std::exp(-4.0 * r2);
+      const double phase =
+          1.4 * x + 0.9 * y + 0.8 * std::sin(2.0 * MR::Math::pi * x) * std::cos(2.0 * MR::Math::pi * y);
+      sigma(i, j) = s;
+      fr(i, j) = magnitude * std::cos(phase) + s * nd(rng);
+      fi(i, j) = magnitude * std::sin(phase) + s * nd(rng);
+    }
+  }
+
+  // What the map branch would form from this field, by its own definition.
+  const double sigmabar_map = std::sqrt(sigma.square().mean());
+  std::vector<double> flat(sigma.data(), sigma.data() + sigma.size());
+  const double sigma_median = median_of(flat);
+  // Without this the test would be vacuous: on a field whose RMS and median coincide, a robust
+  //   centre passes the check below just as well as the functional the criterion requires.
+  check(sigmabar_map > 2.5 * sigma_median,
+        "the phantom's noise field separates its root mean square from its median");
+
+  const double sigma_self = measure_self_calibrated_sigma(fr, fi, 0.02 * sigmabar_map, 20.0 * sigmabar_map);
+  std::printf("   sigma spans %.1f to %.1f; map branch sqrt(mean(sigma^2)) = %.2f, its median = %.2f;\n"
+              "   self-calibrated sigma = %.2f (ratio to the map branch %.4f)\n",
+              sigma.minCoeff(),
+              sigma.maxCoeff(),
+              sigmabar_map,
+              sigma_median,
+              sigma_self,
+              sigma_self / sigmabar_map);
+  check_relative(sigma_self,
+                 sigmabar_map,
+                 0.10,
+                 "self-calibration recovers the map branch's level on a non-stationary plane");
+
+  // Note what is deliberately NOT asserted: that the self-calibrated phase resembles the phase the
+  //   non-stationary map itself produces. Those two solves differ in their fidelity weights as well
+  //   as in their noise level -- the map branch weights each voxel by sigmabar^2/sigma^2, over two
+  //   orders of magnitude here -- so their phases differ for reasons that have nothing to do with
+  //   the quantity under test. The stationary phantom above, where those weights are identically
+  //   one, is where a phase comparison between the branches means anything.
 }
 
 } // namespace
@@ -783,6 +908,7 @@ int main() {
   test_cross_application();
   test_unity_fixed_point();
   test_apc_scale();
+  test_apc_nonstationary();
 
   if (failures == 0)
     std::fprintf(stderr, "\nnoise_convention: all checks passed\n");

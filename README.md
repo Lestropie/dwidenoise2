@@ -217,15 +217,26 @@ Three approaches are available:
 
 The default noise-adaptive `apc` approach follows
 [Pizzolato et al. (2020)](#pizzolato2020),
-with two deliberate departures:
-the regularised image is obtained by a fixed-budget primal-dual solver
-rather than by driving their diffusion PDE to steady state,
-and the discrepancy criterion that sets the regularisation strength
-targets a residual larger than the noise energy that criterion nominally prescribes.
-The latter is empirically calibrated:
+with three deliberate departures.
+The regularised image is obtained by a fixed-budget primal-dual solver
+rather than by driving their diffusion PDE to steady state;
+that budget is nevertheless sufficient for the solve to reach the minimiser
+at the regularisation strength the discrepancy criterion selects,
+verified per plane against exactly minimised reference solutions.
+The discrepancy criterion that sets that strength
+targets a residual larger than the noise energy the criterion nominally prescribes.
+This is empirically calibrated:
 what is consumed here is the *argument* of the regularised image rather than the image itself,
 and an image-calibrated estimate yields a phase that still follows the noise,
 which biases the estimated noise level downwards.
+Their optional refinement of the regularisation strength
+by spatially varying Monte-Carlo SURE is not implemented;
+the authors report it as offline-only,
+and here it would be evaluated once per outer iteration, volume and slice.
+The calibration of the residual target was performed
+on one 3T Siemens acquisition at in-plane matrix sizes of 128 and below,
+and is not established for other vendors, field strengths
+or in-plane matrix sizes above 128.
 The *linear* phase demodulation approach is similar to that shown in
 [Cordero-Grande et al. (2019)](#cordero-grande2019).
 Inclusion of *non-linear* phase demodulation was motivated by description in

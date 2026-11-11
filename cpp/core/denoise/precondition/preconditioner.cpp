@@ -168,8 +168,11 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
   apc_enabled = (demodulation.mode == demodulation_t::APC);
   // No volume has a phase estimate yet: every volume's first APC pass is a cold solve, whichever
   //   iteration of the schedule first draws it into a temporal subset (see update_phase).
-  if (apc_enabled)
+  if (apc_enabled) {
     apc_volume_has_phase.assign(H_out.size(3), false);
+    // Nor has any plane a fidelity weight to carry into its first solve.
+    apc_plane_lambda.assign(size_t(H_out.size(3)) * size_t(H_out.size(apc.slice_axis())), 0.0);
+  }
 
   // Step 2: Demeaning
   // Here only the structure is established (group indexing and storage allocation);
@@ -270,6 +273,10 @@ template <typename T> void Preconditioner<T>::update_phase(Image<T> &input) {
     //   later one will. Tracking this per volume is what prevents a volume that earlier iterations
     //   sub-sampled away from being handed warm-start parameters (a unit-phase seed with the
     //   reduced ..._warm budget) for what is in fact its first estimation.
+    // apc_plane_lambda carries the second piece of per-plane history across passes alongside the
+    //   phase map itself: the fidelity weight each plane's last native solve converged to. It is
+    //   indexed on the same serialised volume index as the plan, so a volume drawn into a subset
+    //   for the first time at a later pass finds its own (empty) entry rather than a neighbour's.
     using regime_t = AdaptivePhaseEstimator::regime_t;
     const ssize_t num_volumes = H_out.size(3);
     assert(ssize_t(apc_volume_has_phase.size()) == num_volumes);
@@ -287,7 +294,7 @@ template <typename T> void Preconditioner<T>::update_phase(Image<T> &input) {
       for (const ssize_t v : temporal_subset)
         schedule(v);
     }
-    apc(input, vst_noise_image, phase_image, serialise_image, plan);
+    apc(input, vst_noise_image, phase_image, serialise_image, plan, &apc_plane_lambda);
     for (ssize_t v = 0; v != num_volumes; ++v)
       if (plan[v].estimate)
         apc_volume_has_phase[v] = true;
