@@ -25,8 +25,13 @@
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "enum.h"
 #include "exception.h"
+#include "math/noncentral_chi.h"
+#include "mrtrix.h"
 
 namespace MR::Denoise::Precondition::NoiseModel {
+
+using Math::NonCentralChi::normalised_mean;
+using Math::NonCentralChi::normalised_variance;
 
 namespace {
 
@@ -42,60 +47,27 @@ namespace {
 //   point is ~(2N-1)/(2*A_MAX); to keep this ~constant for any receive-channel
 //   count N, A_MAX is scaled with N (A_MAX = A_POISSON*(2N-1)) rather than being a
 //   hard-coded constant, so high-channel sum-of-squares data is handled correctly.
+//   That scaling vanishes and then inverts as N falls towards 1/2, so the factor is
+//   floored at unity: for any N <= 1 the grid simply covers the Rician range, which
+//   is more than sufficient because the bias it must represent is smaller still.
 //   The grid STEP SIZES are instead fixed (independent of N); the sample counts
 //   N_A / N_X / N_U are derived per-model from the ranges (see the constructor).
 //
 // The exact-unbiased (FOI) eta integral is an O(A_MAX^2) Poisson mixture, so it is
 //   evaluated only up to A_POISSON (a fixed SNR); beyond that the Jensen correction
-//   is negligible and eta(a) -> f(mean_normalised(a)) (the moment-inverse limit,
+//   is negligible and eta(a) -> f(normalised_mean(a)) (the moment-inverse limit,
 //   where FOI and MOM coincide). This keeps the build cost independent of N.
 constexpr default_type GRID_STEP_THETA = 128.0 / 16383.0;   // normalised-intensity step (m/sigma), ~0.0078
 constexpr default_type GRID_STEP_A = 64.0 / 4095.0;         // normalised-SNR step (nu/sigma), ~0.0156
 constexpr default_type GRID_STEP_U = 2.0 * GRID_STEP_THETA; // stabilised-domain step
 constexpr default_type A_POISSON = 64.0;                    // SNR cap for the exact (Poisson-mixture) eta
 
-// 1F1(alpha; gamma; w) (confluent hypergeometric / Kummer) for w >= 0,
-//   evaluated as a positive-term series (no catastrophic cancellation).
-default_type oneF1_pos(const default_type alpha, const default_type gamma, const default_type w) {
-  default_type term = 1.0;
-  default_type sum = 1.0;
-  for (ssize_t k = 0; k != 100000; ++k) {
-    term *= (alpha + default_type(k)) / ((gamma + default_type(k)) * default_type(k + 1)) * w;
-    sum += term;
-    if (term <= 1.0e-15 * sum)
-      break;
-  }
-  return sum;
-}
-
-// E[m | nu] / sigma as a function of a = nu / sigma for a non-central chi
-//   distribution with 2N degrees of freedom:
-//     mean = sqrt(2) * Gamma(N+1/2)/Gamma(N) * 1F1(-1/2; N; -a^2/2)
-// The Kummer transform 1F1(-1/2; N; -w) = e^{-w} 1F1(N+1/2; N; w), w = a^2/2,
-//   is used to avoid cancellation; for large w the asymptotic sqrt(a^2 + 2N - 1)
-//   (which yields the correct leading mean correction and Var -> 1) is used.
-default_type mean_normalised(const default_type a, const ssize_t N) {
-  const default_type w = 0.5 * a * a;
-  if (w <= 350.0) {
-    const default_type gamma_ratio = std::exp(std::lgamma(default_type(N) + 0.5) - std::lgamma(default_type(N)));
-    return std::sqrt(2.0) * gamma_ratio * std::exp(-w) * oneF1_pos(default_type(N) + 0.5, default_type(N), w);
-  }
-  return std::sqrt(a * a + default_type(2 * N - 1));
-}
-
-// Var[m | nu] / sigma^2 = (a^2 + 2N) - mean_normalised(a)^2.
-default_type variance_normalised(const default_type a, const ssize_t N) {
-  const default_type mu = mean_normalised(a, N);
-  const default_type v = (a * a + default_type(2 * N)) - mu * mu;
-  return std::max(v, 1.0e-12);
-}
-
 // Linear interpolation of ytab(xtab) with monotonically-increasing xtab,
 //   clamping to the end values outside the tabulated range.
 // Used to invert the (non-uniform) tabulated transforms.
 default_type interp_increasing(const std::vector<default_type> &xtab, //
                                const std::vector<default_type> &ytab, //
-                               const default_type x) {                 //
+                               const default_type x) {                //
   const ssize_t n = ssize_t(xtab.size());
   if (x <= xtab.front())
     return ytab.front();
@@ -135,27 +107,34 @@ std::vector<default_type> derivative(const std::vector<default_type> &y, const d
 
 } // namespace
 
-NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_method)
-    : N(num_channels), vst_method(vst_method) {
-  if (N < 1)
-    throw Exception("Non-central chi noise model requires at least one receive channel");
+NonCentralChi::NonCentralChi(const default_type dof, const vst_method_t vst_method)
+    : ndof(dof), vst_method(vst_method) {
+  // A hard guard, not a policy: callers are responsible for clamping a requested value into range
+  //   and reporting that they have done so (see NoiseModel::clamp_dof). Reaching here with a
+  //   smaller value is a programming error.
+  if (!(ndof >= min_dof))
+    throw Exception("Non-central chi noise model requires at least " + str(min_dof) + " degrees of freedom; received " +
+                    str(ndof));
+  // Half the degrees of freedom, in which the standard non-central chi expressions are written.
+  const default_type N = 0.5 * ndof;
 
   // Tabulated SNR / intensity ranges, scaled with the channel count so the
   //   residual bias frozen at the revert point (~(2N-1)/(2*A_MAX)) is ~constant;
   //   the step sizes are fixed, so the sample counts grow with N (and DOF).
-  const default_type A_MAX = A_POISSON * default_type(2 * N - 1);
+  //   Floored at the Rician range so that the scaling cannot collapse for N <= 1.
+  const default_type A_MAX = A_POISSON * std::max(2.0 * N - 1.0, 1.0);
   const default_type X_MAX = A_MAX + A_POISSON; // headroom for the noise distribution's upper tail
   const ssize_t N_A = ssize_t(std::lround(A_MAX / GRID_STEP_A)) + 1;
   const ssize_t N_X = ssize_t(std::lround(X_MAX / GRID_STEP_THETA)) + 1;
 
-  floor_mean = mean_normalised(0.0, N);
-  const default_type floor_sd = std::sqrt(variance_normalised(0.0, N));
+  floor_mean = normalised_mean(0.0, ndof);
+  const default_type floor_sd = std::sqrt(normalised_variance(0.0, ndof));
 
   // Normalised-SNR grid and the corresponding distribution mean (monotone in a).
   const std::vector<default_type> a_grid = uniform_grid(A_MAX, N_A);
   std::vector<default_type> mu(N_A);
   for (ssize_t i = 0; i != N_A; ++i)
-    mu[i] = mean_normalised(a_grid[i], N);
+    mu[i] = normalised_mean(a_grid[i], ndof);
 
   // --- Forward variance-stabilising transform f(theta) -----------------------
   // f'(theta) = 1 / sqrt(Var) evaluated at the SNR whose mean equals theta;
@@ -170,7 +149,7 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
       fprime[j] = 1.0 / floor_sd;
     } else {
       const default_type a_at = interp_increasing(mu, a_grid, x_grid[j]);
-      fprime[j] = 1.0 / std::sqrt(variance_normalised(a_at, N));
+      fprime[j] = 1.0 / std::sqrt(normalised_variance(a_at, ndof));
     }
   }
   f[0] = 0.0;
@@ -220,19 +199,24 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     for (ssize_t i = 1; i != n_int; ++i)
       log_x[i] = std::log(x_grid[i]);
     std::vector<default_type> log_p(n_int);
-    const default_type log_norm = (default_type(N) - 1.0) * std::log(2.0) + std::lgamma(default_type(N));
+    const default_type log_norm = (N - 1.0) * std::log(2.0) + std::lgamma(N);
     for (ssize_t i = 0; i != n_int; ++i)
-      log_p[i] = default_type(2 * N - 1) * log_x[i] - 0.5 * x_grid[i] * x_grid[i] - log_norm;
+      log_p[i] = (2.0 * N - 1.0) * log_x[i] - 0.5 * x_grid[i] * x_grid[i] - log_norm;
     std::vector<default_type> p(n_int);
     std::vector<default_type> E(Jmax + 1);
     for (ssize_t j = 0; j <= Jmax; ++j) {
-      for (ssize_t i = 0; i != n_int; ++i)
+      // The chi density ~ x^{2N-1} is unbounded at the origin whenever 2N < 1, so p[0] can be
+      //   infinite. The integrand of interest is f*p, and f(0) = 0 with f ~ x near the origin, so
+      //   f*p ~ x^{2N} vanishes there for every N > 0; the origin's contribution is therefore set
+      //   to zero explicitly rather than being formed as the indeterminate product 0 * inf.
+      p[0] = 0.0;
+      for (ssize_t i = 1; i != n_int; ++i)
         p[i] = log_p[i] > -700.0 ? std::exp(log_p[i]) : 0.0;
       default_type integral = 0.0;
       for (ssize_t i = 0; i != n_int - 1; ++i)
         integral += 0.5 * (f[i] * p[i] + f[i + 1] * p[i + 1]) * dx;
       E[j] = integral;
-      const default_type log_scale = -std::log(default_type(2 * (N + j)));
+      const default_type log_scale = -std::log(2.0 * (N + default_type(j)));
       for (ssize_t i = 0; i != n_int; ++i)
         log_p[i] += 2.0 * log_x[i] + log_scale;
     }
@@ -246,9 +230,9 @@ NonCentralChi::NonCentralChi(const ssize_t num_channels, const vst_method_t vst_
     for (ssize_t i = 1; i != N_A; ++i) {
       if (a_grid[i] > A_POISSON) {
         // High-SNR asymptote: the Jensen correction is negligible, so
-        //   eta(a) = E[f(m/sigma)] -> f(E[m/sigma]) = f(mean_normalised(a)).
+        //   eta(a) = E[f(m/sigma)] -> f(E[m/sigma]) = f(normalised_mean(a)).
         //   (Here the exact-unbiased inverse coincides with the moment inverse.)
-        eta[i] = interp_increasing(x_grid, f, mean_normalised(a_grid[i], N));
+        eta[i] = interp_increasing(x_grid, f, normalised_mean(a_grid[i], ndof));
         continue;
       }
       const default_type lambda = 0.5 * a_grid[i] * a_grid[i];
@@ -338,21 +322,21 @@ default_type NonCentralChi::jacobian(const default_type u, const default_type si
   return sigma * jacobian_lut(u);
 }
 
-default_type NonCentralChi::mean(const default_type nu, const default_type sigma) const {
+default_type NonCentralChi::mean(const default_type signal, const default_type sigma) const {
   if (!(sigma > default_type(0)))
-    return nu;
-  return sigma * mean_normalised(nu / sigma, N);
+    return signal;
+  return sigma * normalised_mean(signal / sigma, ndof);
 }
 
-default_type NonCentralChi::variance(const default_type nu, const default_type sigma) const {
+default_type NonCentralChi::variance(const default_type signal, const default_type sigma) const {
   if (!(sigma > default_type(0)))
     return default_type(0);
-  return sigma * sigma * variance_normalised(nu / sigma, N);
+  return sigma * sigma * normalised_variance(signal / sigma, ndof);
 }
 
 std::string NonCentralChi::description() const {
-  return "non-central chi (" + std::to_string(N) + " channels, " + std::to_string(2 * N) +
-         " DOF; VST: " + Enum::lowercase_name(vst_method) + ")";
+  return "non-central chi (" + str(ndof, 4) + " DOF, " + str(0.5 * ndof, 4) +
+         " effective channels; VST: " + Enum::lowercase_name(vst_method) + ")";
 }
 
 } // namespace MR::Denoise::Precondition::NoiseModel

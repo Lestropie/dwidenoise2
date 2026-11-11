@@ -29,6 +29,7 @@
 namespace MR::Denoise::Precondition {
 
 extern const char *const demodulation_description;
+extern const char *const noise_channels_description;
 
 // Phase demodulation applied to complex data before PCA. This [none, linear, hann, apc]
 //   classification refines the historical [none, linear, nonlinear]: both "hann" and "apc"
@@ -76,13 +77,23 @@ enum class debias_anchor_t { SAMPLE, GROUP_MEAN };
 App::OptionGroup precondition_options(const bool include_output);
 
 // Construct the noise model governing the variance-stabilising transform
-//   from the -noise_dof and -vst_method command-line options.
+//   from the -noise_channels / -noise_dof and -vst_method command-line options.
 // For complex (or phase-demodulated) data, pass complex == true to obtain the
-//   Gaussian model; -noise_dof is then ignored (with a warning if specified).
-// For magnitude data, the receive-channel count N from -noise_dof selects a
-//   Rician (N == 1) or non-central chi (N > 1) model, built with the requested
-//   -vst_method strategy.
-std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex);
+//   Gaussian model; a channel count is then refused (it cannot apply).
+// For magnitude data, the degrees of freedom select a Rician (dof == 2) or non-central chi (any
+//   other value) model, built with the requested -vst_method strategy. The degrees of freedom are
+//   real-valued and are twice the EFFECTIVE receive-channel count, which is not a coil element
+//   count; -noise_dof supplies them directly and -noise_channels supplies half of them (the two
+//   are mutually exclusive, and a channel count is doubled at the point of parsing so that
+//   everything below this function deals only in degrees of freedom).
+//   Where the user provided neither, they are inferred from the key-values of "H" (see
+//   NoiseModel::resolve_noise_dof), falling back to the Rician default where the metadata do not
+//   permit an inference.
+//   "H" is the header of the input image as opened by the calling command, whose
+//   key-values are those of DICOM provenance; it is interrogated only on the code
+//   path where the channel count has an effect, so no message is emitted about a
+//   quantity that the selected transform does not use.
+std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex, const Header &H);
 
 class Demodulation {
 public:

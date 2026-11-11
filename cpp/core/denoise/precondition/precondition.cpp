@@ -20,11 +20,13 @@
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "app.h"
 #include "axes.h"
+#include "denoise/precondition/noise_model/coils.h"
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
 #include "metadata/bids.h"
@@ -55,6 +57,45 @@ const char *const demodulation_description =
     "similarly to performed in Cordero-Grande et al. 2019. "
     "'none' disables phase demodulation.";
 
+const char *const noise_channels_description =
+    "Options -noise_channels and -noise_dof configure the noise model for magnitude data"
+    " (both are ignored for complex input data)."
+    " -noise_channels takes the EFFECTIVE number of receive channels N"
+    " combined by sum-of-squares reconstruction of magnitude data,"
+    " such that the noise follows a non-central chi distribution with 2N degrees of freedom;"
+    " -noise_dof takes those degrees of freedom directly."
+    " The latter is exactly twice the former,"
+    " as each complex channel contributes two real Gaussian components."
+    " The two options are therefore two parameterisations of the same quantity and are mutually exclusive;"
+    " supply whichever of the two the value to hand is expressed in"
+    " (-noise_channels 4 and -noise_dof 8 are equivalent)."
+    " The effective channel count is not the number of elements in the receive coil,"
+    " nor the number of receiver channels:"
+    " coil elements may be combined into fewer channels before reconstruction,"
+    " and correlation of the noise between channels together with overlap of their sensitivity profiles"
+    " means that the channels combined do not contribute independent degrees of freedom."
+    " The effective count is consequently smaller than the element count,"
+    " often by a large factor, and need not be a whole number"
+    " (for example, 3.76 has been measured for a nominally 12-element head coil)."
+    " It is the quantity that a noise-distribution fit to the data estimates."
+    " If neither option is given, the count is inferred from the image header metadata where they permit it:"
+    " the coil combination mode is read from \"CoilCombinationMethod\""
+    " (or from a declaration of SENSE1 combination in the image comments,"
+    " as written by the CMRR multi-band sequences, which takes precedence over it),"
+    " and, only where that mode is sum of squares,"
+    " the effective channel count is resolved from \"Manufacturer\", \"ManufacturersModelName\","
+    " \"ReceiveCoilName\" and \"ReceiveCoilActiveElements\""
+    " against a table of receive coils built into this software."
+    " That table holds counts measured experimentally for a coil where such a measurement exists,"
+    " and otherwise, for coils whose active elements are reported as enumerated clusters of the receive array"
+    " (\"HC1-7;NC1,2\"), the number of clusters active,"
+    " on the hypothesis that each contributes one independent channel;"
+    " a value obtained the latter way is applied but reported as a hypothesis, with a warning."
+    " Any phase-sensitive combination (adaptive combine, SENSE1) yields N = 1."
+    " Where no inference can be drawn, a warning is issued and N = 1 (Rician) is assumed."
+    " An explicitly provided value is always used,"
+    " with a warning if it disagrees with what the metadata indicate.";
+
 // clang-format off
 OptionGroup precondition_options(const bool include_output)
 {
@@ -73,11 +114,16 @@ OptionGroup precondition_options(const bool include_output)
            "options are: " + Enum::join<demean_type>(",") + " "
            "(default: 'shells' if DWI gradient table available; 'volume_groups' if volume groups present; 'all' otherwise)")
     + Argument("mode").type_choice<demean_type>()
+  + Option("noise_channels",
+           "the EFFECTIVE number of receive channels combined by sum-of-squares reconstruction of magnitude data, "
+           "which is not the number of coil elements "
+           "(see the Description section of the help page for details)")
+    + Argument("count").type_float(0.0)
   + Option("noise_dof",
-           "the number of receive channels N combined by sum-of-squares reconstruction of magnitude data, "
-           "such that the noise follows a non-central chi distribution with 2N degrees of freedom "
-           "(default: 1, i.e. Rician; ignored for complex input data)")
-    + Argument("count").type_integer(1)
+           "the degrees of freedom of the non-central chi noise distribution of sum-of-squares magnitude data, "
+           "equal to twice the effective receive channel count "
+           "(see the Description section of the help page for details)")
+    + Argument("count").type_float(0.0)
   + Option("vst_method",
            "the variance-stabilising transform to apply prior to PCA; "
            "options are: " + Enum::join<NoiseModel::vst_method_t>(",") + "; "
@@ -108,8 +154,30 @@ OptionGroup precondition_options(const bool include_output)
 }
 // clang-format on
 
-std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
+std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex, const Header &H) {
+  // -noise_channels and -noise_dof are two parameterisations of one quantity, related by
+  //   dof = 2 * channels. They are resolved here, once, into the effective channel count that the
+  //   model is built from; everything downstream sees only that. Supplying both is not a
+  //   redundancy to be tolerated -- the two arguments could contradict one another, and there is
+  //   no basis on which to prefer either -- so it is refused.
+  auto opt_channels = get_options("noise_channels");
   auto opt_dof = get_options("noise_dof");
+  if (!opt_channels.empty() && !opt_dof.empty())
+    throw Exception("Options -noise_channels and -noise_dof cannot be used together: "
+                    "they express the same quantity in the two conventions related by "
+                    "dof = 2 x channels (-noise_channels 4 is -noise_dof 8). Supply whichever one "
+                    "matches the value you have");
+  // The option through which the user expressed the count, for messages that quote it back.
+  const std::string user_option = opt_channels.empty() ? std::string("noise_dof") : std::string("noise_channels");
+  // Reduced to the common currency -- degrees of freedom, in which every internal computation is
+  //   expressed -- at the point of parsing, so that the doubling of a channel-count request happens
+  //   exactly once and in one place, and nothing downstream has to know which option was used.
+  const std::optional<default_type> user_dof =
+      !opt_channels.empty() ? std::optional<default_type>(2.0 * default_type(opt_channels[0][0]))
+      : !opt_dof.empty()    ? std::optional<default_type>(default_type(opt_dof[0][0]))
+                            : std::nullopt;
+  const bool user_specified = user_dof.has_value();
+
   const NoiseModel::vst_method_t vst_method = get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
   // Options that exist only to parameterise the non-linear magnitude noise models have no
   //   meaning for complex data, whose demodulated noise is Gaussian: the variance-stabilising
@@ -118,10 +186,12 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
   //   that cannot be applied -- so it is refused rather than silently overridden.
   //   -vst_method {none, linear} are excluded: both are genuinely honoured for complex data.
   if (complex) {
-    if (!opt_dof.empty())
-      throw Exception("Option -noise_dof cannot be used with complex input data: "
-                      "it specifies the receive-channel count of a magnitude (Rician / non-central "
-                      "chi) noise model, whereas the demodulated complex noise is Gaussian");
+    if (user_specified)
+      throw Exception("Option -" + user_option +
+                      " cannot be used with complex input data: "
+                      "it parameterises the magnitude (Rician / non-central chi) noise model, whereas the "
+                      "demodulated complex noise is Gaussian and carries two degrees of freedom per sample "
+                      "however many channels were combined to produce it");
     if (!get_options("vst_method").empty() &&             //
         vst_method != NoiseModel::vst_method_t::LINEAR && //
         vst_method != NoiseModel::vst_method_t::NONE)     //
@@ -132,33 +202,43 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex) {
                       "Specify -vst_method linear, or -vst_method none, or omit the option");
   }
   // -vst_method none: no variance-stabilising transform (identity), for any data type.
-  //   The noise distribution and -noise_dof are irrelevant, and the data reach PCA
+  //   The noise distribution and the channel count are irrelevant, and the data reach PCA
   //   unmodified (save for any demeaning); see the single-pass fallback / warning in
   //   the calling commands.
   if (vst_method == NoiseModel::vst_method_t::NONE) {
-    if (!opt_dof.empty())
-      WARN("Option -noise_dof is ignored when -vst_method none is specified: "
+    if (user_specified)
+      WARN("Option -" + user_option +
+           " is ignored when -vst_method none is specified: "
            "no variance-stabilising transform is applied");
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
+    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, vst_method);
   }
   // Any magnitude-specific request has already been refused above; the default (foi) simply
   //   collapses to the linear transform for Gaussian noise.
   if (complex)
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
+    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, vst_method);
   // -vst_method linear: the simple linear transform u = m / sigma for magnitude data too.
   //   This only normalises the scale (the magnitude noise remains heteroscedastic near
-  //   the floor) and performs no noise-floor debiasing; -noise_dof has no effect.
+  //   the floor) and performs no noise-floor debiasing; the channel count has no effect.
   if (vst_method == NoiseModel::vst_method_t::LINEAR) {
-    if (!opt_dof.empty())
-      WARN("Option -noise_dof is ignored when -vst_method linear is specified: "
+    if (user_specified)
+      WARN("Option -" + user_option +
+           " is ignored when -vst_method linear is specified: "
            "the linear transform does not model the magnitude noise distribution");
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 1, vst_method);
+    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, vst_method);
   }
-  const ssize_t num_channels = opt_dof.empty() ? 1 : ssize_t(opt_dof[0][0]);
-  const NoiseModel::distribution_t distribution = num_channels == 1                                //
+  // This is the only code path on which the degrees of freedom have any effect: a non-linear
+  //   transform for magnitude data, whose forward transform and bias-corrected inverse are both
+  //   built from the noise distribution. It is therefore also the only path on which the header is
+  //   interrogated for that count, so that no claim is made about a quantity that the requested
+  //   transform would then ignore. Where the user named a count it is used regardless, but the
+  //   inference still runs so that any disagreement with the metadata is reported.
+  const default_type dof = NoiseModel::resolve_noise_dof(H, user_dof, user_option);
+  // The Rician label is reserved for exactly two degrees of freedom (one effective channel); any
+  //   other value, integral or not, is described as what it is.
+  const NoiseModel::distribution_t distribution = dof == default_type(2)                           //
                                                       ? NoiseModel::distribution_t::RICIAN         //
                                                       : NoiseModel::distribution_t::NONCENTRALCHI; //
-  return NoiseModel::make(distribution, num_channels, vst_method);
+  return NoiseModel::make(distribution, dof, vst_method);
 }
 
 Demodulation select_demodulation(const Header &H) {

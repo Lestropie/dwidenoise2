@@ -29,8 +29,6 @@
 
 namespace MR::Denoise {
 
-namespace {
-
 // Header key-values within which the free-text / multi-valued descriptors of an image's
 //   reconstruction may be found, in order of decreasing reliability:
 // - "ImageType": DICOM Image Type (0008,0008); dcm2niix exports it as a JSON array, which
@@ -52,16 +50,6 @@ const std::vector<std::string> descriptive_keys{"ImageType",
                                                 "DerivationDescription",
                                                 "SeriesDescription",
                                                 "ProtocolName"};
-
-// Siemens' zero-fill interpolation flags, as exported by dcm2niix from the CSA header.
-const std::vector<std::string> interpolation_keys{"Interpolation2D", "Interpolation3D"};
-
-// Header key-values reporting the in-plane matrix that was actually acquired:
-// - "AcquisitionMatrix": DICOM Acquisition Matrix (0018,1310), four values -- frequency rows,
-//     frequency columns, phase rows, phase columns -- of which the two that do not apply are zero.
-// - "BaseResolution": the Siemens readout base resolution, exported by dcm2niix from the CSA header
-//     ("# of acquisition lines").
-const std::vector<std::string> acquired_matrix_keys{"AcquisitionMatrix", "BaseResolution"};
 
 // Split a header key-value into upper-case tokens. Which character separates the values of a
 //   multi-valued field depends on the route by which it reached the header: MRtrix3's own DICOM
@@ -92,6 +80,20 @@ std::vector<std::string> find_metadata_tokens(const KeyValues &keyval,
     }
   }
   return result;
+}
+
+// The verbatim (whitespace-stripped) value of a header key-value, or nullopt if the key is absent
+//   or its value is empty. Unlike the interpretations below, no conversion is attempted: this is
+//   for fields whose value is a free-form identifier (a coil name, a reconstruction mode) that is
+//   to be matched or reported as written.
+std::optional<std::string> metadata_string(const KeyValues &keyval, const std::string &key) {
+  const auto entry = keyval.find(key);
+  if (entry == keyval.end())
+    return std::nullopt;
+  const std::string value = strip(entry->second);
+  if (value.empty())
+    return std::nullopt;
+  return value;
 }
 
 // Boolean interpretation of a header key-value, or nullopt if it is not one. to<bool>() accepts
@@ -143,6 +145,18 @@ std::optional<default_type> metadata_max(const KeyValues &keyval, const std::str
   }
   return result > 0.0 ? std::optional<default_type>(result) : std::nullopt;
 }
+
+namespace {
+
+// Siemens' zero-fill interpolation flags, as exported by dcm2niix from the CSA header.
+const std::vector<std::string> interpolation_keys{"Interpolation2D", "Interpolation3D"};
+
+// Header key-values reporting the in-plane matrix that was actually acquired:
+// - "AcquisitionMatrix": DICOM Acquisition Matrix (0018,1310), four values -- frequency rows,
+//     frequency columns, phase rows, phase columns -- of which the two that do not apply are zero.
+// - "BaseResolution": the Siemens readout base resolution, exported by dcm2niix from the CSA header
+//     ("# of acquisition lines").
+const std::vector<std::string> acquired_matrix_keys{"AcquisitionMatrix", "BaseResolution"};
 
 // Matrix sizes are integers, but arrive via the generic floating-point interpretation above.
 std::string str_matrix_size(const default_type value) { return str(ssize_t(std::lround(value))); }

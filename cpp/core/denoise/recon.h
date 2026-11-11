@@ -18,7 +18,6 @@
 #pragma once
 
 #include <limits>
-#include <map>
 #include <memory>
 
 #include <Eigen/Dense>
@@ -27,6 +26,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/exports.h"
 #include "denoise/kernel/base.h"
+#include "denoise/spectrum_filter.h"
 #include "header.h"
 #include "image.h"
 
@@ -53,23 +53,16 @@ public:
   void operator()(Image<F> &dwi, Image<F> &out);
 
 protected:
-  // Denoising configuration
-  filter_type filter;
+  // Denoising configuration. Everything specific to the eigenspectrum filter -- the weights, the
+  //   spectral moments they imply, and the optimal-hard-threshold cache -- belongs to the filter
+  //   rather than to this class, which is left responsible for spatial aggregation alone.
+  SpectrumFilter filter;
   aggregator_type aggregator;
   double gaussian_multiplier;
 
   // Reusable memory
-  std::map<double, double> beta2lambdastar;
   vector_type w;
   typename Estimate<F>::MatrixType Xr;
-  // Per-partition reconstruction scratch (volume partitioning path only).
-  typename Estimate<F>::MatrixType Xr_partition;
-
-  // Reconstruct + aggregate for the volume-partitioning path: each partition is forward-projected
-  //   independently (filtered with its own beta and the single pooled noise level), its per-group
-  //   means are re-added, and the partitions are reassembled into the full set of volumes before
-  //   the usual spatial aggregation. Invoked from operator() when the patch is partitioned.
-  void recon_partitioned(Image<F> &dwi, Image<F> &out);
 };
 
 } // namespace MR::Denoise

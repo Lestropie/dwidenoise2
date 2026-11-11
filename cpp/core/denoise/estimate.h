@@ -38,6 +38,7 @@
 #include "denoise/partition.h"
 #include "denoise/spatial_subsample.h"
 #include "denoise/spectrum.h"
+#include "denoise/spectrum_filter.h"
 #include "header.h"
 #include "image.h"
 #include "transform.h"
@@ -147,6 +148,24 @@ protected:
   std::vector<MatrixType> U_partition, V_partition, evec_partition;
   std::vector<RealVectorType> sv_partition;
   std::vector<MatrixType> means_partition; // (num_demean_groups x n) per-column group means
+  // Scratch for the forward projection of one partition (m_p x columns), reassembled into the
+  //   full set of volumes by project_patch().
+  MatrixType Xr_partition;
+
+  // Forward-project the current patch's filtered decomposition into "Xr", handling the
+  //   single-decomposition and partitioned cases identically, and report the spectral moments of
+  //   the composite filter. Requires enable_recon; does not touch any output image.
+  // - "centre_only" projects the patch's centre column alone (m x 1), as -aggregator exclusive
+  //     requires; otherwise every column of the patch is projected (m x n).
+  // - "Xr" and "w" are caller-owned reusable buffers, grown here as required. Only the leading
+  //     columns of Xr are written (it may be wider, having been sized to an earlier, larger patch).
+  // - Where the group means were subtracted here rather than by the preconditioner
+  //     (demean_site_t::ESTIMATOR), they are re-added, so Xr is always returned on the same scale
+  //     as the data that were loaded.
+  // Returns false where the patch's threshold was unusable, in which case Xr holds the input data
+  //   passed through unchanged (see SpectrumFilter::weights).
+  bool
+  project_patch(const SpectrumFilter &filter, const bool centre_only, MatrixType &Xr, vector_type &w, Moments &moments);
 
   // Whether partitioning is configured at all (known at construction; either mode).
   bool partitioning_enabled() const {

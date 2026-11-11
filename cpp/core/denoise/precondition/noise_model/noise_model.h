@@ -27,6 +27,22 @@
 
 namespace MR::Denoise::Precondition::NoiseModel {
 
+// Relation between receive channels and degrees of freedom, which holds throughout this library
+//   and is a definition rather than an approximation:
+//
+//     dof = 2 * channels
+//
+// Each complex receive channel contributes two real Gaussian components (real and imaginary), so
+//   N channels combined by sum of squares give a non-central chi distribution with 2N degrees of
+//   freedom. N = 1 (2 DOF) is the Rician case, which is also what any PHASE-SENSITIVE combination
+//   (adaptive combine, SENSE, SENSE1, Roemer) yields no matter how many physical channels it
+//   combines, since those collapse the channels to a single complex image before the magnitude is
+//   taken. For complex (non-magnitude) input the data have already been combined, so a sample
+//   carries 2 DOF irrespective of the channel count.
+//
+// N is the EFFECTIVE channel count, not the physical element count, and is real-valued: see
+//   NonCentralChi in noncentralchi.h and the discussion in coils.h.
+
 // Statistical distribution governing the raw image intensities prior to PCA:
 // - GAUSSIAN: complex (or phase-demodulated) data; zero-mean Gaussian per channel.
 // - RICIAN: magnitude data from a single receive channel (non-central chi, 2 DOF).
@@ -57,11 +73,26 @@ enum class distribution_t { GAUSSIAN, RICIAN, NONCENTRALCHI };
 //   bias-free underlying level (the inverse / debias step).
 enum class vst_method_t { NONE, LINEAR, FOI, KOAY, MOM };
 
+// The normalised moments of the non-central chi distribution are free functions in
+//   math/noncentral_chi.h (Math::NonCentralChi::normalised_mean() / normalised_variance()) rather
+//   than being reachable only through a constructed model, because the degrees of freedom are
+//   something to be *estimated*: evaluating a candidate value must not require building that
+//   value's tabulations (a one-time cost per model, and the dominant cost by far relative to a
+//   single evaluation of either function).
+
+// Constrain a degrees-of-freedom value to the range within which the magnitude noise model is
+//   well-posed (see NonCentralChi::min_dof), returning the value that will actually be used.
+//   Separated from the model itself so that a caller can detect that a requested value has been
+//   modified and say so, rather than silently substituting one.
+default_type clamp_dof(const default_type dof);
+
 // Construct a noise model for the requested distribution.
-// - num_channels is used only for NONCENTRALCHI (ignored for GAUSSIAN / RICIAN).
+// - dof is the real-valued degrees of freedom, used only for NONCENTRALCHI (ignored for GAUSSIAN /
+//     RICIAN, both of which are 2 by construction). It must already lie within the admissible
+//     range; pass it through clamp_dof() first.
 // - vst_method is used only for magnitude distributions (ignored for GAUSSIAN).
 std::shared_ptr<Base> make(const distribution_t distribution, //
-                           const ssize_t num_channels,        //
+                           const default_type dof,            //
                            const vst_method_t vst_method);    //
 
 } // namespace MR::Denoise::Precondition::NoiseModel

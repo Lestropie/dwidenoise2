@@ -25,14 +25,12 @@
 
 namespace MR::Denoise::Precondition::NoiseModel {
 
-// Rician noise model: the single-channel (N = 1) special case of the
-//   non-central chi distribution.
+// Rician noise model: the two-degrees-of-freedom (single effective channel) special case of
+//   the non-central chi distribution.
 class Rician : public NonCentralChi {
 public:
-  explicit Rician(const vst_method_t vst_method) : NonCentralChi(1, vst_method) {}
-  std::string description() const final {
-    return "Rician (2 DOF; VST: " + Enum::lowercase_name(vst_method) + ")";
-  }
+  explicit Rician(const vst_method_t vst_method) : NonCentralChi(default_type(2), vst_method) {}
+  std::string description() const final { return "Rician (2 DOF; VST: " + Enum::lowercase_name(vst_method) + ")"; }
 };
 
 } // namespace MR::Denoise::Precondition::NoiseModel

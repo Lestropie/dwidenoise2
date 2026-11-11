@@ -418,6 +418,185 @@ template <typename F> bool Estimate<F>::compute_partitions(const ssize_t n) {
   return all_ok;
 }
 
+template <typename F>
+bool Estimate<F>::project_patch(
+    const SpectrumFilter &filter, const bool centre_only, MatrixType &Xr, vector_type &w, Moments &moments) {
+  assert(enable_recon);
+  const ssize_t n = patch.voxels.size();
+  const ssize_t ncols = centre_only ? 1 : n;
+  const ssize_t centre = patch.centre_index;
+  assert(!centre_only || centre >= 0);
+  if (Xr.rows() != m || Xr.cols() < ncols)
+    Xr.resize(m, ncols);
+#ifndef NDEBUG
+  // Fill matrices with NaN when in debug mode;
+  //   make sure results from one voxel are not creeping into another
+  //   due to use of block operations to prevent memory re-allocation
+  //   in the presence of variation in kernel sizes
+  Xr.fill(std::numeric_limits<default_type>::signaling_NaN());
+  w.fill(std::numeric_limits<default_type>::signaling_NaN());
+#endif
+  moments = Moments();
+
+  if (!partitioned()) {
+    // The whole patch is described as the single partition that it is; "s" is the reusable
+    //   eigenvalue buffer, which the Spectrum truncates to this patch's r components.
+    if (!filter.weights(Spectrum(s, m, n, null_rank), threshold, -1, w, moments)) {
+      if (centre_only)
+        Xr.leftCols(1).noalias() = X.col(centre);
+      else
+        Xr.leftCols(n).noalias() = X.leftCols(n);
+      return false;
+    }
+    const ssize_t r = std::min(m, n);
+    switch (decomp) {
+    case decomp_type::BDCSVD: {
+      assert(SVD.matrixU().allFinite());
+      assert(SVD.matrixV().allFinite());
+      assert(SVD.singularValues().allFinite());
+      // TODO Re-try reconstruction without use of V:
+      //   https://github.com/MRtrix3/mrtrix3/pull/2906/commits/eb34f3c57dd460d2b3bd86b9653066be15e916c6
+      // It might be that in the case of anything other than EXCLUSIVE,
+      //   computing V is no more expensive than doing the full patch reconstruction in its absence,
+      //   whereas for EXCLUSIVE since only a small portion of V is used it's worthwhile
+      if (centre_only)
+        Xr.leftCols(1).noalias() =                            //
+            SVD.matrixU() *                                   //
+            (w.head(r).reverse().template cast<F>().array() * //
+             SVD.singularValues().array())
+                .matrix()
+                .asDiagonal() *                  //
+            SVD.matrixV().row(centre).adjoint(); //
+      else
+        Xr.leftCols(n).noalias() =                            //
+            SVD.matrixU() *                                   //
+            (w.head(r).reverse().template cast<F>().array() * //
+             SVD.singularValues().array())
+                .matrix()
+                .asDiagonal() *      //
+            SVD.matrixV().adjoint(); //
+    } break;
+    case decomp_type::SELFADJOINT: {
+      if (m <= n) {
+        if (centre_only)
+          Xr.leftCols(1).noalias() =                                //
+              eig.eigenvectors() *                                  //
+              (w.head(r).template cast<F>().matrix().asDiagonal() * //
+               (eig.eigenvectors().adjoint() * X.col(centre)));     //
+        else
+          Xr.leftCols(n).noalias() =                                //
+              eig.eigenvectors() *                                  //
+              (w.head(r).template cast<F>().matrix().asDiagonal() * //
+               (eig.eigenvectors().adjoint() * X.leftCols(n)));     //
+      } else {
+        if (centre_only)
+          Xr.leftCols(1).noalias() =                                 //
+              X.leftCols(n) *                                        //
+              (eig.eigenvectors() *                                  //
+               (w.head(r).template cast<F>().matrix().asDiagonal() * //
+                eig.eigenvectors().adjoint().col(centre)));          //
+        else
+          Xr.leftCols(n).noalias() =                                 //
+              X.leftCols(n) *                                        //
+              (eig.eigenvectors() *                                  //
+               (w.head(r).template cast<F>().matrix().asDiagonal() * //
+                eig.eigenvectors().adjoint()));                      //
+      }
+    } break;
+    }
+    assert(Xr.leftCols(ncols).allFinite());
+    return true;
+  }
+
+  // Volume partitioning: each partition is filtered with its own spectrum (and, for truncation,
+  //   its own noise-component count) but the single pooled noise level, forward-projected
+  //   independently, and its rows scattered back into the full set of volumes.
+  const ssize_t P = active_partitioning().num_partitions();
+  for (ssize_t p = 0; p != P; ++p) {
+    const std::vector<ssize_t> &rows = active_partitioning().volumes(p);
+    // Every dimension of this partition's decomposition, in correspondence with its eigenvalues,
+    //   as resolved once when the decomposition was performed.
+    const Spectrum &spectrum = spectra[p];
+    const ssize_t m_p = spectrum.m();
+    const ssize_t r_p = spectrum.r();
+
+    Moments moments_p;
+    const bool filtered = filter.weights(spectrum, threshold, p, w, moments_p);
+    moments += moments_p;
+
+    // Threshold invalid for this patch: copy the (un-denoised) input rows through unchanged.
+    if (!filtered) {
+      for (ssize_t li = 0; li != m_p; ++li) {
+        if (centre_only)
+          Xr(rows[li], 0) = X(rows[li], centre);
+        else
+          Xr.row(rows[li]).head(n) = X.row(rows[li]).head(n);
+      }
+      continue;
+    }
+
+    // Forward-project this partition's filtered spectrum (in the demeaned domain). The diagonal
+    //   weight expressions are written inline (not stored) to avoid dangling references to the
+    //   temporary coefficient-wise array.
+    Xr_partition.resize(m_p, ncols);
+    switch (decomp) {
+    case decomp_type::BDCSVD: {
+      const MatrixType &U = U_partition[p];
+      const MatrixType &V = V_partition[p];
+      if (centre_only)
+        Xr_partition.noalias() =
+            U * (w.head(r_p).reverse().template cast<F>().array() * sv_partition[p].array()).matrix().asDiagonal() *
+            V.row(centre).adjoint();
+      else
+        Xr_partition.noalias() =
+            U * (w.head(r_p).reverse().template cast<F>().array() * sv_partition[p].array()).matrix().asDiagonal() *
+            V.adjoint();
+    } break;
+    case decomp_type::SELFADJOINT: {
+      const MatrixType &evec = evec_partition[p];
+      const MatrixType &Xp = Xsub_partition[p];
+      if (m_p <= n) {
+        if (centre_only)
+          Xr_partition.noalias() =
+              evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * (evec.adjoint() * Xp.col(centre)));
+        else
+          Xr_partition.noalias() =
+              evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * (evec.adjoint() * Xp));
+      } else {
+        if (centre_only)
+          Xr_partition.noalias() =
+              Xp * (evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * evec.adjoint().col(centre)));
+        else
+          Xr_partition.noalias() =
+              Xp * (evec * (w.head(r_p).template cast<F>().matrix().asDiagonal() * evec.adjoint()));
+      }
+    } break;
+    }
+
+    // Re-add the per-(group) stabilised-domain means subtracted prior to decomposition.
+    if (demean_site == demean_site_t::ESTIMATOR) {
+      assert(!volume_group.empty());
+      const MatrixType &means = means_partition[p];
+      for (ssize_t li = 0; li != m_p; ++li) {
+        const ssize_t g = volume_group[rows[li]];
+        if (centre_only)
+          Xr_partition(li, 0) += means(g, centre);
+        else
+          Xr_partition.row(li).head(n) += means.row(g);
+      }
+    }
+
+    // Scatter this partition's reconstructed rows into the full set of volumes.
+    for (ssize_t li = 0; li != m_p; ++li) {
+      if (centre_only)
+        Xr(rows[li], 0) = Xr_partition(li, 0);
+      else
+        Xr.row(rows[li]).head(n) = Xr_partition.row(li).head(n);
+    }
+  }
+  return bool(threshold);
+}
+
 template <typename F> void Estimate<F>::load_data(Image<F> &image) {
   const Kernel::Voxel::index_type pos({image.index(0), image.index(1), image.index(2)});
   for (ssize_t i = 0; i != patch.voxels.size(); ++i) {

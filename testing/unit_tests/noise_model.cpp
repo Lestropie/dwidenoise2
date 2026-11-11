@@ -99,10 +99,13 @@ Moments moments(const std::vector<double> &v) {
 }
 
 void test_magnitude(const int N, std::mt19937 &rng) {
+  // N is the number of receive channels combined by sum of squares; the models are parameterised
+  //   by the 2N degrees of freedom those channels contribute.
   const distribution_t dist = (N == 1) ? distribution_t::RICIAN : distribution_t::NONCENTRALCHI;
-  auto foi = make(dist, N, vst_method_t::FOI);
-  auto mom = make(dist, N, vst_method_t::MOM);
-  auto koay = make(dist, N, vst_method_t::KOAY);
+  const double dof = 2.0 * N;
+  auto foi = make(dist, dof, vst_method_t::FOI);
+  auto mom = make(dist, dof, vst_method_t::MOM);
+  auto koay = make(dist, dof, vst_method_t::KOAY);
 
   check(foi->num_channels() == N, "num_channels");
   check(foi->dof() == 2 * N, "dof");
@@ -170,7 +173,7 @@ void test_magnitude(const int N, std::mt19937 &rng) {
 }
 
 void test_gaussian() {
-  auto g = make(distribution_t::GAUSSIAN, 1, vst_method_t::FOI);
+  auto g = make(distribution_t::GAUSSIAN, 2, vst_method_t::FOI);
   // Must reproduce the prior linear transform exactly.
   check_near(g->stabilise(7.0, 2.0), 3.5, 1e-12, "Gaussian stabilise = m/sigma");
   check_near(g->inverse_algebraic(3.5, 2.0), 7.0, 1e-12, "Gaussian inverse_algebraic = sigma*u");
@@ -185,7 +188,7 @@ void test_gaussian() {
 void test_none_and_linear() {
   // none: identity mapping with unit Jacobian for every distribution.
   for (const distribution_t dist : {distribution_t::GAUSSIAN, distribution_t::RICIAN, distribution_t::NONCENTRALCHI}) {
-    auto none = make(dist, 4, vst_method_t::NONE);
+    auto none = make(dist, 8, vst_method_t::NONE);
     check_near(none->stabilise(7.0, 2.0), 7.0, 1e-12, "none stabilise = m (no transform)");
     check_near(none->inverse_algebraic(7.0, 2.0), 7.0, 1e-12, "none inverse_algebraic = u");
     check_near(none->inverse_unbiased(7.0, 2.0), 7.0, 1e-12, "none inverse_unbiased = u (no debias)");
@@ -194,7 +197,7 @@ void test_none_and_linear() {
   // linear: the simple linear transform u = m / sigma for any distribution
   //   (identical to the Gaussian model; sigma scaling, no noise-floor debias).
   for (const distribution_t dist : {distribution_t::RICIAN, distribution_t::NONCENTRALCHI}) {
-    auto lin = make(dist, 4, vst_method_t::LINEAR);
+    auto lin = make(dist, 8, vst_method_t::LINEAR);
     check_near(lin->stabilise(7.0, 2.0), 3.5, 1e-12, "linear stabilise = m/sigma");
     check_near(lin->inverse_algebraic(3.5, 2.0), 7.0, 1e-12, "linear inverse_algebraic = sigma*u");
     check_near(lin->inverse_unbiased(3.5, 2.0), 7.0, 1e-12, "linear inverse_unbiased = sigma*u (no bias)");
