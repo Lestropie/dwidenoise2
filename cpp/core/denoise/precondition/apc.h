@@ -95,14 +95,19 @@ namespace MR::Denoise::Precondition {
 //   pass, and hands operator() one VolumePlan per volume; a never-estimated volume is planned as a
 //   cold solve regardless of how many passes have already run over other volumes. solve_plane
 //   itself consumes only a warm_start flag (cold-start seed vs warm-start seed, and full vs
-//   reduced budget). This is the dominant lever on APC's contribution to run time.
+//   reduced budget). This is the dominant lever on APC's contribution to run time -- though not on
+//   its result, which the bootstrap grid decides (finding 3 under DWIDENOISE2_APC_PROFILE below).
 //
 //   Regularisation strength lambda: the discrepancy criterion (Morozov), realised as
 //   Chambolle's (2004) fixed-point iteration on lambda (their eq. 6) seeded from eq. 7,
 //   targeting a weighted residual energy of 2 * N * sigmabar^2 (their eq. 11; the factor 2
-//   is the two real+imaginary channels of complex data). This is cheap and, for a *smooth*
-//   background phase, its slight bias toward over-smoothing is the safe direction (it will
-//   not fit tissue contrast or noise into the phase).
+//   is the two real+imaginary channels of complex data), where the noise level entering that
+//   seed and that target is scaled by Params::discrepancy_scale. That factor is empirical and
+//   greater than one: the criterion as Pizzolato state it calibrates the *image* estimate u,
+//   whereas what is consumed here is arg(u), which is far more noise-sensitive than u itself
+//   wherever |u| is small, so a phase that does not chase the noise needs more smoothing than
+//   an image-calibrated estimate provides. See the discussion at Params::discrepancy_scale for
+//   the measurement that fixes its value.
 //
 // Noise-map convention (see dwidenoise2_dephase.md section 3).
 //   dwidenoise2's noise level map holds, per voxel, exactly Pizzolato's per-component
@@ -121,6 +126,13 @@ namespace MR::Denoise::Precondition {
 //   estimate_sigma_mad() below has always returned a per-component sigma: the first iteration, which
 //   has no map and self-calibrates, regularised more weakly than every iteration after it. Both are
 //   fixed, and testing/unit_tests/noise_convention.cpp asserts the two branches now agree.
+//
+//   That correction removed an accidental over-smoothing margin which, it turns out, this estimator
+//   needs: with it gone the phase measurably chased the noise (see Params::discrepancy_scale, whose
+//   calibration restores the margin deliberately and on a measured rather than an accidental basis).
+//   The two are independent -- the map is now on the convention this file has always documented,
+//   and the extra smoothing is now a stated parameter of the lambda selection rather than a units
+//   error -- but the second exists because correcting the first exposed the need for it.
 //
 // ---------------------------------------------------------------------------------------
 // Other prospective techniques for solving the background phase given a noise-map estimate.
@@ -193,40 +205,139 @@ namespace MR::Denoise::Precondition {
 //   non-profile build's timing therefore isolates the effect of cp_tol's early exit from the
 //   cost of instrumenting it, which is the point of comparing the two builds' run times.
 //
-//   Suggested experiment: build a DWIDENOISE2_APC_PROFILE binary and run it (dwidenoise2 or
-//   dwi2noise, default -demodulate apc, a representative multi-iteration schedule) over a
-//   modest real DWI dataset -- large enough to be representative of real anatomy/coil geometry
-//   (not the synthetic data used so far), small enough that the per-plane DEBUG log is
-//   tractable to inspect (e.g. a single low-resolution shell, or a cropped FOV). From the log:
-//     - Histogram cp_sweeps actually used (post-cp_tol) against the ..._warm budget on warm
-//       passes: a distribution clustered well under budget confirms head-room and motivates
-//       lowering cp_iter_warm/polish_iter_warm directly (cheaper long-term than relying on
-//       cp_tol's per-sweep check); a distribution hugging the budget means the current warm
-//       budget is already close to necessary and cp_tol is doing the real work.
-//     - Trend of cp_sweeps / lambda_iters across successive outer (noise-estimation)
-//       iterations, per plane: Pizzolato's own noise-map update converges over a handful of
-//       outer iterations, so later-iteration APC calls are expected to need *less* work than
-//       the second call already assumes with a single reduced budget -- if the log shows a
-//       further monotonic decline, a schedule-position-dependent budget (not just cold/warm)
-//       is worth adding.
-//     - Any planes where lambda_iters or cp_sweeps repeatedly hit their budget unconverged
-//       (rel change still above tol) flag cp_tol/the ..._warm budgets as too aggressive for
-//       that anatomy -- inspect before trusting a global reduction.
-//   Validate any resulting parameter change against denoised rank / noise_out on that same
-//   dataset (not phase MSE), consistent with the rest of this file's tuning guidance.
+//   What that experiment found, when finally run on real data (128x128 in-plane, 105 volumes,
+//   3T Prisma, MB4 / PF 0.75 / 64-channel head-neck coil; multi-iteration schedule; both the
+//   per-plane log and paired denoising runs). Three results, none of which the pre-run
+//   expectations above anticipated:
+//     1. The lambda fixed point is NOT reached, and at native resolution is not reachable.
+//        On the coarse cold pass it needs ~30 lambda updates (budget 10). On the native warm
+//        passes lambda dives well below its eq. 7 seed, turns, and then creeps back so slowly
+//        that 300 updates x 60 sweeps still has not converged. Chambolle-Pock needs sweeps of
+//        the order of the plane's width to propagate information across it, so at 128 wide a
+//        budget of tens of sweeps leaves the inner solve far from its own minimiser, and the
+//        outer fixed point inherits that lag. The budgets below therefore do NOT merely bound
+//        the cost of reaching a lambda the criterion selects: together with
+//        discrepancy_scale they *are* what selects it. Raising them raises the achieved
+//        smoothing; they cannot be treated as a free speed knob.
+//        What rescues this from being a calibration of an arbitrary stopping point is that the
+//        *result* settles even though lambda does not: quadrupling the budgets the file shipped
+//        with brings the noise-recovery figure R to within a few percent of its value under a
+//        further doubling, so there is a well-defined answer to calibrate discrepancy_scale
+//        against. That is what the current budgets buy, at roughly 5x the APC cost, and it is
+//        why they are what they are. Anyone reducing them for speed is not merely trading
+//        accuracy for time -- they are moving the operating point to one where the noise level
+//        depends on where the iteration was cut, and must re-derive discrepancy_scale there.
+//     2. cp_tol never fires. Over 99% of warm and ~80-93% of cold solves consume their entire
+//        sweep budget, and raising cp_tol from 1e-6 to 1e-4 changed neither the run time nor
+//        any output. It remains as a safety net for planes that do settle early, but it is not
+//        a lever, and loosening it as a speed measure would cut smoothing (see 1) rather than
+//        cut waste.
+//     3. The dominant lever on the result is not the ..._warm budget at all but the 2x
+//        coarse-grid cold bootstrap. Against a reference that solves cold at native resolution
+//        on the full budget at *every* pass, replacing only the first pass's grid (native cold
+//        bootstrap, then the ordinary reduced warm passes) reproduces it to 1.1% RMS, whereas
+//        the shipped coarse bootstrap differs by 4.8% -- and no warm budget from 6/3/6 up to
+//        the full 25/10/25 moves that figure by more than 0.2%. The warm start is sticky: at
+//        native resolution the solver stays near whatever it is seeded with. That is what makes
+//        the reduced warm budget nearly free, and it is also why the bootstrap grid, which sets
+//        the phase's spatial bandwidth once and for all, decides the outcome.
+//   Validating on rank alone proved insufficient, because the estimated signal rank is a
+//   function of the noise level the same run estimates: a configuration whose phase absorbs
+//   noise reports both a lower noise level and, through the Marchenko-Pastur threshold that
+//   level sets, a lower rank -- so over-fitting reads as an improvement on that metric. The
+//   discriminating measurement is the added-noise recovery test described at
+//   Params::discrepancy_scale, with rank retained only as a check that the extra smoothing has
+//   not cost demodulation quality (it has not: rank rises ~1% while the recovery deficit,
+//   14-23% of the added noise variance, is eliminated).
 // ---------------------------------------------------------------------------------------
 class AdaptivePhaseEstimator {
 public:
   struct Params {
+    // Scale factor applied to the noise level sigmabar *only* where it selects lambda: the
+    //   eq. 7 seed and the eq. 11 residual target. The per-voxel fidelity weights
+    //   w = sigmabar^2 / sigma^2 are untouched (and are scale-invariant regardless). The
+    //   targeted residual energy is therefore discrepancy_scale^2 times the noise energy the
+    //   discrepancy principle nominally prescribes, i.e. the phase is deliberately smoothed
+    //   beyond the point at which the residual accounts for the noise.
+    //
+    // Why greater than one. Pizzolato's criterion calibrates the *image* estimate u; APC
+    //   consumes arg(u), which is far more noise-sensitive than u wherever |u| is small, so
+    //   an image-calibrated u yields a phase that still follows the noise. Demodulating by
+    //   such a phase rotates each voxel's noise toward the real axis in a data-dependent way,
+    //   depleting the imaginary channel of the Casorati matrix and biasing the estimated noise
+    //   level DOWN -- the failure mode this factor exists to prevent.
+    //
+    // How the value was fixed (2026-08-05, real 3T data, 128x128x105 complex, two separate
+    //   slabs). Add complex Gaussian noise of known per-component sigma_add to the data, run
+    //   the noise level estimation on both the original and the noisier copy, and form
+    //     R = median over the brain of (sigma_noisy^2 - sigma_orig^2) / sigma_add^2 ,
+    //   the fraction of a *known* added noise variance the estimator still sees. Provided the
+    //   estimator's multiplicative bias is stable across the two noise levels -- which two
+    //   values of sigma_add an octave apart confirm here -- R IS that bias: R = 1 is unbiased,
+    //   R < 1 is noise absorbed by the phase estimate. Nothing about the phase is simulated;
+    //   the anatomy, the background phase and the native noise are all empirical, and only the
+    //   increment is synthetic (and white, matching the measured background autocorrelation of
+    //   these data: 0.06 along readout, 0.12 along phase-encode, at unit lag).
+    //
+    // The value cannot be chosen without simultaneously choosing the iteration budgets, because
+    //   the lambda fixed point is never reached (see the DWIDENOISE2_APC_PROFILE findings above)
+    //   and the two therefore jointly determine the achieved smoothing. Writing M for a common
+    //   multiplier on all six budgets below (M = 1 being the counts this file shipped with until
+    //   2026-08-05, i.e. 25/10/25 : 12/5/12), R over slab A at sigma_add = 149 behaves thus:
+    //         scale \ M      1       2       4       8
+    //           1.0        0.85            0.92
+    //           1.05                       1.00    0.96
+    //           1.1        0.90    0.90    1.02    1.04
+    //           1.8        1.00    1.09    1.12    1.14
+    //   Two things follow. First, at any fixed scale more iterations means more smoothing, so R
+    //   is a function of where the iteration is stopped. Second, R does settle: by M = 4 it moves
+    //   by only a few percent for a further doubling. A scale tuned at M = 1 is therefore tuned
+    //   to a truncation -- scale 1.8 reads R = 1.00 at M = 1 but drifts to 1.14, the rigid-phase
+    //   limit, once the iteration is allowed to run -- whereas a scale tuned at M = 4 is tuned to
+    //   the settled answer. The latter is what is configured here, at roughly 5x the APC cost
+    //   (2.5-4x end to end). Over slab A at sigma_add = 149, slab B at sigma_add = 149 and slab A
+    //   at sigma_add = 75, these values give R = 1.00 / 0.96 / 0.98, and doubling the budgets
+    //   again moves the first to 0.96.
+    //
+    // Anchors for reading R: -demodulate linear -- a three-degree-of-freedom phase that cannot
+    //   absorb noise at all -- gives R = 1.13-1.16 on these data, and the magnitude pathway,
+    //   which has no phase estimate whatsoever, gives 0.87, so the estimator carries a bias of
+    //   order 10% in either direction from sources unrelated to the phase. R = 1 is the target
+    //   but agreement to a few percent is the resolution of the measurement, not exactness.
+    //
+    // KNOWN LIMITATION, and the reason this is calibrated only for schedules that build a noise
+    //   map. It is calibrated where solve_plane() takes its sigmabar from the noise level map.
+    //   Where no map exists -- the first iteration of any schedule, and *every* solve under a
+    //   single-row schedule (-vst_method none, -fixed_rank, apriori) -- sigmabar instead comes
+    //   from estimate_sigma_mad(), and on data with strong parallel-imaging noise amplification
+    //   the two are not the same quantity at all. On one slice of the reference dataset the map
+    //   branch yields sqrt(mean(sigma^2)) = 130 while the MAD branch yields 35 at native
+    //   resolution and 24 on the coarse grid a cold solve actually uses: a factor of 3.7 to 5.5.
+    //   They differ because the map is heavily right-skewed by the g-factor (its *median* is 30,
+    //   which the MAD branch reproduces well) and the discrepancy criterion needs the RMS, not a
+    //   robust centre. A self-calibrated solve is therefore regularised several-fold too weakly,
+    //   which discrepancy_scale near unity cannot offset: under -vst_method none, APC returns a
+    //   noise level of ~132 against 165 for -demodulate hann, 181 for the magnitude pathway and
+    //   199 for -demodulate linear, at every scale and budget tried. Under the default
+    //   multi-iteration schedules this is masked -- the self-calibrated solve is only the
+    //   bootstrap pass, and the map-driven passes that follow correct it -- which is why the
+    //   figures above are clean there. Fixing it means making estimate_sigma_mad() estimate the
+    //   same functional the map branch does (an RMS over the plane, not a robust centre), after
+    //   which discrepancy_scale should be re-derived.
+    double discrepancy_scale = 1.05;
     // Chambolle-Pock primal-dual iterations run between successive lambda updates. The
     //   solver is warm-started across lambda updates, so this need not fully converge each
     //   time -- it interleaves image and lambda refinement (a standard, efficient scheme).
-    ssize_t cp_iter = 25;
+    // These three counts, and the ..._warm counts below, were quadrupled on 2026-08-05 (from
+    //   25/10/25 : 12/5/12) so that the estimate is read where the noise-recovery figure R has
+    //   settled rather than mid-transient; see discrepancy_scale, with which they must be
+    //   re-calibrated jointly if either is changed.
+    ssize_t cp_iter = 100;
     // Discrepancy-criterion (Morozov) fixed-point updates of lambda (their eqs. 6-7, 11).
-    ssize_t max_lambda_iter = 10;
+    ssize_t max_lambda_iter = 40;
     // Extra primal-dual iterations at the converged lambda, to settle the image before the
     //   phase (its argument) is extracted.
-    ssize_t polish_iter = 25;
+    ssize_t polish_iter = 100;
     // Reduced iteration budget for every warm-started solve: each pass over a volume after the one
     //   that first estimated it, and the native-resolution stage that immediately follows a
     //   COLD_COARSE_THEN_WARM volume's own coarse solve. A cold solve starts from the data on the
@@ -236,23 +347,37 @@ public:
     //   (no convergence test drives early exit besides lambda_tol), this reduced budget -- not the
     //   warm start alone -- is what shortens the later passes; the warm start is what keeps that
     //   reduction safe, which is precisely why it must not be granted to a volume that has no
-    //   previous estimate (see the VolumePlan discussion above). Tunable; validate on the denoised
-    //   rank, not on phase MSE.
-    ssize_t cp_iter_warm = 12;
-    ssize_t max_lambda_iter_warm = 5;
-    ssize_t polish_iter_warm = 12;
-    // Relative-change tolerance for early exit of the lambda fixed-point iteration.
+    //   previous estimate (see the VolumePlan discussion above).
+    //
+    // Measured behaviour of this reduction (real data, added-noise recovery test): against a
+    //   reference solving cold at native resolution on the full budget at every pass, the
+    //   reduced warm budget costs 1.1% RMS in the denoised series, and sweeping the ratio from
+    //   a quarter of these counts to parity with the cold budget moves that by under 0.2% --
+    //   the warm start really is sticky enough for the reduction to be nearly free. What these
+    //   counts are NOT is a free speed knob: since the lambda fixed point is never reached, they
+    //   co-determine the achieved regularisation with discrepancy_scale, and moving them moves
+    //   the noise-recovery figure R defined there. Validate any change on R first, with the
+    //   denoised rank as a secondary check; never on phase MSE.
+    ssize_t cp_iter_warm = 48;
+    ssize_t max_lambda_iter_warm = 20;
+    ssize_t polish_iter_warm = 48;
+    // Relative-change tolerance for early exit of the lambda fixed-point iteration. Rarely
+    //   reached in practice: the fixed point converges within budget only on the coarse cold
+    //   pass, and even there for a minority of planes.
     double lambda_tol = 1e-2;
     // Relative-change tolerance for early exit of the *inner* Chambolle-Pock sweeps
     //   themselves (both the lambda-loop sweeps and the polish sweeps), checked every sweep
     //   at negligible extra cost (the comparison piggybacks on the primal update's existing
     //   per-voxel pass, so it does not add another sweep over the plane). Deliberately tight
     //   by default: this is a safety net against the *fixed* per-call budget doing
-    //   inconsequential extra work once a warm-started plane has already re-settled -- not a
-    //   replacement for the ..._warm budgets, which remain the primary lever validated against
-    //   denoised rank. Set to 0 (or a negative value) to disable and always spend the full
-    //   budget, matching pre-2026-07 behaviour exactly. See DWIDENOISE2_APC_PROFILE below for
-    //   the instrumentation used to choose a data-driven value from empirical runs.
+    //   inconsequential extra work once a warm-started plane has already re-settled. Set to 0
+    //   (or a negative value) to disable and always spend the full budget, matching pre-2026-07
+    //   behaviour exactly.
+    //
+    // On real data it does not fire: over 99% of warm and ~80-93% of cold solves consume their
+    //   whole budget, and raising it to 1e-4 changed neither run time nor any output. Do not
+    //   reach for it as a speed measure -- since the budgets co-determine the regularisation
+    //   (see discrepancy_scale), a tolerance loose enough to cut sweeps would cut smoothing.
     double cp_tol = 1e-6;
     // The per-voxel fidelity weight w = sigmabar^2 / sigma^2 is clamped to
     //   [1/weight_clamp, weight_clamp] to bound its dynamic range (guards near-zero sigma in

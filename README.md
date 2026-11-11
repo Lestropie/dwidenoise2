@@ -216,7 +216,16 @@ Three approaches are available:
 -   `linear`: regression of a strictly *linear* phase term from each *k*-space.
 
 The default noise-adaptive `apc` approach follows
-[Pizzolato et al. (2020)](#pizzolato2020).
+[Pizzolato et al. (2020)](#pizzolato2020),
+with two deliberate departures:
+the regularised image is obtained by a fixed-budget primal-dual solver
+rather than by driving their diffusion PDE to steady state,
+and the discrepancy criterion that sets the regularisation strength
+targets a residual larger than the noise energy that criterion nominally prescribes.
+The latter is empirically calibrated:
+what is consumed here is the *argument* of the regularised image rather than the image itself,
+and an image-calibrated estimate yields a phase that still follows the noise,
+which biases the estimated noise level downwards.
 The *linear* phase demodulation approach is similar to that shown in
 [Cordero-Grande et al. (2019)](#cordero-grande2019).
 Inclusion of *non-linear* phase demodulation was motivated by description in

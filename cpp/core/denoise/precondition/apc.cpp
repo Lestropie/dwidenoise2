@@ -30,8 +30,6 @@
 #include "mrtrix.h"
 #include "transform.h"
 
-#define DWIDENOISE2_APC_PROFILE
-
 namespace MR::Denoise::Precondition {
 
 namespace {
@@ -249,7 +247,7 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
 
   // One primal-dual sweep at fidelity weight "lambda". Warm-starts from the current state, and
   //   stops early once the relative per-sweep change in u falls below params.cp_tol (data-driven
-  //   early exit; see the DWIDENOISE2_APC_PROFILE discussion in phase_estimator.h). That
+  //   early exit; see the DWIDENOISE2_APC_PROFILE discussion in apc.h). That
   //   sum_diff2/sum_old2 comparison is the termination criterion itself -- it stays unconditional
   //   -- and piggybacks on the primal update's existing per-voxel pass, so it adds no extra sweep
   //   over the plane. The *sweep count itself* (returned only under DWIDENOISE2_APC_PROFILE) is
@@ -339,10 +337,16 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
 
   // --- Discrepancy-criterion (Morozov) fixed point on lambda ----------------------------
   // Chambolle (2004) update, eq. 6, seeded by eq. 7, targeting a weighted residual energy of
-  //   Rr^2 + Ri^2 = 2 * ndomain * sigmabar^2 (spatially-varying form, their eq. 11). Image
+  //   Rr^2 + Ri^2 = 2 * ndomain * sigmabar_lambda^2 (spatially-varying form, their eq. 11). Image
   //   and lambda are refined jointly (the solver is warm-started across updates).
-  double lambda = 2.1237 / sigmabar + 0.0547 / sigmabar2; // eq. 7
-  const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar;
+  // The noise level driving the seed and the target is scaled by params.discrepancy_scale, so the
+  //   residual is targeted above the noise energy the criterion nominally prescribes; the fidelity
+  //   weights w computed above deliberately do not see that factor (they are scale-invariant, and
+  //   it is the phase, not the image, that the extra smoothing is for). See apc.h.
+  const double sigmabar_lambda = params.discrepancy_scale * sigmabar;
+  const double sigmabar2_lambda = Math::pow2(sigmabar_lambda);
+  double lambda = 2.1237 / sigmabar_lambda + 0.0547 / sigmabar2_lambda; // eq. 7
+  const double target_scale = 2.0 * std::sqrt(double(ndomain)) * sigmabar_lambda;
   // Bookkeeping for the DWIDENOISE2_APC_PROFILE DEBUG() call below only -- entirely compiled out
   //   otherwise, so a non-profile build's timing reflects only run_cp's cp_tol early exit, not
   //   the cost of reporting it.
