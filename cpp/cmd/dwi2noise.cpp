@@ -269,6 +269,7 @@ template <typename T>
 void run(Header &dwi,
          const Demodulation &demodulation,
          const demean_type demean,
+         const Eigen::MatrixXd &grad,
          Image<float> &user_vst_image,
          const decomp_type decomposition,
          std::shared_ptr<Estimator::Base> estimator,
@@ -283,7 +284,7 @@ void run(Header &dwi,
   //   the -noise_dof and -vst_method options (Gaussian for complex data).
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
-  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
+  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model, grad);
   // Cold adaptive-phase-correction solves within the noise-estimation iterations below are
   //   bootstraps: the final iteration re-estimates at native resolution the phase of every volume
   //   it uses, so they may be solved on a 2x-downsampled grid. Cleared before that final iteration
@@ -304,7 +305,8 @@ void run(Header &dwi,
     //   map; the preconditioned data then hold only the m' subset volumes.
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
     const ssize_t mprime = preconditioner.header().size(3);
-    const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
+    const ssize_t num_partitions =
+        Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
     if (num_partitions > 1 && !estimator->supports_partitioning())
       throw Exception("The selected noise level estimator does not support volume partitioning "
                       "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
@@ -365,7 +367,8 @@ void run(Header &dwi,
   //   warm native refinement, rather than stopping at the coarse bootstrap grid.
   preconditioner.set_apc_refine_later(false);
   const ssize_t mprime_final = preconditioner.header().size(3);
-  const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
+  const ssize_t num_partitions =
+      Iterative::resolve_num_partitions(iterations.back(), mprime_final, "The final schedule row");
   if (num_partitions > 1 && !estimator->supports_partitioning())
     throw Exception("The selected noise level estimator does not support volume partitioning "
                     "(final schedule row requests " + str(num_partitions) +
@@ -373,8 +376,15 @@ void run(Header &dwi,
   preconditioner.set_partitioning_active(num_partitions > 1);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
-  input_preconditioned =
-      Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
+  // -preconditioned exports the preconditioned data that are the input to PCA. The final
+  //   iteration's are the ones that correspond to the exported noise map, so those are what is
+  //   written (mirroring dwidenoise2 -preconditioned_input).
+  auto opt_precond = get_options("preconditioned");
+  if (!opt_precond.empty())
+    input_preconditioned = Image<T>::create(opt_precond[0][0], preconditioner.header());
+  else
+    input_preconditioned =
+        Image<T>::scratch(preconditioner.header(), "Preconditioned version of \"" + dwi.name() + "\"");
   std::vector<ssize_t> volume_group;
   std::shared_ptr<const Partitioning> partitioning; // null ⇒ per-kernel in Estimate
   if (num_partitions > 1)
@@ -450,8 +460,29 @@ void run() {
     throw Exception("input image must be non-singleton across non-spatial dimensions");
   bool complex = dwi.datatype().is_complex();
 
+  // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
+  //   that header carries the transform-realignment metadata that -fslgrad import needs in order
+  //   to rotate the bvecs. Headers derived downstream (e.g. the preconditioner's, which is built
+  //   from an Image rather than a Header) lose it, and re-deriving the table from one of those
+  //   would assert in a debug build and silently misrotate the bvecs in a release build.
+  // Resolving it here also means a table supplied on the command line is validated: MRtrix3
+  //   already diagnoses a wrong row count, a non-4-column table, -grad together with -fslgrad, and
+  //   a bvecs/bvals length mismatch, but until now every one of those diagnostics was swallowed by
+  //   the shell-availability probe in select_demean(), and the command silently fell back to
+  //   another demeaning mode. An absent or malformed table *within the image header* remains a
+  //   legitimate reason to fall back; a table the user explicitly supplied is a hard error.
+  Eigen::MatrixXd grad;
+  const bool grad_from_commandline = !get_options("grad").empty() || !get_options("fslgrad").empty();
+  try {
+    grad = DWI::get_DW_scheme(dwi);
+  } catch (Exception &e) {
+    if (grad_from_commandline)
+      throw Exception(e, "Invalid diffusion gradient table provided on the command line");
+    grad.resize(0, 0);
+  }
+
   const Demodulation demodulation = select_demodulation(dwi);
-  const demean_type demean = select_demean(dwi);
+  const demean_type demean = select_demean(dwi, grad);
   const decomp_type decomposition = get_option_choice("decomposition", default_decomposition);
 
   // Resolve the requested variance-stabilising transform up-front:
@@ -487,7 +518,8 @@ void run() {
   //   coupling between iterations and so reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   if (Schedule::requested()) {
-    iterations = Schedule::load("dwi2noise");
+    // dwi2noise has no -rankpermm_in option and no prior density on its first row.
+    iterations = Schedule::load("dwi2noise", false);
     // Without a variance-stabilising transform there is no coupling between iterations, so the
     //   per-iteration refinement of a multi-row schedule cannot propagate and is wasted
     //   computation; a single-row schedule is, however, perfectly meaningful under
@@ -513,7 +545,7 @@ void run() {
     config.update_noise = true;
     iterations.push_back(config);
   } else {
-    iterations = Schedule::load_default("dwi2noise");
+    iterations = Schedule::load_default("dwi2noise", false);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
   std::shared_ptr<SpatialSubsample> final_subsample =
@@ -562,6 +594,12 @@ void run() {
       final_exports.set_max_dist();
   }
 
+  // -export_grad_mrtrix / -export_grad_fsl are declared by DWI::GradExportOptions(); this is the
+  //   function that consumes them. It reads the "dw_scheme" keyval, which the gradient resolution
+  //   above writes back into the header whenever -grad / -fslgrad was given, and which otherwise
+  //   is the image's own; with neither, it reports that no gradient information is available.
+  DWI::export_grad_commandline(dwi);
+
   int prec = (get_option_choice("datatype", dtype_t::FLOAT32) == dtype_t::FLOAT64) ? 1 : 0;
   if (complex)
     prec += 2; // support complex input data
@@ -569,20 +607,20 @@ void run() {
   case 0:
     assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
-    run<float>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<float>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 1:
     assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
-    run<double>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<double>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<cfloat>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(dwi, demodulation, demean, user_vst_image, decomposition, estimator, iterations, final_exports);
+    run<cdouble>(dwi, demodulation, demean, grad, user_vst_image, decomposition, estimator, iterations, final_exports);
     break;
   }
 }

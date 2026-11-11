@@ -94,6 +94,12 @@ public:
 };
 Demodulation select_demodulation(const Header &);
 
-demean_type select_demean(const Header &);
+// Select the demeaning mode from -demean and the data.
+// "grad" is the DW gradient table already resolved by the calling command from the header it
+//   opened (empty if the image has none and none was supplied). It must be passed in rather than
+//   re-derived here: only the opened Header carries the transform-realignment metadata that
+//   -fslgrad import needs, and a table supplied on the command line has already been validated by
+//   the caller, so a failure to obtain one here would hide a user error.
+demean_type select_demean(const Header &, const Eigen::MatrixXd &grad);
 
 } // namespace MR::Denoise::Precondition

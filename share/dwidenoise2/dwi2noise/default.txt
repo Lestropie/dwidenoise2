@@ -40,19 +40,24 @@
 #                          on large series. The patch voxel count is sized from the
 #                          smallest partition so each partition keeps the target Casorati
 #                          aspect ratio. Default: 1 (no partitioning). Mutually exclusive
-#                          with max_partition_size.
+#                          with max_partition_size. The partition count is capped at half the
+#                          number of volumes available to the iteration (each partition must hold
+#                          at least two volumes); a larger request is reduced, with a warning.
 #  - max_partition_size  : an alternative to "partitions": the maximum number of volumes
 #                          per partition, from which the partition count is derived as
 #                          ceil(num_volumes / max_partition_size) (after any temporal
 #                          sub-sampling). "none" disables it. Default: none. Mutually
-#                          exclusive with partitions.
+#                          exclusive with partitions. The derived count is subject to the same
+#                          cap as "partitions" (at least two volumes per partition).
 #  - kernel               : the PCA patch shape and size for this iteration (there are no
 #                            command-line kernel options). One of:
 #                            "aspect=<ratio>" (spherical kernel of ~ratio*m voxels; rank-naive; the
-#                            first iteration must use this); "rmse=<tolerance>" (spherical kernel
-#                            grown until the estimator's predicted relative noise-level RMSE meets
-#                            <tolerance>, e.g. 0.02, requiring a signal-rank density from a prior
-#                            iteration); "radius=<mm>" (fixed-radius sphere, replacing -radius);
+#                            first iteration must use a rank-naive kernel such as this, dwi2noise
+#                            having no means of supplying a prior rank density); "rmse=<tolerance>"
+#                            (spherical kernel grown until the estimator's predicted relative
+#                            noise-level RMSE meets <tolerance>, e.g. 0.02, requiring a signal-rank
+#                            density from a prior iteration); "radius=<mm>" (fixed-radius sphere,
+#                            replacing -radius);
 #                            "voxels=<count>" (fixed absolute voxel count, replacing -minvoxels); or
 #                            the cuboid kernel (replacing -shape cuboid / -extent) as
 #                            "cuboid=<x>,<y>,<z>" (per-axis), "cuboid=<n>" (isotropic), "cuboid=<ratio>x"
@@ -60,7 +65,8 @@
 #                            (= "cuboid=2x").
 #                            Default (column omitted): "aspect=2.0". (Replaces the former
 #                            kernel_multiplier column.) The "rank" and "rank_fixed" kernels are for
-#                            dwidenoise2 reconstruction only and are not used by dwi2noise.
+#                            dwidenoise2 reconstruction only and are not used by dwi2noise; they are
+#                            rejected outright in a dwi2noise schedule, on any row.
 #  - smooth_noise        : whether to smooth the estimated noise map before it is
 #                          passed to the next iteration ("true" or "false").
 #                          Default: false.

@@ -40,6 +40,13 @@ public:
 
   virtual ~SphereBase() override {}
 
+  // Radius beyond which a spherical searchlight cannot gain any voxel: the greatest distance
+  //   from any processed position to any voxel within the image field of view. Every spherical
+  //   kernel discards offsets that fall outside the FoV, so capping the requested radius here
+  //   changes no result -- it only bounds the size of the offset table and the time taken to
+  //   build it. Public so that a kernel can report a capped request to the user.
+  static default_type fov_bounding_radius(const Header &voxel_grid);
+
 protected:
   class Shared {
   public:

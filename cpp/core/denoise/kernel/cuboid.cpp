@@ -29,6 +29,15 @@ Cuboid::Cuboid(const Header &header,
       //   with no overcomplete local PCA (aggregator == EXCLUSIVE)
       centre_index(subsample_factors == std::array<ssize_t, 3>({1, 1, 1}) ? (size / 2) : -1) {
   for (ssize_t axis = 0; axis != 3; ++axis) {
+    // shape_description promises that the entire volume of a cuboid kernel resides within the
+    //   image FoV; an extent larger than the image cannot satisfy that for any offset, and
+    //   wrapindex() below would reflect out of the image and trip its own assertion. Validate
+    //   here so that the invariant holds for every caller, not only the explicit-extent branch
+    //   of the kernel factory.
+    if (extent[axis] > header.size(axis))
+      throw Exception("Cuboid kernel extent along axis " + str(axis) + " (" + str(extent[axis]) +
+                      " voxels) exceeds the image dimension (" + str(header.size(axis)) +
+                      " voxels); the entire kernel must reside within the image field of view");
     if (subsample_factors[axis] % 2) {
       if (!(extent[axis] % 2))
         throw Exception("For no subsampling / subsampling by an odd number, "
@@ -73,9 +82,9 @@ Data Cuboid::operator()(const Voxel::index_type &pos) const {
         assert(!is_out_of_bounds(H, voxel, 0, 3));
         assign_pos_of(voxel).to(mask);
         if (mask.value()) {
-          const default_type sq_distance = Math::pow2(pos[0] + halfvoxel_offsets[0] - voxel[0]) * H.spacing(0) + //
-                                           Math::pow2(pos[1] + halfvoxel_offsets[1] - voxel[1]) * H.spacing(1) + //
-                                           Math::pow2(pos[2] + halfvoxel_offsets[2] - voxel[2]) * H.spacing(2);  //
+          const default_type sq_distance = Math::pow2((pos[0] + halfvoxel_offsets[0] - voxel[0]) * H.spacing(0)) + //
+                                           Math::pow2((pos[1] + halfvoxel_offsets[1] - voxel[1]) * H.spacing(1)) + //
+                                           Math::pow2((pos[2] + halfvoxel_offsets[2] - voxel[2]) * H.spacing(2));  //
           result.voxels.push_back(Voxel(voxel, sq_distance));
           result.max_distance = std::max(result.max_distance, sq_distance);
         }
