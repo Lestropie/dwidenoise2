@@ -987,12 +987,23 @@ void run() {
     //   the schedule that is used in its place, name the one that is, so that it can be inspected
     //   (and copied as the starting point for a bespoke one) rather than merely announcing that a
     //   single pass is performed.
+    //   Two such schedules are bundled, differing only in spatial sub-sampling: -aggregator
+    //   exclusive requires the final (here, only) row to have none.
+    const bool exclusive = aggregator == aggregator_type::EXCLUSIVE;
+    const std::string schedule_name = exclusive ? "novst_exclusive" : "novst";
     WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively refining "
          "the noise level estimate cannot influence subsequent iterations and would be wasted "
          "computation. The bundled \"default\" schedule is therefore NOT used; the bundled "
-         "single-row \"novst\" schedule is used instead. Use -schedule to choose a different "
-         "(single-row) schedule explicitly");
-    iterations = Schedule::load_bundled("dwidenoise2", "novst", rank_density_supplied);
+         "single-row \"" + schedule_name + "\" schedule is used instead. Use -schedule to choose a "
+         "different (single-row) schedule explicitly");
+    INFO("-vst_method none: selected bundled schedule \"" + schedule_name + "\" " +
+         (exclusive ? "(no spatial sub-sampling) as -aggregator exclusive requires the final iteration "
+                      "to reconstruct at every voxel"
+                    : "(default spatial sub-sampling) as the requested aggregator "
+                      "permits a sub-sampled reconstruction grid") +
+         "; the alternative bundled schedule \"" + (exclusive ? "novst" : "novst_exclusive") +
+         "\" applies to the other choice of aggregation");
+    iterations = Schedule::load_bundled("dwidenoise2", schedule_name, rank_density_supplied);
   } else {
     iterations = Schedule::load_default("dwidenoise2", rank_density_supplied);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
