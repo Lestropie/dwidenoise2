@@ -17,13 +17,12 @@
 
 #pragma once
 
-#include <cassert>
 #include <limits>
 #include <vector>
 
 #include "denoise/denoise.h"
 #include "denoise/estimator/result.h"
-#include "exception.h"
+#include "denoise/spectrum.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -33,35 +32,20 @@ public:
   Base(const Base &) = delete;
   virtual ~Base() = default;
   virtual void update_vst_image(Image<float> &) {}
-  // Single-PCA (non-partitioned) noise level estimation.
-  // m = Number of image volumes;
-  // n = Number of voxels in patch;
-  // rp = Preconditioner rank = number of means regressed from the data;
+  // Single-PCA (non-partitioned) noise level estimation from the eigenspectrum of the whole
+  //   patch, ie. the single partition spanning every volume of the series.
   // pos = realspace position of the centre of the patch
-  virtual Result operator()(const Eigen::VectorBlock<eigenvalues_type> eigenvalues, //
-                            const ssize_t m,                                        //
-                            const ssize_t n,                                        //
-                            const ssize_t rp,                                       //
-                            const Eigen::Vector3d &pos) const = 0;                  //
+  virtual Result operator()(const Spectrum &spectrum,              //
+                            const Eigen::Vector3d &pos) const = 0; //
 
-  // Partitioned noise level estimation: the patch is split into P partitions, with partition p
-  //   contributing an independent ascending eigenspectrum eigenvalues[p] (length min(m[p],n[p]))
-  //   from a decomposition of dimensions (m[p], n[p]) and preconditioner rank rp[p]. The pooled
-  //   spectrum yields a single noise level (Result::sigma2) shared by the patch, with a
-  //   per-partition signal/noise cutoff (Result::cutoff_p_partition). Estimators that support
-  //   partitioning override this; the default rejects it (callers must gate on
-  //   supports_partitioning()).
-  virtual Result operator()(const std::vector<eigenvalues_type> &eigenvalues, //
-                            const std::vector<ssize_t> &m,                     //
-                            const std::vector<ssize_t> &n,                     //
-                            const std::vector<ssize_t> &rp,                    //
-                            const Eigen::Vector3d &pos) const {                //
-    assert(false);
-    throw Exception("Selected noise level estimator does not support volume partitioning");
-  }
-
-  // Whether operator() for multiple partitions is implemented for this estimator.
-  virtual bool supports_partitioning() const { return false; }
+  // Partitioned noise level estimation: the patch is split into P partitions, each of which
+  //   contributes the independent eigenspectrum of its own decomposition (see Spectrum). The
+  //   pooled spectrum yields a single noise level (Result::sigma2) shared by the patch, with a
+  //   per-partition signal/noise cutoff (Result::cutoff_p_partition). Every estimator must
+  //   implement this: partitioning is a property of the schedule, not of the estimator, and
+  //   callers are free to combine any -estimator with any partition count.
+  virtual Result operator()(const std::vector<Spectrum> &spectra,  //
+                            const Eigen::Vector3d &pos) const = 0; //
 
   // Predicted relative RMSE of this estimator's noise level estimate for a Casorati matrix of m
   //   volumes, n voxels and signal rank r (sigma = 1). Used by the RMSE-tolerance kernel to decide

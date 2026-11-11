@@ -30,15 +30,19 @@
 #include "denoise/denoise.h"
 #include "denoise/estimate.h"
 #include "denoise/estimator/estimator.h"
+#include "denoise/estimator/imposed/constant.h"
+#include "denoise/estimator/imposed/import.h"
+#include "denoise/estimator/imposed/imposed.h"
 #include "denoise/estimator/imposed/unity.h"
 #include "denoise/exports.h"
 #include "denoise/iterative.h"
 #include "denoise/kernel/cuboid.h"
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/kernel.h"
-#include "denoise/kernel/sphere_radius.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/kernel/sphere_radius.h"
 #include "denoise/mask.h"
+#include "denoise/metadata.h"
 #include "denoise/partition.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/preconditioner.h"
@@ -188,7 +192,24 @@ void usage() {
             " Passing both maps is required for equivalence:"
             " -noise_in fixes the variance-stabilising transform and noise level,"
             " while -rankpermm_in reproduces the rank-adaptive kernel"
-            " (omitting it falls back to a fixed aspect-ratio kernel).");
+            " (omitting it falls back to a fixed aspect-ratio kernel).")
+
+  + Example("Export the effective degrees of freedom of the denoised data for downstream modelling",
+            "dwidenoise2 DWI.mif out.mif -trace_output trace.mif -dof_output dof.mif",
+            "Denoising confines the residual noise to a subspace of the volume space, so where a"
+            " statistical model with P parameters is subsequently fit to out.mif, the image volume count"
+            " overstates the number of independent observations and should not be used to set that"
+            " model's degrees of freedom. The two exported maps play distinct roles, and are not"
+            " interchangeable: divide a residual sum of squares by (trace.mif - P) to obtain an"
+            " unbiased noise level estimate, but use (dof.mif - P) as the degrees of freedom of the"
+            " reference distribution of any t- or F-statistic."
+            " Both maps are spatially varying, so a voxel-wise model fit should read the value at its"
+            " own voxel."
+            " With -filter truncate or -filter optthresh the two are identical and equal to the output"
+            " rank; they differ only under the default optimal shrinkage, where the eigenvector weights"
+            " are fractional. Note that both treat the PCA basis as given rather than as having been"
+            " estimated from the data, and so understate the true degrees of freedom; see the"
+            " description of -dof_output.");
 
   COPYRIGHT =
   "Copyright (c) 2026 Robert E. Smith <robert.smith@florey.edu.au>;"
@@ -321,7 +342,9 @@ void usage() {
            " independent of the -demean grouping;"
            " 'group_mean' reproduces the prior behaviour, linearising the inverse about the"
            " per-group demeaning mean"
-           " (no effect with -preserve_noise_bias or for complex input data)")
+           " (no effect with -preserve_noise_bias, for complex input data,"
+           " or with -vst_method none/linear;"
+           " with -demean none there is no per-group mean and the anchor degenerates to a global one)")
     + Argument("mode").type_choice<debias_anchor_t>()
 
   + OptionGroup("Options for exporting additional data regarding PCA behaviour")
@@ -341,8 +364,35 @@ void usage() {
   + Option("rank_input",
            "The estimated rank of the input data for each denoising patch")
     + Argument("image").type_image_out()
-  + Option("rank_output",
-           "An estimated rank for the output image data, accounting for multi-patch aggregation")
+  + Option("trace_output",
+           "The effective number of degrees of freedom retained per voxel in the output image data,"
+           " accounting for multi-patch aggregation:"
+           " the trace of the composite reconstruction filter (the sum of its eigenvector weights)."
+           " For a hard filter (-filter truncate or -filter optthresh) every weight is 0 or 1 and this"
+           " is exactly the rank of the output data;"
+           " under the default optimal shrinkage the weights are fractional and the trace is smaller"
+           " than the number of surviving components."
+           " This is the appropriate divisor for converting a residual sum of squares computed on the"
+           " denoised data into an unbiased noise level estimate (see also -dof_output)")
+    + Argument("image").type_image_out()
+  + Option("dof_output",
+           "The (approximate) degrees of freedom of the residual energy of a statistical model"
+           " subsequently fit to the output image data,"
+           " for use in place of the image volume count when setting that model's degrees of freedom."
+           " This is the chi-squared-matching (Satterthwaite) measure"
+           " (sum of squared filter weights, squared, divided by the sum of their fourth powers),"
+           " which is the quantity governing the reference distribution of a t- or F-statistic;"
+           " it is identical to -trace_output for a hard filter."
+           " Under optimal shrinkage the two differ, in a direction set by the shape of the weight"
+           " spectrum: many components of similar sub-unity weight drive it above the trace,"
+           " whereas a few near-unity weights accompanied by many small ones drive it below."
+           " Approximate in two respects:"
+           " the higher moments from which it is formed are averaged across the patches contributing"
+           " to each voxel, which neglects inter-patch cross terms"
+           " (it is exact for -aggregator exclusive only);"
+           " and, as for -trace_output, it treats the PCA basis as fixed rather than as having been"
+           " estimated from the same data, which understates the true degrees of freedom by a factor"
+           " of roughly 1 + (num_volumes - rank) / num_patch_voxels")
     + Argument("image").type_image_out()
   + Option("rankpermm_out",
            "Export the per-voxel signal-rank density (signal rank per mm of kernel radius) that was"
@@ -382,9 +432,9 @@ void usage() {
   + Option("sum_aggregation",
            "The sum of aggregation weights of those patches contributing to each output voxel")
     + Argument("image").type_image_out()
-  + Option("sum_optshrink",
-           "the sum of eigenvector weights computed for the denoising patch centred at each voxel "
-           "as a result of performing optimal shrinkage")
+  + Option("trace_patch",
+           "the sum of eigenvector weights computed for the denoising patch centred at each voxel; "
+           "the unaggregated, per-patch counterpart to -trace_output, on the sub-sampled grid")
     + Argument("image").type_image_out()
 
   + DWI::GradImportOptions();
@@ -444,11 +494,12 @@ private:
   Image<T> output_preconditioned;
 };
 
-// Divide the per-voxel output rank by its accumulated aggregation weight (0 where the weight is 0).
-struct RankOutputAggregationFunctor {
-  void operator()(Image<float> &rank_output, Image<float> &sum_aggregation) {
+// Divide an accumulated per-voxel filter-moment map by its accumulated aggregation weight
+//   (0 where the weight is 0).
+struct MomentAggregationFunctor {
+  void operator()(Image<float> &moment, Image<float> &sum_aggregation) {
     const float sum = sum_aggregation.value();
-    rank_output.value() = sum == 0.0F ? 0.0F : (rank_output.value() / sum);
+    moment.value() = sum == 0.0F ? 0.0F : (moment.value() / sum);
   }
 };
 
@@ -468,17 +519,37 @@ private:
   uint16_t max_rank;
 };
 
-// Add the preconditioner's demean null-rank back into the reported output rank (clamped).
-class RankOutputAddbackFunctor {
+// Add the preconditioner's demean null-rank back into a reported output filter moment (clamped).
+//   The regressed group-mean directions pass through reconstruction with unit weight, so they
+//   contribute the group count identically to every spectral moment.
+class MomentAddbackFunctor {
 public:
-  RankOutputAddbackFunctor(const float null_rank, const float max_rank)
-      : null_rank(null_rank), max_rank(max_rank) {}
-  void operator()(Image<float> &rank_output) {
-    rank_output.value() = std::min<float>(float(rank_output.value()) + null_rank, max_rank);
+  MomentAddbackFunctor(const float null_rank, const float max_rank) : null_rank(null_rank), max_rank(max_rank) {}
+  void operator()(Image<float> &moment) {
+    moment.value() = std::min<float>(float(moment.value()) + null_rank, max_rank);
   }
 
 private:
   float null_rank;
+  float max_rank;
+};
+
+// Combine the aggregated second and fourth spectral moments of the composite filter into the
+//   chi-squared-matching (Satterthwaite) degrees of freedom of the residual energy,
+//   nu = (sum_i w_i^2)^2 / (sum_i w_i^4). By Cauchy-Schwarz this cannot exceed the number of
+//   contributing components, hence never exceeds the volume count; it is clamped regardless against
+//   accumulated floating-point error. A vanishing fourth moment means no component survived at this
+//   voxel, for which the degrees of freedom are zero.
+class DofOutputFunctor {
+public:
+  explicit DofOutputFunctor(const float max_rank) : max_rank(max_rank) {}
+  void operator()(Image<float> &dof_output, Image<float> &trace2, Image<float> &trace4) {
+    const float t2 = trace2.value();
+    const float t4 = trace4.value();
+    dof_output.value() = t4 > 0.0F ? std::min<float>(Math::pow2(t2) / t4, max_rank) : 0.0F;
+  }
+
+private:
   float max_rank;
 };
 
@@ -520,6 +591,7 @@ template <typename T>
 void run(Header &dwi,
          const Demodulation &demodulation,
          const demean_type demean,
+         const Eigen::MatrixXd &grad,
          Image<float> &user_vst_image,
          const std::vector<Iterative::Iteration> &iterations,
          const decomp_type decomposition,
@@ -540,7 +612,7 @@ void run(Header &dwi,
   //   the -noise_dof and -vst_method options (Gaussian for complex data).
   std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
 
-  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model);
+  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model, grad);
   // Cold adaptive-phase-correction solves within the noise-estimation iterations below are
   //   bootstraps: the final (reconstruction) pass re-estimates every volume's phase at native
   //   resolution, so they may be solved on a 2x-downsampled grid. Cleared before that final pass
@@ -571,16 +643,15 @@ void run(Header &dwi,
     //   level map. The preconditioned data then hold only the m' subset volumes, so the
     //   downstream Estimate / kernel sizing see m' volumes without any knowledge of sub-sampling.
     preconditioner.set_temporal_subsample(iterations[iteration].temporal_subsample, rng, temporal_min_per_group);
-    // Resolve the partition count for this iteration from the (post-subsampling) volume count m'.
-    //   When partitioning, the preconditioner performs no demeaning (done per partition within
-    //   Estimate); set this before update_parameters so it skips the now-unused mean pass.
+    // Resolve the partition count for this iteration from the (post-subsampling) volume count m',
+    //   and from it the site of the demeaning: when partitioning, it is performed per partition
+    //   within Estimate rather than by the preconditioner. Impose the site before
+    //   update_parameters() so the preconditioner skips the then-unused mean pass.
     const ssize_t mprime = preconditioner.header().size(3);
-    const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations[iteration], mprime);
-    if (num_partitions > 1 && !estimator->supports_partitioning())
-      throw Exception("The selected noise level estimator does not support volume partitioning "
-                      "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
-                      " partitions); choose a different -estimator or remove partitioning from the schedule");
-    preconditioner.set_partitioning_active(num_partitions > 1);
+    const ssize_t num_partitions =
+        Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
+    const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+    preconditioner.set_demean_site(demean_site);
     preconditioner.update_parameters(vst_image, input);
     estimator->update_vst_image(vst_image);
     input_preconditioned =
@@ -615,7 +686,8 @@ void run(Header &dwi,
                         iteration_exports,
                         num_partitions,
                         partitioning,
-                        volume_group);
+                        volume_group,
+                        demean_site);
     // Propagate result to next iteration
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
@@ -639,11 +711,15 @@ void run(Header &dwi,
   //   the coarse bootstrap grid as the iterations above do.
   preconditioner.set_apc_refine_later(false);
   // Resolve partitioning for the reconstruction pass (sized from the full volume count, as the
-  //   final row's temporal_subsample is validated to be 1.0). Set before update_parameters
-  //   so the (unused) preconditioner-side demeaning pass is skipped when partitioning.
+  //   final row's temporal_subsample is validated to be 1.0), and with it the demeaning site.
+  //   Imposed before update_parameters so the (then-unused) preconditioner-side demeaning pass is
+  //   skipped when partitioning. This site governs the whole reconstruction pass: the forward
+  //   transform below, Recon, and the inverse transform that reverses it.
   const ssize_t mprime_final = preconditioner.header().size(3);
-  const ssize_t num_partitions = Iterative::resolve_num_partitions(iterations.back(), mprime_final);
-  preconditioner.set_partitioning_active(num_partitions > 1);
+  const ssize_t num_partitions =
+      Iterative::resolve_num_partitions(iterations.back(), mprime_final, "The final schedule row");
+  const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
+  preconditioner.set_demean_site(demean_site);
   preconditioner.update_parameters(vst_image, input);
   estimator->update_vst_image(vst_image);
 
@@ -688,19 +764,20 @@ void run(Header &dwi,
                                     rank_per_mm,
                                     Denoise::num_volumes(input),
                                     num_partitions,
-                                    final_prmse);
+                                    final_prmse,
+                                    preconditioner.partition_null_rank());
   kernel->set_mask(mask);
 
   // Unless the final schedule row is configured to (re)estimate the noise level, assume the
   //   variance-stabilising transform yields a noise level of 1.0 everywhere (dummy Unity
   //   estimator), carrying through the estimate refined by the preceding iterations.
-  if (!iterations.back().update_noise.value())
+  // An estimator that already imposes a noise level is left alone: substituting Unity would
+  //   discard it. This is what preserves Estimator::Import for -noise_in with -vst_method none,
+  //   where the data are never rescaled to unit noise level and Unity would be wrong.
+  if (!iterations.back().update_noise.value() &&
+      dynamic_cast<const Estimator::ImposedSigma *>(estimator.get()) == nullptr)
     estimator.reset(new Estimator::Unity());
 
-  if (num_partitions > 1 && !estimator->supports_partitioning())
-    throw Exception("The selected noise level estimator does not support volume partitioning "
-                    "(final schedule row requests " + str(num_partitions) +
-                    " partitions); choose a different -estimator or remove partitioning from the schedule");
   if (num_partitions > 1 && debias_anchor == debias_anchor_t::GROUP_MEAN)
     throw Exception("The GROUP_MEAN debias anchor is incompatible with volume partitioning; "
                     "use -debias_anchor sample (the default) when partitioning is enabled");
@@ -722,9 +799,10 @@ void run(Header &dwi,
                 aggregator,
                 aggregator_fwhm,
                 final_exports,
-                preconditioner.null_rank(),
+                preconditioner.partition_null_rank(),
                 partitioning,
                 volume_group,
+                demean_site,
                 num_partitions);
 
   Header H_out (dwi);
@@ -763,9 +841,15 @@ void run(Header &dwi,
   if (aggregator != aggregator_type::EXCLUSIVE) {
     ThreadedLoop(final_exports.sum_aggregation)
         .run(AggregationRescaleFunctor<T>(output_preconditioned), final_exports.sum_aggregation);
-    if (final_exports.rank_output.valid()) {
+    if (final_exports.trace_output.valid()) {
       ThreadedLoop(final_exports.sum_aggregation)
-          .run(RankOutputAggregationFunctor(), final_exports.rank_output, final_exports.sum_aggregation);
+          .run(MomentAggregationFunctor(), final_exports.trace_output, final_exports.sum_aggregation);
+    }
+    if (final_exports.dof_output.valid()) {
+      ThreadedLoop(final_exports.sum_aggregation)
+          .run(MomentAggregationFunctor(), final_exports.trace2_accum, final_exports.sum_aggregation);
+      ThreadedLoop(final_exports.sum_aggregation)
+          .run(MomentAggregationFunctor(), final_exports.trace4_accum, final_exports.sum_aggregation);
     }
   }
 
@@ -775,21 +859,35 @@ void run(Header &dwi,
   // Modify some optional outputs to better reflect utilisation of preconditioning. The
   //   group-mean components regressed out by demeaning are added back to the reported ranks here,
   //   on the final maps only (the per-iteration rank_input fed to the kernel sizing is kept
-  //   mean-free). demean_rank() gives the group count whether the demeaning was applied by the
+  //   mean-free). partition_null_rank() gives the group count whether the demeaning was applied by the
   //   preconditioner (no partitioning) or per partition within Estimate/Recon (partitioning), so
   //   the demean-induced rank contribution is identical in both regimes.
-  const ssize_t preconditioner_null_rank = preconditioner.demean_rank();
+  const ssize_t preconditioner_null_rank = preconditioner.partition_null_rank();
   if (preconditioner_null_rank > 0) {
     if (final_exports.rank_input.valid()) {
       ThreadedLoop(final_exports.rank_input)
           .run(RankInputAddbackFunctor(uint16_t(preconditioner_null_rank), uint16_t(max_rank)),
                final_exports.rank_input);
     }
-    if (final_exports.rank_output.valid()) {
-      ThreadedLoop(final_exports.rank_output)
-          .run(RankOutputAddbackFunctor(float(preconditioner_null_rank), float(max_rank)),
-               final_exports.rank_output);
+    if (final_exports.trace_output.valid()) {
+      ThreadedLoop(final_exports.trace_output)
+          .run(MomentAddbackFunctor(float(preconditioner_null_rank), float(max_rank)), final_exports.trace_output);
     }
+    if (final_exports.dof_output.valid()) {
+      ThreadedLoop(final_exports.trace2_accum)
+          .run(MomentAddbackFunctor(float(preconditioner_null_rank), float(max_rank)), final_exports.trace2_accum);
+      ThreadedLoop(final_exports.trace4_accum)
+          .run(MomentAddbackFunctor(float(preconditioner_null_rank), float(max_rank)), final_exports.trace4_accum);
+    }
+  }
+  // Formed only once both moments are final (aggregated, and with the demeaning group count added
+  //   back): the ratio is non-linear, so it cannot be accumulated or corrected in place.
+  if (final_exports.dof_output.valid()) {
+    ThreadedLoop(final_exports.dof_output)
+        .run(DofOutputFunctor(float(max_rank)),
+             final_exports.dof_output,
+             final_exports.trace2_accum,
+             final_exports.trace4_accum);
   }
   if (vst_image.valid()) {
     if (final_exports.noise_out.valid()) {
@@ -836,8 +934,33 @@ void run() {
   if (Denoise::num_volumes(dwi) == 1)
     throw Exception("input image must be non-singleton across non-spatial dimensions");
 
+  // Report any evidence in the image metadata that upstream processing has already invalidated the
+  //   assumptions underpinning Marchenko-Pastur-based denoising.
+  Denoise::warn_if_metadata_precludes_mp(dwi);
+
+  // Resolve the DW gradient table once, here, from the Header returned by Header::open(): only
+  //   that header carries the transform-realignment metadata that -fslgrad import needs in order
+  //   to rotate the bvecs. Headers derived downstream (e.g. the preconditioner's, which is built
+  //   from an Image rather than a Header) lose it, and re-deriving the table from one of those
+  //   would assert in a debug build and silently misrotate the bvecs in a release build.
+  // Resolving it here also means a table supplied on the command line is validated: MRtrix3
+  //   already diagnoses a wrong row count, a non-4-column table, -grad together with -fslgrad, and
+  //   a bvecs/bvals length mismatch, but until now every one of those diagnostics was swallowed by
+  //   the shell-availability probe in select_demean(), and the command silently fell back to
+  //   another demeaning mode. An absent or malformed table *within the image header* remains a
+  //   legitimate reason to fall back; a table the user explicitly supplied is a hard error.
+  Eigen::MatrixXd grad;
+  const bool grad_from_commandline = !get_options("grad").empty() || !get_options("fslgrad").empty();
+  try {
+    grad = DWI::get_DW_scheme(dwi);
+  } catch (Exception &e) {
+    if (grad_from_commandline)
+      throw Exception(e, "Invalid diffusion gradient table provided on the command line");
+    grad.resize(0, 0);
+  }
+
   const Demodulation demodulation = select_demodulation(dwi);
-  const demean_type demean = select_demean(dwi);
+  const demean_type demean = select_demean(dwi, grad);
   const decomp_type decomposition = get_option_choice("decomposition", default_decomposition);
 
   // Resolve the requested variance-stabilising transform up-front:
@@ -854,16 +977,29 @@ void run() {
   //   noise level estimation, yielding sigma^2 ~ 1 on the stabilised data
   //   (equivalent to -estimator unity); see vst_plan.md section 6.2.
   Image<float> user_vst_image;
+  // A scalar -noise_in is imposed by Estimator::Constant rather than by materialising a
+  //   constant-valued image and interpolating it per patch.
+  std::optional<default_type> noise_in_scalar;
   auto opt = get_options("noise_in");
   if (!opt.empty()) {
-    if (vst_none)
-      throw Exception("Options -noise_in and -vst_method none are incompatible: "
-                      "a pre-estimated noise level is used to parameterise the variance-stabilising transform, "
-                      "which is disabled by -vst_method none");
-    if (demean == demean_type::NONE) {
+    noise_in_scalar = Denoise::imposed_scalar_value(opt[0][0]);
+    // The option's declared bound is inclusive and so admits zero, which is not a usable noise
+    //   level. import_vst_noise_map() rejects it, but that is bypassed on the path below where no
+    //   image is built, so the check has to be made here too.
+    if (noise_in_scalar.has_value() && noise_in_scalar.value() == 0.0)
+      throw Exception("Noise level provided via -noise_in must be greater than zero");
+    // Under -vst_method none the supplied level cannot be absorbed into a transform, and is
+    //   instead imposed directly on the data (see "impose_imported_noise" below). Whether that is
+    //   coherent depends on the schedule, which is not yet resolved here, so the decision is
+    //   deferred rather than refused outright.
+    if (!vst_none && demean == demean_type::NONE) {
       WARN("Application of variance-stabilising transform in the absence of demeaning may be erroneous");
     }
-    user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
+    // With no transform to parameterise, a scalar needs no image at all; the estimator holds the
+    //   value directly. Every other combination still needs the map (to parameterise the VST, or
+    //   because the level varies over space).
+    if (!(vst_none && noise_in_scalar.has_value()))
+      user_vst_image = Denoise::import_vst_noise_map(opt[0][0], dwi);
   }
 
   const aggregator_type aggregator = get_option_choice("aggregator", aggregator_type::GAUSSIAN);
@@ -892,11 +1028,16 @@ void run() {
   if (bias_handling == bias_handling_t::PRESERVE) {
     const bool complex = dwi.datatype().is_complex();
     const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
-    if (complex || vst_none || vst_linear) {
-      const std::string reason =
-          vst_none    ? "-vst_method none applies no variance-stabilising transform"               //
-          : complex   ? "the input data are complex, for which the noise is Gaussian-distributed"   //
-                      : "-vst_method linear uses a linear (Gaussian) noise model";                  //
+    // For complex data there is no magnitude noise-floor bias in existence, so requesting a
+    //   policy for handling one is an incoherent combination and is refused. Selecting a linear
+    //   transform for magnitude data merely leaves the option inert, which remains a warning.
+    if (complex)
+      throw Exception("Option -preserve_noise_bias cannot be used with complex input data: "
+                      "the noise is Gaussian-distributed, so no magnitude noise-floor bias exists "
+                      "to either preserve or remove");
+    if (vst_none || vst_linear) {
+      const std::string reason = vst_none ? "-vst_method none applies no variance-stabilising transform" //
+                                          : "-vst_method linear uses a linear (Gaussian) noise model";   //
       WARN("Option -preserve_noise_bias has no effect: " + reason + ", "
            "so the noise model is linear and there is no estimated noise bias "
            "to either preserve or remove");
@@ -907,6 +1048,29 @@ void run() {
   //   (see debias_anchor_t); the default inverts the transform at each volume's own denoised
   //   value, so debiasing no longer depends on the demeaning grouping.
   const debias_anchor_t debias_anchor = get_option_choice("debias_anchor", debias_anchor_t::SAMPLE);
+  // -debias_anchor selects the operating point at which the non-linear transform is inverted when
+  //   removing the noise-floor bias. It is inert whenever there is no such inversion: when the bias
+  //   is deliberately retained (-preserve_noise_bias) or when the noise model is linear (complex
+  //   input data, or -vst_method none / linear). Mirrors the -preserve_noise_bias block above; the
+  //   first two conditions are stated in the option's own help text.
+  if (!get_options("debias_anchor").empty()) {
+    const bool complex = dwi.datatype().is_complex();
+    const bool vst_linear = (vst_method == NoiseModel::vst_method_t::LINEAR);
+    // As for -preserve_noise_bias: complex input admits no non-linear inverse at all, so choosing
+    //   its operating point is refused rather than warned about.
+    if (complex)
+      throw Exception("Option -debias_anchor cannot be used with complex input data: "
+                      "the noise is Gaussian-distributed, so the variance-stabilising transform is "
+                      "linear and there is no non-linear inverse for which to choose an operating point");
+    if (bias_handling == bias_handling_t::PRESERVE || vst_none || vst_linear) {
+      const std::string reason = bias_handling == bias_handling_t::PRESERVE
+                                     ? "-preserve_noise_bias retains the noise-floor bias rather than removing it" //
+                                 : vst_none ? "-vst_method none applies no variance-stabilising transform to invert" //
+                                            : "-vst_method linear uses a linear (Gaussian) noise model";             //
+      WARN("Option -debias_anchor has no effect: " + reason +
+           ", so there is no non-linear inverse for which to choose an operating point");
+    }
+  }
 
   // Resolve the iteration schedule. When the user supplies -schedule it is the single
   //   source of truth for both the spatial and temporal sub-sampling of each iteration;
@@ -916,8 +1080,27 @@ void run() {
   //   the coupling between iterations and likewise reduces to a single-iteration schedule.
   std::vector<Iterative::Iteration> iterations;
   const bool fixed_rank = !get_options("fixed_rank").empty();
+  // Catch an unattainable -fixed_rank here, before any multi-threaded processing begins, rather
+  //   than leaving every patch to discover it independently deep inside the PCA loop. A patch's
+  //   Casorati matrix has min(m', n) components, and m' (the volume count reaching the
+  //   decomposition) can only be reduced further by temporal sub-sampling and partitioning, so
+  //   the full volume count is a necessary upper bound and any request exceeding it is
+  //   guaranteed to be violated by every patch. Estimator::Rank enforces the exact per-patch
+  //   bound, which additionally accounts for the demeaning-induced zero components.
+  if (fixed_rank) {
+    const ssize_t r = ssize_t(get_options("fixed_rank")[0][0]);
+    const ssize_t m = ssize_t(Denoise::num_volumes(dwi));
+    if (r > m)
+      throw Exception("Option -fixed_rank " + str(r) + " exceeds the " + str(m) +
+                      " volumes in the input series; the signal rank of a patch cannot exceed its "
+                      "volume count. Specify -fixed_rank " +
+                      str(m) + " or fewer");
+  }
+  // A signal-rank density supplied on the command line is what permits a schedule to open
+  //   with a rank-derived kernel (the bundled "apriori" schedule does exactly that).
+  const bool rank_density_supplied = !get_options("rankpermm_in").empty();
   if (Schedule::requested()) {
-    iterations = Schedule::load("dwidenoise2");
+    iterations = Schedule::load("dwidenoise2", rank_density_supplied);
     // Without a variance-stabilising transform there is no coupling between iterations, so the
     //   per-iteration refinement of a multi-row schedule cannot propagate and is wasted
     //   computation; a single-row schedule (e.g. the bundled "legacy" schedule) is, however,
@@ -931,14 +1114,22 @@ void run() {
     // -fixed_rank selects the imposed (constant) fixed-rank estimator. A fixed rank does not yield
     //   a robust data-driven noise level, so its estimate is not used to refine the
     //   variance-stabilising transform: this is a single denoising pass, not an iterative schedule.
-    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_fixed"
+    //   The bundled single-row "fixedrank" schedule sizes the kernel to n = m + r (the "rank_imposed"
     //   kernel, which reads r from -fixed_rank).
-    iterations = Schedule::load_bundled("dwidenoise2", "fixedrank");
+    iterations = Schedule::load_bundled("dwidenoise2", "fixedrank", rank_density_supplied);
   } else if (vst_none) {
-    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
-         "refining the noise level estimate would have no effect on subsequent iterations "
-         "and is therefore wasted computation; performing a single pass instead");
     const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
+    // The bundled "default" schedule is deliberately NOT loaded here. Because the user did not
+    //   choose the schedule that is used instead -- and because it is not any of the bundled
+    //   files, so cannot be inspected -- state its content explicitly rather than merely
+    //   announcing that a single pass is performed.
+    WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively refining "
+         "the noise level estimate cannot influence subsequent iterations and would be wasted "
+         "computation. The bundled \"default\" schedule is therefore NOT used; a single pass is "
+         "performed instead, equivalent to the one-row schedule \"spatial_subsample " +
+         str(f) +
+         "  temporal_subsample 1.0  update_noise true  smooth_noise false  kernel aspect=2.0\". "
+         "Use -schedule to choose a different (single-row) schedule explicitly");
     Iterative::Iteration config;
     config.spatial_subsample_ratios = {f, f, f};
     // Single pass (no prior rank map): aspect ratio n ~ 2m.
@@ -949,7 +1140,7 @@ void run() {
     config.update_noise = true; // a single-pass schedule must estimate the noise level
     iterations.push_back(config);
   } else {
-    iterations = Schedule::load_default("dwidenoise2");
+    iterations = Schedule::load_default("dwidenoise2", rank_density_supplied);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
   }
   std::shared_ptr<SpatialSubsample> final_subsample =
@@ -980,9 +1171,9 @@ void run() {
     throw Exception("dwidenoise2 requires the final (reconstruction) schedule row to use all "
                     "volumes (temporal_subsample = 1); sub-sample only the noise-estimation iterations");
   // -fixed_rank is a single denoising pass with the imposed fixed-rank estimator, sized to the
-  //   n = m + r ("rank_fixed") kernel. Its noise level estimate is not robust enough to drive the
+  //   n = m + r ("rank_imposed") kernel. Its noise level estimate is not robust enough to drive the
   //   variance-stabilising transform, so multi-row (iterative) schedules are disallowed; and every
-  //   row must use the "rank_fixed" kernel (the default bundled "fixedrank" schedule satisfies
+  //   row must use the "rank_imposed" kernel (the default bundled "fixedrank" schedule satisfies
   //   both when -fixed_rank is given without -schedule).
   if (fixed_rank) {
     if (iterations.size() > 1)
@@ -991,15 +1182,15 @@ void run() {
                       "be combined with a multi-row schedule; use the bundled single-row \"fixedrank\" "
                       "schedule (the default when -fixed_rank is given without -schedule)");
     for (const auto &it : iterations)
-      if (it.kernel.type != Kernel::kernel_spec_type::RANK_FIXED)
-        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_fixed\" (n = m + r) "
+      if (it.kernel.type != Kernel::kernel_spec_type::RANK_IMPOSED)
+        throw Exception("Option -fixed_rank requires the schedule to use the \"rank_imposed\" (n = m + r) "
                         "kernel; use the bundled \"fixedrank\" schedule (the default when -fixed_rank "
                         "is given without -schedule)");
   } else {
-    // The "rank_fixed" kernel (n = m + r) has no defined r without an imposed fixed rank.
+    // The "rank_imposed" kernel (n = m + r) has no defined r without an imposed fixed rank.
     for (const auto &it : iterations)
-      if (it.kernel.type == Kernel::kernel_spec_type::RANK_FIXED)
-        throw Exception("A schedule uses the \"rank_fixed\" kernel (n = m + r) but no fixed signal rank "
+      if (it.kernel.type == Kernel::kernel_spec_type::RANK_IMPOSED)
+        throw Exception("A schedule uses the \"rank_imposed\" kernel (n = m + r) but no fixed signal rank "
                         "was provided; supply -fixed_rank <value> (or use a different kernel)");
   }
   // Some source must establish the noise level: at least one estimating iteration, or a -noise_in seed.
@@ -1040,7 +1231,45 @@ void run() {
                     "patch are reconstructed); use unity spatial sub-sampling on the final iteration "
                     "(e.g. the bundled \"legacy\" schedule)");
 
-  auto estimator = Estimator::make_estimator(user_vst_image, true);
+  // Applying a pre-estimated noise level without re-estimating it.
+  //   With a variance-stabilising transform active, -noise_in parameterises that transform: the
+  //   stabilised data then have unit noise level and the dummy Unity estimator (substituted for
+  //   the final row when update_noise is false) carries it through correctly.
+  //   Under -vst_method none there is no such transform, so the data reach PCA in their native
+  //   scale and Unity's sigma == 1 would be wrong. The supplied level must instead be imposed on
+  //   the data directly, which is what Estimator::Import does.
+  bool impose_imported_noise = false;
+  if (!get_options("noise_in").empty() && vst_none) {
+    if (iterations.size() > 1)
+      throw Exception("Options -noise_in and -vst_method none cannot be combined with a -schedule of "
+                      "more than one row: without a variance-stabilising transform there is no "
+                      "coupling between iterations for the additional rows to refine, so the "
+                      "supplied noise level can only be imposed by a single pass; "
+                      "use a single-row schedule");
+    if (iterations.back().update_noise.value())
+      throw Exception("Options -noise_in and -vst_method none require a schedule row that does not "
+                      "re-estimate the noise level (update_noise false): with no "
+                      "variance-stabilising transform for the supplied level to parameterise, a row "
+                      "that re-estimates would discard it entirely");
+    if (!get_options("estimator").empty())
+      throw Exception("Options -noise_in and -vst_method none impose the supplied noise level "
+                      "directly on the data, which is incompatible with the data-driven estimator "
+                      "requested by -estimator; omit -estimator");
+    impose_imported_noise = true;
+    CONSOLE("Imposing the noise level supplied via -noise_in directly on the input data "
+            "(no variance-stabilising transform is active, and the schedule does not re-estimate)");
+  }
+  std::shared_ptr<Estimator::Base> estimator;
+  if (impose_imported_noise) {
+    // A scalar level is held by the estimator itself; only a spatially-varying level needs a map,
+    //   and the per-patch interpolation that comes with it.
+    if (noise_in_scalar.has_value())
+      estimator = std::make_shared<Estimator::Constant>(noise_in_scalar.value());
+    else
+      estimator = std::make_shared<Estimator::Import>(user_vst_image);
+  } else {
+    estimator = Estimator::make_estimator(user_vst_image, true);
+  }
 
   const filter_type filter = get_option_choice(
       "filter", get_options("fixed_rank").empty() ? filter_type::OPTSHRINK : filter_type::TRUNCATE);
@@ -1058,24 +1287,28 @@ void run() {
   opt = get_options("rank_input");
   if (!opt.empty())
     final_exports.set_rank_input(opt[0][0].as_text());
-  opt = get_options("rank_output");
+  opt = get_options("trace_output");
   if (!opt.empty()) {
     if (aggregator == aggregator_type::EXCLUSIVE && filter == filter_type::TRUNCATE) {
       WARN("When using -aggregator exclusive and -filter truncate, "
-           "the output of -rank_output will be identical to the output of -rank_input, "
+           "the output of -trace_output will be identical to the output of -rank_input, "
            "as there is no aggregation of multiple patches per output voxel "
-           "and no optimal shrinkage to reduce output rank relative to estimated input rank");
+           "and no optimal shrinkage to reduce the filter trace relative to estimated input rank");
     }
-    final_exports.set_rank_output(opt[0][0].as_text());
+    final_exports.set_trace_output(opt[0][0].as_text());
   }
-  opt = get_options("sum_optshrink");
+  opt = get_options("dof_output");
   if (!opt.empty()) {
-    if (filter == filter_type::TRUNCATE) {
-      WARN("Note that with a truncation filter, "
-           "output image from -sumweights option will be equivalent to rank_input");
+    if (filter != filter_type::OPTSHRINK) {
+      WARN("With a hard filter (-filter truncate or -filter optthresh), "
+           "all eigenvector weights are 0 or 1 and every spectral moment of the reconstruction filter "
+           "is equal; the output of -dof_output will therefore be identical to that of -trace_output");
     }
-    final_exports.set_sum_optshrink(opt[0][0].as_text());
+    final_exports.set_dof_output(opt[0][0].as_text());
   }
+  opt = get_options("trace_patch");
+  if (!opt.empty())
+    final_exports.set_trace_patch(opt[0][0].as_text());
   opt = get_options("max_dist");
   if (!opt.empty())
     final_exports.set_max_dist(opt[0][0].as_text());
@@ -1109,76 +1342,80 @@ void run() {
   case 0:
     assert(demodulation.axes.empty());
     INFO("select real float32 for processing");
-    run<float>(         //
-        dwi,            //
-        demodulation,   //
-        demean,         //
-        user_vst_image, //
-        iterations,     //
-        decomposition,  //
-        estimator,      //
-        filter,          //
-        aggregator,      //
-        aggregator_fwhm, //
-        bias_handling,   //
-        debias_anchor,  //
+    run<float>(                //
+        dwi,                   //
+        demodulation,          //
+        demean,                //
+        grad,                  //
+        user_vst_image,        //
+        iterations,            //
+        decomposition,         //
+        estimator,             //
+        filter,                //
+        aggregator,            //
+        aggregator_fwhm,       //
+        bias_handling,         //
+        debias_anchor,         //
         argument[1].as_text(), //
-        final_exports); //
+        final_exports);        //
     break;
   case 1:
     assert(demodulation.axes.empty());
     INFO("select real float64 for processing");
-    run<double>(        //
-        dwi,            //
-        demodulation,   //
-        demean,         //
-        user_vst_image, //
-        iterations,     //
-        decomposition,  //
-        estimator,      //
-        filter,          //
-        aggregator,      //
-        aggregator_fwhm, //
-        bias_handling,   //
-        debias_anchor,  //
+    run<double>(               //
+        dwi,                   //
+        demodulation,          //
+        demean,                //
+        grad,                  //
+        user_vst_image,        //
+        iterations,            //
+        decomposition,         //
+        estimator,             //
+        filter,                //
+        aggregator,            //
+        aggregator_fwhm,       //
+        bias_handling,         //
+        debias_anchor,         //
         argument[1].as_text(), //
-        final_exports); //
+        final_exports);        //
     break;
   case 2:
     INFO("select complex float32 for processing");
-    run<cfloat>(        //
-        dwi,            //
-        demodulation,   //
-        demean,         //
-        user_vst_image, //
-        iterations,     //
-        decomposition,  //
-        estimator,      //
-        filter,          //
-        aggregator,      //
-        aggregator_fwhm, //
-        bias_handling,   //
-        debias_anchor,  //
+    run<cfloat>(               //
+        dwi,                   //
+        demodulation,          //
+        demean,                //
+        grad,                  //
+        user_vst_image,        //
+        iterations,            //
+        decomposition,         //
+        estimator,             //
+        filter,                //
+        aggregator,            //
+        aggregator_fwhm,       //
+        bias_handling,         //
+        debias_anchor,         //
         argument[1].as_text(), //
-        final_exports); //
+        final_exports);        //
     break;
   case 3:
     INFO("select complex float64 for processing");
-    run<cdouble>(       //
-        dwi,            //
-        demodulation,   //
-        demean,         //
-        user_vst_image, //
-        iterations,     //
-        decomposition,  //
-        estimator,      //
-        filter,          //
-        aggregator,      //
-        aggregator_fwhm, //
-        bias_handling,   //
-        debias_anchor,  //
+    run<cdouble>(              //
+        dwi,                   //
+        demodulation,          //
+        demean,                //
+        grad,                  //
+        user_vst_image,        //
+        iterations,            //
+        decomposition,         //
+        estimator,             //
+        filter,                //
+        aggregator,            //
+        aggregator_fwhm,       //
+        bias_handling,         //
+        debias_anchor,         //
         argument[1].as_text(), //
-        final_exports); //
+        final_exports);        //
     break;
   }
 }

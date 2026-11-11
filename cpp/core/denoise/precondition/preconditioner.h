@@ -23,6 +23,7 @@
 
 #include <Eigen/Dense>
 
+#include "denoise/denoise.h"
 #include "denoise/precondition/apc.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/precondition.h"
@@ -72,11 +73,18 @@ template <typename T> class Preconditioner {
   friend class detail::InverseApplyFunctor<T>;
 
 public:
+  // "grad" is the DW gradient table resolved once by the calling command from the Header it
+  //   opened. It cannot be re-derived from any header held here: H_in / H_out are constructed
+  //   from an Image rather than a Header and therefore lose the transform-realignment metadata
+  //   that -fslgrad import requires (Header's "copy from a type other than Header" constructor
+  //   documents this), leaving orig_transform() uninitialised. Pass an empty matrix when the
+  //   image has no gradient table; demean_type::SHELLS is then refused.
   Preconditioner(Image<T> &image,
                  const Demodulation &demodulation,
                  const demean_type demean,
                  Image<float> &vst_noise,
-                 std::shared_ptr<NoiseModel::Base> noise_model);
+                 std::shared_ptr<NoiseModel::Base> noise_model,
+                 const Eigen::MatrixXd &grad);
   Preconditioner(Preconditioner &) = default;
   // Refresh the preconditioning parameters together, each iteration of the noise-estimation
   //   schedule: the noise level map (VST scale), the stabilised-domain per-group means (VST
@@ -124,16 +132,22 @@ public:
                   const bias_handling_t bias_handling = bias_handling_t::DEBIAS,
                   const debias_anchor_t debias_anchor = debias_anchor_t::SAMPLE) const;
 
-  // Enable/disable preconditioner-side demeaning for the current iteration. When volume
-  //   partitioning is in effect (P > 1), demeaning is instead performed per partition by the
-  //   Estimate/Recon classes (per-partition per-group means keep the mean subtraction orthogonal
-  //   to each partition's PCA); the preconditioner then applies only phase demodulation and the
-  //   (non-linear) variance-stabilising transform, and its inverse reduces to the pointwise
-  //   inverse VST (the demean offset re-added by Recon already lives in the stabilised domain).
-  //   While active, null_rank() reports 0 (no globally-regressed mean) and the forward/inverse
-  //   transforms skip the demean step. The GROUP_MEAN inverse anchor is unavailable in this mode.
-  void set_partitioning_active(const bool active) { partitioning_active = active; }
-  bool demean_active() const { return vst_mean_image.valid() && !partitioning_active; }
+  // Impose the site of the group-mean demeaning for the current iteration (resolved once per
+  //   iteration by resolve_demean_site() and passed to every component that acts on it). Anything
+  //   other than PRECONDITIONER makes this class a no-op with respect to demeaning: it then applies
+  //   only phase demodulation and the (non-linear) variance-stabilising transform, computes no
+  //   means, and its inverse reduces to the pointwise inverse VST. Under ESTIMATOR the
+  //   Estimate/Recon classes demean per partition instead (per-partition per-group means keep the
+  //   mean subtraction orthogonal to each partition's PCA, and the offset Recon re-adds already
+  //   lives in the stabilised domain); the GROUP_MEAN inverse anchor is unavailable in that mode.
+  // The site must be congruent with the demeaning mode this object was constructed with, which is
+  //   what the assertion checks: mean storage exists (and hence a mean can be subtracted here) for
+  //   every mode other than -demean none.
+  void set_demean_site(const demean_site_t site) {
+    assert((site == demean_site_t::NONE) == !vst_mean_image.valid());
+    demean_site = site;
+  }
+  bool demean_active() const { return demean_site == demean_site_t::PRECONDITIONER; }
 
   // Declare whether a subsequent adaptive-phase-correction pass will refine the phase estimated by
   //   the next update_parameters() call. Every *cold* solve begins on a 2x-downsampled grid (its
@@ -172,27 +186,24 @@ public:
   //   temporal subset is active, the subset header (size(3) == m').
   const Header &header() const { return temporal_subset.empty() ? H_out : H_out_subset; }
 
-  // Rank removed by group-mean demeaning: the number of demeaning groups (1 for -demean all;
-  //   shell/volume-group count otherwise; 0 for -demean none). This is reported irrespective of
-  //   whether the demeaning is applied here (no partitioning) or per partition within
-  //   Estimate/Recon (partitioning) — the degrees of freedom regressed out are the same group
-  //   count either way (per the partitioned-model expectation that the demean-induced rank change
-  //   matches the non-partitioned case). Used to add the regressed-mean components back to the
-  //   final exported rank maps.
-  ssize_t demean_rank() const {
+  // The null rank of each Casorati matrix that is decomposed: the number of demeaning groups
+  //   (1 for -demean all; shell/volume-group count otherwise; 0 for -demean none), each of which
+  //   contributes one regressed-out, identically-zero component.
+  // This is a property of the matrix, not of whoever produced it, so it is reported irrespective
+  //   of where the demeaning is applied (see demean_site_t); the degrees of freedom regressed are
+  //   the same group count either way, per the partitioned-model expectation that the
+  //   demean-induced rank change matches the non-partitioned case. It is named for the partition
+  //   because the partition is the unit that is decomposed -- and it remains correct at
+  //   num_partitions == 1, where the single partition is the whole series.
+  // Consumers: the square-noise-block kernel sizing (make_kernel), the rank arithmetic
+  //   rank_zero()/rank_nonzero()/dimlong_nonzero(), and the addback of the regressed-mean
+  //   components to the final exported rank maps.
+  ssize_t partition_null_rank() const {
     if (!vst_mean_image.valid())
       return 0;
     if (vst_mean_image.ndim() == 3)
       return 1;
     return vst_mean_image.size(3);
-  }
-
-  ssize_t null_rank() const {
-    // The rank that *this* (preconditioner-side) demeaning regresses out of the Casorati matrix.
-    //   When partitioning is active the preconditioner performs no demeaning (it is done per
-    //   partition inside Estimate/Recon, which account for it via their own per-partition rank),
-    //   so it is 0; otherwise it equals demean_rank().
-    return partitioning_active ? 0 : demean_rank();
   }
 
   bool noop() const {
@@ -209,9 +220,12 @@ private:
   // Current temporal subset: sorted original (serialised) volume indices used for noise
   //   level estimation in this iteration; empty ⇒ all volumes (no temporal sub-sampling).
   std::vector<ssize_t> temporal_subset;
-  // When true, demeaning is delegated to the per-partition Estimate/Recon path and the
-  //   preconditioner applies only phase demodulation and the variance-stabilising transform.
-  bool partitioning_active = false;
+  // The demeaning site imposed for the current iteration (set_demean_site()); initialised from the
+  //   demeaning mode to the un-partitioned resolution, which every non-partitioned caller -- and any
+  //   caller that never resolves a site at all -- is entitled to. Anything other than
+  //   PRECONDITIONER delegates the demeaning elsewhere, leaving this class to apply only phase
+  //   demodulation and the variance-stabilising transform.
+  demean_site_t demean_site;
   // For serialisation of >4D images
   ssize_t num_volume_groups;
   Image<uint32_t> serialise_image;

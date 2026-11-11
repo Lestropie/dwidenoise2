@@ -23,6 +23,7 @@
 
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 
 namespace MR::Denoise::Estimator {
 
@@ -30,18 +31,10 @@ template <ssize_t version> class Exp : public Base {
 public:
   Exp() {}
   ~Exp() {}
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,    //
-                    const ssize_t m,                                 //
-                    const ssize_t n,                                 //
-                    const ssize_t rp,                                //
+  Result operator()(const Spectrum &spectrum,                        //
                     const Eigen::Vector3d & /*unused*/) const final; //
-  Result operator()(const std::vector<eigenvalues_type> &s,          //
-                    const std::vector<ssize_t> &m,                   //
-                    const std::vector<ssize_t> &n,                   //
-                    const std::vector<ssize_t> &rp,                  //
+  Result operator()(const std::vector<Spectrum> &spectra,            //
                     const Eigen::Vector3d & /*unused*/) const final; //
-  bool supports_partitioning() const final { return true; }
-
   // Predicted relative RMSE of the noise level estimate; calibrated by numerical simulation of
   //   log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n) over m in [30,2000],
   //   n >= m and rank density a in [0.25,4] (sigma = 1; conservative theta = 1.5 fit).

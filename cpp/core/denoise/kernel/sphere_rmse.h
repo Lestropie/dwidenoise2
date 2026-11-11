@@ -30,14 +30,14 @@ namespace MR::Denoise::Kernel {
 
 // Spherical kernel grown until the noise-level estimate is predicted to be precise enough.
 //
-// Unlike SphereRank (which stops at the square noise block n = m + r), this kernel keeps growing
+// Unlike SphereRankAdaptive (which stops at the square noise block n = m + r), this kernel keeps growing
 //   past the square block, while the noise block is too small / the Marchenko-Pastur bulk too wide
 //   to estimate sigma accurately, until the active estimator's predicted relative RMSE of the
 //   noise level (predicted_rmse(m, n, r), with r = rank_per_mm * radius) falls to the requested
 //   tolerance. Growth is floored at the square block (n >= m + r, so it is never smaller than
-//   SphereRank) and capped at cap_multiplier * m (the tolerance may be unattainable for very small
+//   SphereRankAdaptive) and capped at cap_multiplier * m (the tolerance may be unattainable for very small
 //   m / high rank density). For large m the square block already meets the tolerance, so the kernel
-//   stops at n = m + r and this reduces to SphereRank behaviour.
+//   stops at n = m + r and this reduces to SphereRankAdaptive behaviour.
 class SphereRMSE : public SphereBase {
 
 public:
@@ -48,13 +48,15 @@ public:
              const ssize_t effective_num_volumes,
              const default_type rmse_tolerance,
              const predicted_rmse_func &predicted_rmse,
+             const ssize_t num_nulls = 0,
              const default_type cap_multiplier = 12.0)
-      : SphereBase(voxel_grid,
-                   subsample_factors,
-                   SphereBase::compute_max_radius(
-                       voxel_grid, ssize_t(std::ceil(cap_multiplier * effective_num_volumes)))),
+      : SphereBase(
+            voxel_grid,
+            subsample_factors,
+            SphereBase::compute_max_radius(voxel_grid, ssize_t(std::ceil(cap_multiplier * effective_num_volumes)))),
         rank_per_mm(rank_per_mm),
         num_volumes(effective_num_volumes),
+        num_nondegenerate(std::max<ssize_t>(1, effective_num_volumes - num_nulls)),
         rmse_tolerance(rmse_tolerance),
         cap_multiplier(cap_multiplier),
         predicted_rmse(predicted_rmse) {}
@@ -71,6 +73,11 @@ public:
 private:
   Image<float> rank_per_mm;
   ssize_t num_volumes;
+  // Volume-space dimensions remaining once the regressed group means are removed; the square
+  //   noise block floor is targeted against this rather than num_volumes (see make_kernel()).
+  //   The predicted-RMSE model and the voxel cap continue to use the full m', which is the
+  //   actual matrix dimension.
+  ssize_t num_nondegenerate;
   default_type rmse_tolerance;
   default_type cap_multiplier;
   predicted_rmse_func predicted_rmse;

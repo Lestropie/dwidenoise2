@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "app.h"
+#include "denoise/denoise.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "header.h"
 
@@ -94,6 +95,20 @@ public:
 };
 Demodulation select_demodulation(const Header &);
 
-demean_type select_demean(const Header &);
+// Select the demeaning mode from -demean and the data.
+// "grad" is the DW gradient table already resolved by the calling command from the header it
+//   opened (empty if the image has none and none was supplied). It must be passed in rather than
+//   re-derived here: only the opened Header carries the transform-realignment metadata that
+//   -fslgrad import needs, and a table supplied on the command line has already been validated by
+//   the caller, so a failure to obtain one here would hide a user error.
+demean_type select_demean(const Header &, const Eigen::MatrixXd &grad);
+
+// Resolve which component is to subtract the group means for one iteration (see demean_site_t),
+//   from the demeaning mode and that iteration's partition count. This is the sole place the rule is
+//   applied: the resulting value is then handed to every component whose behaviour depends on it
+//   (Preconditioner::set_demean_site(), Estimate / Recon, Iterative::estimate), so that all of them
+//   act on one decision rather than each re-deriving it from a proxy such as the partition count or
+//   the presence of the demeaning-group labels.
+demean_site_t resolve_demean_site(const demean_type demean, const ssize_t num_partitions);
 
 } // namespace MR::Denoise::Precondition

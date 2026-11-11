@@ -15,13 +15,13 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/kernel/sphere_rank.h"
+#include "denoise/kernel/sphere_rank_adaptive.h"
 
 #include "interp/linear.h"
 
 namespace MR::Denoise::Kernel {
 
-Data SphereRank::operator()(const Voxel::index_type &pos) const {
+Data SphereRankAdaptive::operator()(const Voxel::index_type &pos) const {
   assert(mask_image.valid());
   const Eigen::Vector3d realpos(voxel2real(pos));
   // For thread-safety
@@ -44,10 +44,12 @@ Data SphereRank::operator()(const Voxel::index_type &pos) const {
     // Defining feature for this kernel:
     // Set the kernel size in such a way that it should be large enough
     //   that if one were to remove the signal components,
-    //   the remaining noise section would be square
-    if (std::isfinite(result.max_distance)
-        && result.voxels.size() >= (num_volumes + (local_rank_per_mm * result.max_distance))
-        && table_it->sq_distance != max_sq_distance)
+    //   the remaining noise section would be square.
+    // The volume-space extent of that noise section is the non-degenerate count
+    //   (m' minus the demeaning-regressed directions), not m' itself.
+    if (std::isfinite(result.max_distance) &&
+        result.voxels.size() >= (num_nondegenerate + (local_rank_per_mm * result.max_distance)) &&
+        table_it->sq_distance != max_sq_distance)
       break;
     const Voxel::index_type voxel({pos[0] + table_it->index[0],   //
                                    pos[1] + table_it->index[1],   //

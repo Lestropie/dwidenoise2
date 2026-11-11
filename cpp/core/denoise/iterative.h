@@ -70,22 +70,43 @@ struct Iteration {
 };
 
 // Resolve the number of partitions P for an iteration given the effective volume count
-//   m_effective (the preconditioned/sub-sampled volume count actually decomposed). P is
-//   clamped to [1, m_effective]; with neither partition control active it is 1.
-inline ssize_t resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective) {
+//   m_effective (the preconditioned/sub-sampled volume count actually decomposed). With neither
+//   partition control active P is 1.
+// A partition must hold at least two volumes to have a Casorati matrix worth decomposing, so
+//   the realisable partition count is bounded by m_effective/2. A request beyond that bound is
+//   refused rather than quietly reduced: silently substituting a different partition count would
+//   change the decomposition actually performed (and hence the noise estimate and the cost model
+//   the user was reaching for) while reporting success, so the run terminates instead.
+//   "context" names the schedule row responsible.
+// The max_partition_size assertion is an implementation invariant: the schedule parser rejects
+//   any value below 1, so it cannot be reached from the command line.
+inline ssize_t
+resolve_num_partitions(const Iteration &iteration, const ssize_t m_effective, const std::string &context) {
   ssize_t p = iteration.num_partitions;
   if (iteration.max_partition_size.has_value()) {
     const ssize_t maxsize = iteration.max_partition_size.value();
     assert(maxsize >= 1);
     p = (m_effective + maxsize - 1) / maxsize;
   }
-  return std::max<ssize_t>(1, std::min(p, m_effective));
+  const ssize_t capacity = std::max<ssize_t>(1, m_effective / 2);
+  if (p > capacity)
+    throw Exception(
+        context + " requests " + str(p) + " volume partitions, but the " + str(m_effective) +
+        " volumes available to that iteration support at most " + str(capacity) +
+        " (each partition must hold at least two volumes). " +
+        (iteration.max_partition_size.has_value()
+             ? "Raise \"max_partition_size\" (currently " + str(iteration.max_partition_size.value()) + ") or remove it"
+             : "Reduce \"partitions\" to " + str(capacity) + " or fewer") +
+        " in the schedule");
+  return std::max<ssize_t>(1, p);
 }
 
 // Internal function covering as much as possible for iterative implementation.
 //   num_partitions / partitioning describe the volume partitioning for this iteration (P == 1
 //   and a null assignment ⇒ no partitioning). volume_group carries the per-volume demeaning-group
-//   labels used for the per-partition demeaning performed within Estimate (empty ⇒ no demeaning).
+//   labels, which stratify the partitioning and name the means to subtract; whether Estimate is the
+//   component that subtracts them is stated by demean_site (the iteration's resolved site, the same
+//   value the caller imposed on the preconditioner), not inferred from either of those two.
 template <typename T>
 void estimate(Image<T> &input,
               Image<T> &input_preconditioned,
@@ -101,7 +122,8 @@ void estimate(Image<T> &input,
               Exports &exports,
               const ssize_t num_partitions = 1,
               std::shared_ptr<const Partitioning> partitioning = nullptr,
-              const std::vector<ssize_t> &volume_group = {}) {
+              const std::vector<ssize_t> &volume_group = {},
+              const demean_site_t demean_site = demean_site_t::NONE) {
   // Size the kernel from the preconditioned data, whose volume count is m' (reduced under
   //   temporal sub-sampling); this keeps the Casorati matrix aspect ratio consistent with the
   //   number of volumes actually decomposed. With partitioning the kernel is sized from the
@@ -121,15 +143,26 @@ void estimate(Image<T> &input,
                                     rank_per_mm_image,
                                     Denoise::num_volumes(input),
                                     num_partitions,
-                                    prmse);
+                                    prmse,
+                                    preconditioner.partition_null_rank());
   kernel->set_mask(mask);
   if (preconditioner.noop())
     threaded_copy(input, input_preconditioned);
   else
     preconditioner(input, input_preconditioned, false);
   {
-    Estimate<T> func(input_preconditioned, subsample, kernel, decomposition, estimator, exports,
-                     preconditioner.null_rank(), false, partitioning, volume_group, num_partitions);
+    Estimate<T> func(input_preconditioned,
+                     subsample,
+                     kernel,
+                     decomposition,
+                     estimator,
+                     exports,
+                     preconditioner.partition_null_rank(),
+                     false,
+                     partitioning,
+                     volume_group,
+                     demean_site,
+                     num_partitions);
     ThreadedLoop("MPPCA noise level estimation", input_preconditioned, 0, 3).run(func, input_preconditioned);
     func.report_warnings();
   }

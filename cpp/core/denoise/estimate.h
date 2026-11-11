@@ -37,6 +37,7 @@
 #include "denoise/kernel/voxel.h"
 #include "denoise/partition.h"
 #include "denoise/spatial_subsample.h"
+#include "denoise/spectrum.h"
 #include "header.h"
 #include "image.h"
 #include "transform.h"
@@ -54,10 +55,11 @@ public:
            decomp_type decomp,
            std::shared_ptr<Estimator::Base> estimator,
            Exports &exports,
-           const ssize_t preconditioner_rank = 0,
+           const ssize_t null_rank = 0,
            const bool enable_recon = false,
            std::shared_ptr<const Partitioning> level_partitioning = nullptr,
            std::vector<ssize_t> volume_group = {},
+           const demean_site_t demean_site = demean_site_t::NONE,
            const ssize_t kernel_num_partitions = 1);
 
   Estimate(const Estimate &);
@@ -74,7 +76,7 @@ protected:
   std::shared_ptr<Kernel::Base> kernel;
   decomp_type decomp;
   std::shared_ptr<Estimator::Base> estimator;
-  ssize_t preconditioner_rank;
+  ssize_t null_rank;
   bool enable_recon;
 
   // Reusable memory
@@ -115,18 +117,32 @@ protected:
   ssize_t kernel_num_partitions;        // P for per-kernel mode (1 ⇒ not per-kernel)
   Partitioning patch_partition;         // per-kernel scratch, rebuilt per patch
   const Partitioning *active_part;      // partitioning in force for the current patch (or nullptr)
-  // Per-(output) volume demeaning-group label (length m'); empty ⇒ no demeaning. Drives the
-  //   per-partition per-group mean subtraction (kept orthogonal to each partition's PCA) and
-  //   the per-partition preconditioner rank rp_p. (Under partitioning the preconditioner itself
-  //   performs no demeaning; see Preconditioner::set_partitioning_active.)
+  // Per-(output) volume demeaning-group label (length m'), as reported by
+  //   Precondition::Preconditioner::output_volume_to_group(). Also stratifies the per-kernel volume partitioning
+  //   so each group is balanced across partitions, so it may be populated whether or not this class
+  //   is the one that demeans; demean_site, not this vector, decides that.
   std::vector<ssize_t> volume_group;
   ssize_t num_demean_groups; // max(volume_group)+1, or 0 when volume_group is empty
+  // Where the group-mean demeaning is applied, as resolved for this iteration by
+  //   Precondition::resolve_demean_site() and imposed identically on the preconditioner. This class performs
+  //   the per-partition per-group mean subtraction (kept orthogonal to each partition's PCA), and
+  //   accounts for the rank rp_p it regresses, if and only if this is ESTIMATOR; otherwise the
+  //   preconditioner has already subtracted the means over the whole series, or there are none.
+  //   ESTIMATOR requires the group labels it names, which the constructor asserts.
+  demean_site_t demean_site;
 
   using RealVectorType = Eigen::Matrix<typename Eigen::NumTraits<F>::Real, Eigen::Dynamic, 1>;
   // Reusable per-partition decomposition storage (sized to P; filled by compute_partitions()).
-  std::vector<MatrixType> Xsub_partition;       // demeaned sub-block (m_p x n) per partition
-  std::vector<eigenvalues_type> s_partition;    // ascending eigenvalues (length r_p) per partition
-  std::vector<ssize_t> part_m, part_n, part_rp; // per-partition (m_p, n, rp_p)
+  std::vector<MatrixType> Xsub_partition;    // demeaned sub-block (m_p x n) per partition
+  std::vector<eigenvalues_type> s_partition; // ascending eigenvalues (length >= r_p) per partition
+  // One Spectrum per partition of the current patch: the eigenvalues of s_partition[p] (truncated
+  //   to that partition's r_p) bound to the dimensions (m_p, n, rp_p) of the decomposition that
+  //   produced them, and to everything derived from those dimensions. Rebuilt by
+  //   compute_partitions(), it is both what is handed to the estimator and what Recon and the
+  //   export code read their per-partition dimensions from, so those consumers cannot fall out of
+  //   correspondence with the spectra themselves. Note that its elements hold views into
+  //   s_partition, which must therefore not be resized while they are live.
+  std::vector<Spectrum> spectra;
   // Populated only when enable_recon (used by Recon to forward-project each partition):
   std::vector<MatrixType> U_partition, V_partition, evec_partition;
   std::vector<RealVectorType> sv_partition;
@@ -149,7 +165,7 @@ protected:
   // Size the per-partition storage vectors to P (called from the constructors).
   void allocate_partition_storage();
   // Split X (already filled by load_data) into the partition sub-blocks, demean each per group,
-  //   and decompose each; fills s_partition / part_* (and the recon outputs when enable_recon).
+  //   and decompose each; fills s_partition / spectra (and the recon outputs when enable_recon).
   //   Returns false if any partition's decomposition failed to converge.
   bool compute_partitions(const ssize_t n);
 

@@ -22,6 +22,9 @@
 #include <numeric>
 #include <random>
 
+#include "exception.h"
+#include "mrtrix.h"
+
 namespace MR::Denoise {
 
 namespace {
@@ -95,6 +98,31 @@ Partitioning partition_volumes(const ssize_t m,
       strata[group_per_volume[v]].push_back(v);
   }
 
+  // Every volume of a demeaning group that lands in a partition has that group's within-partition
+  //   mean subtracted from it (see Estimate::compute_partitions). A group represented in a
+  //   partition by a single volume is therefore not demeanable: subtracting the mean of one volume
+  //   from itself yields a row that is identically zero, which is neither the signal nor the noise
+  //   the decomposition is asked to separate. The spread below keeps every populated
+  //   (group, partition) cell at two or more volumes whenever the group has at least two volumes to
+  //   give; a group of exactly one volume can satisfy that under no assignment, so refuse here
+  //   rather than emit a degenerate Casorati matrix. As with the unpopulated-partition case below,
+  //   this depends only on the group sizes and P, so it fires identically for every patch.
+  std::vector<size_t> singleton_groups;
+  for (size_t gi = 0; gi != strata.size(); ++gi) {
+    if (strata[gi].size() == 1)
+      singleton_groups.push_back(gi);
+  }
+  if (!singleton_groups.empty()) {
+    std::string list;
+    for (const size_t gi : singleton_groups)
+      list += (list.empty() ? "" : ", ") + str(gi);
+    throw Exception("Cannot split " + str(m) + " volumes into " + str(P) +
+                    " partitions: demeaning group(s) [" + list +
+                    "] contain only one volume each, so the partition holding such a volume would "
+                    "hold fewer than two volumes of that group and could not be demeaned. "
+                    "Disable volume partitioning, use a coarser -demean grouping, or use -demean none");
+  }
+
   // Process larger groups first so the abundant groups establish a balanced base load
   //   into which the smaller (concentrated) groups are then slotted.
   std::vector<size_t> order(strata.size());
@@ -137,6 +165,46 @@ Partitioning partition_volumes(const ssize_t m,
       ++groups_present[p];
     }
     assert(idx == s);
+  }
+
+  // The invariant the singleton-group rejection above and the per-stratum spread together
+  //   establish: no populated (group, partition) cell holds fewer than two volumes, so every
+  //   group mean Estimate subtracts is formed from at least two volumes.
+#ifndef NDEBUG
+  {
+    std::vector<std::vector<ssize_t>> cell_counts(P, std::vector<ssize_t>(strata.size(), 0));
+    for (ssize_t v = 0; v != m; ++v)
+      ++cell_counts[v2p[v]][group_per_volume.empty() ? 0 : group_per_volume[v]];
+    for (ssize_t p = 0; p != P; ++p) {
+      for (size_t gi = 0; gi != strata.size(); ++gi)
+        assert(cell_counts[p][gi] == 0 || cell_counts[p][gi] >= 2);
+    }
+  }
+#endif
+
+  // A partition holding no volumes has no Casorati matrix to decompose, and an empty block reaching
+  //   Eigen aborts. The per-stratum spread above uses at most min(P, s/2) partitions per stratum, so
+  //   with several small strata the demeaning grouping can leave partitions unused even when P is
+  //   within the m/2 bound that resolve_num_partitions() enforces.
+  // Terminate rather than compact: silently proceeding with fewer partitions than the schedule
+  //   asked for would perform a different decomposition from the one requested while reporting
+  //   success. The outcome is a deterministic function of the volume count, the demeaning group
+  //   sizes and P (the shuffle permutes which volumes land in a partition, not how many), so this
+  //   fires identically for every patch rather than intermittently.
+  ssize_t populated = 0;
+  for (ssize_t p = 0; p != P; ++p)
+    if (load[p] > 0)
+      ++populated;
+  if (populated != P) {
+    assert(populated >= 1);
+    throw Exception("Cannot split " + str(m) + " volumes into " + str(P) + " partitions: the demeaning grouping (" +
+                    str(strata.size()) +
+                    " group(s), which must each be spread across partitions holding at least two "
+                    "volumes) leaves only " +
+                    str(populated) +
+                    " partition(s) populated. "
+                    "Reduce the requested partition count to " +
+                    str(populated) + " or fewer, or use a coarser -demean grouping");
   }
 
   return Partitioning(std::move(v2p), P, std::move(groups_present));

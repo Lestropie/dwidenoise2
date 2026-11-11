@@ -26,6 +26,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "image.h"
 #include "math/math.h"
 
@@ -46,15 +47,7 @@ namespace MR::Denoise::Estimator {
 //   the per-patch sigma^2 via get_sigma_sq().
 class ImposedSigma : public Base {
 public:
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s, //
-                    const ssize_t m,                              //
-                    const ssize_t n,                              //
-                    const ssize_t rp,                             //
-                    const Eigen::Vector3d &pos) const final {     //
-    assert(s.size() == std::min(m, n));
-    const ssize_t qnz = dimlong_nonzero(m, n, rp);
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t rnz = rank_nonzero(m, n, rp);
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const final {
     Result result;
     double sigma_sq;
     if (!get_sigma_sq(pos, sigma_sq))
@@ -62,43 +55,29 @@ public:
     result.sigma2 = sigma_sq;
     // From this noise level,
     //   get the upper bound of the MP distribution and rank of signal
-    //   given the ordered list of eigenvalues
-    result.lamplus = Math::pow2(1.0 + std::sqrt(double(rnz) / double(qnz))) * result.sigma2;
-    result.cutoff_p = rz;
-    for (ssize_t p = rz; p != s.size(); ++p) {
-      if (s[p] / qnz > result.lamplus)
-        break;
-      result.cutoff_p = p + 1;
-    }
+    //   given the ordered list of eigenvalues.
+    // On the standardised scale the Marchenko-Pastur boundary is the noise level itself, so the
+    //   known sigma^2 doubles as the cut and lambda+ need only be formed for export.
+    result.lamplus = sigma_sq * spectrum.edge();
+    result.cutoff_p = spectrum.noise_count(sigma_sq);
     return result;
   }
 
-  // Partitioned form: a single externally-provided sigma^2 applies to the whole patch; each
-  //   partition's signal/noise boundary is the Marchenko-Pastur edge for that partition's own
-  //   aspect ratio beta_p (which may differ slightly between partitions).
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
-                    const Eigen::Vector3d &pos) const final {
+  // Partitioned form: a single externally-provided sigma^2 applies to the whole patch, but the
+  //   signal/noise boundary it implies is each partition's own Marchenko-Pastur edge
+  //   sigma^2 (1+sqrt(beta_p))^2, since partitions of unequal volume count have unequal beta_p.
+  //   That family of boundaries is exactly the standardised cut z == sigma^2.
+  Result operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const final {
     Result result;
     double sigma_sq;
     if (!get_sigma_sq(pos, sigma_sq))
       return result;
     result.sigma2 = sigma_sq;
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
-    std::vector<double> lamplus_p(d.size());
-    for (size_t p = 0; p != d.size(); ++p)
-      lamplus_p[p] = Math::pow2(1.0 + std::sqrt(d[p].beta)) * sigma_sq;
-    double noise_sum = 0.0;
-    ssize_t noise_count = 0;
-    apply_threshold_per_partition(s, d, lamplus_p, result, noise_sum, noise_count);
+    apply_threshold_standardized(spectra, sigma_sq, result);
     // Representative boundary (normalised units) for export, using the pooled mean aspect ratio.
-    result.lamplus = Math::pow2(1.0 + std::sqrt(mean_beta(d))) * sigma_sq;
+    result.lamplus = sigma_sq * mean_edge(spectra);
     return result;
   }
-
-  bool supports_partitioning() const final { return true; }
 
 protected:
   // Provide sigma^2 at the patch centre `pos`; return false if it cannot be

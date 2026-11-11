@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <algorithm>
+
 #include "denoise/kernel/data.h"
 #include "denoise/kernel/sphere_base.h"
 #include "header.h"
@@ -31,7 +33,15 @@ public:
                     const default_type radius)                        //
       : SphereBase(voxel_grid, subsample_factors, radius),            //
         maximum_size(std::distance(shared->begin(), shared->end())) { //
-    INFO("Maximum number of voxels in " + str(radius) + "mm fixed-radius kernel is " + str(maximum_size));
+    // A fixed-radius kernel does not expand at the image edges, so a radius exceeding the image
+    //   is not merely wasteful: every patch becomes the whole image. Report that explicitly,
+    //   since the request itself is silently capped at the image bounding radius.
+    const default_type effective_radius = std::min(radius, fov_bounding_radius(voxel_grid));
+    if (effective_radius < radius)
+      WARN("Fixed-radius kernel of " + str(radius) +
+           "mm exceeds the image field of view; "
+           "every patch will contain the whole image");
+    INFO("Maximum number of voxels in " + str(effective_radius) + "mm fixed-radius kernel is " + str(maximum_size));
   }
   SphereFixedRadius(const SphereFixedRadius &) = default;
   ~SphereFixedRadius() override = default;

@@ -26,13 +26,25 @@
 
 namespace MR::Denoise::Estimator {
 
-// Impose a fixed (spatially-constant) noise level provided as a scalar value.
-class Fixed : public ImposedSigma {
+// Impose a spatially-constant noise level provided as a scalar value. The counterpart of
+//   Import, which imposes a spatially-varying level read from a map; Unity is the special
+//   case of this with sigma == 1.
+class Constant : public ImposedSigma {
 public:
-  Fixed(const default_type value, Image<float> &vst_noise_in) //
-      : sigma2(Math::pow2(value)),                            //
-        vst_image(vst_noise_in) {}                            //
-  void update_vst_image(Image<float> &new_vst_image) override { vst_image = new_vst_image; }
+  Constant(const default_type value, Image<float> &vst_noise_in) //
+      : sigma2(Math::pow2(value)),                               //
+        vst_image(vst_noise_in),                                 //
+        rescale_by_vst(true) {}                                  //
+  // Impose the level directly on unmodified data, for -vst_method none: there is then no
+  //   stabilising transform whose parameterisation could have absorbed it, and no rescaling to
+  //   undo. Mirrors the equivalent Import constructor.
+  explicit Constant(const default_type value) //
+      : sigma2(Math::pow2(value)),            //
+        rescale_by_vst(false) {}              //
+  void update_vst_image(Image<float> &new_vst_image) override {
+    if (rescale_by_vst)
+      vst_image = new_vst_image;
+  }
 
 protected:
   bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const override {
@@ -53,6 +65,7 @@ protected:
 private:
   const default_type sigma2;
   Image<float> vst_image;
+  bool rescale_by_vst;
 };
 
 } // namespace MR::Denoise::Estimator

@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -26,6 +27,7 @@
 #include "denoise/estimator/base.h"
 #include "denoise/estimator/pooling.h"
 #include "denoise/estimator/result.h"
+#include "denoise/spectrum.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Estimator {
@@ -33,18 +35,14 @@ namespace MR::Denoise::Estimator {
 class MRM2023 : public Base {
 public:
   MRM2023() = default;
-  Result operator()(const Eigen::VectorBlock<eigenvalues_type> s,     //
-                    const ssize_t m,                                  //
-                    const ssize_t n,                                  //
-                    const ssize_t rp,                                 //
-                    const Eigen::Vector3d & /*unused*/) const final { //
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final {
     // MRM2023 article suggests that mprime should subtract z
     //   since it refers to "non-zero singular values";
     //   possible that this is the case for all estimators
-    assert(s.size() == std::min(m, n));
-    const ssize_t rz = rank_zero(m, n, rp);
-    const ssize_t mprime = rank_nonzero(m, n, rp);
-    const ssize_t nprime = dimlong_nonzero(m, n, rp);
+    const auto &s = spectrum.eigenvalues();
+    const ssize_t rz = spectrum.rz();
+    const ssize_t mprime = spectrum.rnz();
+    const ssize_t nprime = spectrum.qnz();
     const double sigmasq_to_lamplus = Math::pow2(std::sqrt(nprime) + std::sqrt(mprime));
     double clam = s.segment(rz, mprime).sum();
     // Unlike Exp# code,
@@ -70,51 +68,65 @@ public:
     return result;
   }
 
-  // Partitioned form: the peel-off scan runs on the pooled (normalised) eigenvalues of all
-  //   partitions, using the rnz-weighted mean aspect ratio for the Marchenko-Pastur edge and the
-  //   aggregate long dimension (sum_p qnz_p) for the finite-size correction (valid because the
-  //   partitions are sized to share a common beta). The pooled signal/noise boundary is then
-  //   applied to each partition to obtain its own rank. Mirrors the single-PCA recursion: at each
-  //   step the largest-remaining candidate is tested against lambda+ = sigma^2 (1 + sqrt(beta))^2,
-  //   with sigma^2 = (mean of the remaining normalised eigenvalues) * Neff / (Neff - p) (the
-  //   pooled analogue of clam / ((m'-p)(n'-p))); the first step at which it falls below the edge
-  //   fixes the boundary.
-  Result operator()(const std::vector<eigenvalues_type> &s, //
-                    const std::vector<ssize_t> &m,           //
-                    const std::vector<ssize_t> &n,           //
-                    const std::vector<ssize_t> &rp,          //
+  // Partitioned form: the peel-off recursion of the single-PCA path, run over the concatenated
+  //   spectrum of all partitions. Two of its three ingredients are per-partition quantities once
+  //   the partitions are not of equal size.
+  //
+  // - The order of peeling. Components are removed most-significant-first, and significance means
+  //   position within one's own bulk, not raw magnitude; the scan therefore descends the
+  //   standardised value z rather than the normalised eigenvalue.
+  //
+  // - The stopping test. The manuscript's test is s_max < sigma^2 (sqrt(n') + sqrt(m'))^2, which
+  //   in normalised units is lambda < sigma^2 (1 + sqrt(beta))^2 and hence, on the standardised
+  //   scale, simply z < sigma^2 -- whatever beta may be. Testing the largest remaining z against
+  //   sigma^2 thus compares every partition against its own Marchenko-Pastur edge simultaneously,
+  //   where a single pooled edge built from an average beta would cut the wide-bulk partitions too
+  //   low and the narrow-bulk ones too high.
+  //
+  // - The noise level. sigma^2 = clam / ((m'-p)(n'-p)) is an energy divided by the degrees of
+  //   freedom that remain after p components have been peeled off, each removal costing one
+  //   direction of the long dimension. Generalised across partitions this is
+  //       sigma^2 = sum_p raw_sum_p / sum_p k_p (qnz_p - p_p)
+  //   with each partition deflated by the number of components peeled from *it*. Deflating one
+  //   notional aggregate dimension sum_p qnz_p by the total peel count instead is exact only while
+  //   the peeling happens to be distributed evenly between partitions.
+  Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final {
-    const std::vector<PartitionDims> d = partition_dims(m, n, rp);
-    // Pooled, sorted-ascending normalised nonzero eigenvalues across partitions.
-    const std::vector<double> pooled = pool_normalized(s, d);
     Result result;
-    const ssize_t mtot = ssize_t(pooled.size()); // total nonzero components ("mprime")
+    const std::vector<PooledEigenvalue> pooled = pool_standardized(spectra);
+    const ssize_t mtot = ssize_t(pooled.size());
     if (mtot == 0)
       return result;
-    const double neff = double(total_qnz(d)); // aggregate long dimension ("nprime")
-    const double beta = mean_beta(d);
-    const double edge = Math::pow2(1.0 + std::sqrt(beta));
-    double clam = 0.0;
-    for (const double lam : pooled)
-      clam += lam;
+
+    // Every component starts as a noise candidate; peeling proceeds from the top.
+    std::vector<ssize_t> k(spectra.size(), 0);      // components of each partition still candidates
+    std::vector<ssize_t> peeled(spectra.size(), 0); // components of each partition already removed
+    double clam = 0.0;                              // raw energy of the candidates
+    for (const PooledEigenvalue &entry : pooled) {
+      ++k[entry.partition];
+      clam += spectra[entry.partition].eigenvalue(entry.index);
+    }
 
     double sigma2_found = std::numeric_limits<double>::signaling_NaN();
-    double lamplus_found = std::numeric_limits<double>::signaling_NaN();
-    double tstar = std::numeric_limits<double>::signaling_NaN();
+    double zstar = std::numeric_limits<double>::signaling_NaN();
     bool found = false;
     for (ssize_t p = 0; p < mtot; ++p) {
-      const ssize_t k = mtot - p; // remaining noise candidates (the k smallest)
-      const double sigmasq = clam * neff / (double(k) * (neff - double(p)));
-      const double lamplus = sigmasq * edge;
-      const double lam_largest = pooled[k - 1]; // largest of the remaining candidates
-      if (lam_largest < lamplus) {
+      double dof = 0.0;
+      for (size_t q = 0; q != spectra.size(); ++q)
+        dof += spectra[q].dof_deflated(k[q], peeled[q]);
+      const double sigmasq = clam / dof;
+      const PooledEigenvalue &largest = pooled[mtot - p - 1]; // most significant remaining candidate
+      if (largest.z < sigmasq) {
         sigma2_found = sigmasq;
-        lamplus_found = lamplus;
-        tstar = lam_largest; // classify lambda <= largest noise eigenvalue as noise
+        zstar = largest.z; // classify components at or below the largest remaining as noise
         found = true;
         break;
       }
-      clam -= lam_largest; // peel this (it is signal) and continue
+      // Peel this component: it is signal, and its partition loses one direction of both its
+      //   candidate count and its long dimension.
+      clam -= spectra[largest.partition].eigenvalue(largest.index);
+      --k[largest.partition];
+      ++peeled[largest.partition];
     }
     if (!found) {
       // No noise boundary located: every component is treated as signal (mirrors the single-PCA
@@ -122,19 +134,17 @@ public:
       result.cutoff_p = 0;
       result.sigma2 = 0.0;
       result.lamplus = 0.0;
-      result.cutoff_p_partition.assign(d.size(), 0);
-      result.lamplus_partition.assign(d.size(), 0.0);
+      result.cutoff_p_partition.assign(spectra.size(), 0);
+      result.lamplus_partition.assign(spectra.size(), 0.0);
       return result;
     }
-    double noise_sum = 0.0;
-    ssize_t noise_count = 0;
-    apply_threshold(s, d, tstar, result, noise_sum, noise_count);
+    apply_threshold_standardized(spectra, zstar, result);
     result.sigma2 = sigma2_found;
-    result.lamplus = lamplus_found; // Marchenko-Pastur edge (normalised), as in the single-PCA path
+    // Marchenko-Pastur edge (normalised) at the representative aspect ratio, as in the single-PCA
+    //   path; the per-partition boundaries actually applied are in Result::lamplus_partition.
+    result.lamplus = sigma2_found * mean_edge(spectra);
     return result;
   }
-
-  bool supports_partitioning() const final { return true; }
 
   // Predicted relative RMSE of the noise level estimate; calibrated by numerical simulation of
   //   log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n). R^2 = 0.93.

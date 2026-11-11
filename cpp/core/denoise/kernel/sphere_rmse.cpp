@@ -46,7 +46,7 @@ Data SphereRMSE::operator()(const Voxel::index_type &pos) const {
     if (std::isfinite(result.max_distance) && table_it->sq_distance != max_sq_distance) {
       const default_type r = local_rank_per_mm * result.max_distance;
       const ssize_t n = ssize_t(result.voxels.size());
-      const bool at_least_square = (default_type(n) >= num_volumes + r);
+      const bool at_least_square = (default_type(n) >= num_nondegenerate + r);
       if (at_least_square &&
           (n >= cap_voxels || predicted_rmse(num_volumes, n, r) <= rmse_tolerance))
         break;

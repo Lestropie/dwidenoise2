@@ -63,6 +63,24 @@ enum class aggregator_type { EXCLUSIVE, GAUSSIAN, INVL0, RANK, UNIFORM };
 //   variance reduction without imprinting the sub-sampling grid or over-blurring the reconstruction.
 constexpr default_type default_aggregator_fwhm = 2.0;
 
+// Which component actually subtracts the group means, and hence which one is responsible for
+//   accounting for the rank they regress out. It is declared here, rather than alongside the other
+//   preconditioning enumerations, because it is the contract *between* the preconditioner and the
+//   Estimate/Recon classes: both sides key their own behaviour on it.
+// The rank removed is the same in either case -- Precondition::Preconditioner::partition_null_rank()
+//   -- because the same group count is regressed from each Casorati matrix that is decomposed. What
+//   differs is where it happens, and that must be stated rather than inferred from the partition
+//   count: reading a zero from a "how much rank did the preconditioner remove" query is
+//   indistinguishable from "no demeaning was performed at all" unless the caller already knows the
+//   partitioning state.
+// - NONE          : -demean none; no group means are regressed anywhere.
+// - PRECONDITIONER: subtracted once over the whole volume series by Preconditioner::operator(),
+//                     so the data reaching PCA are already mean-free.
+// - ESTIMATOR     : subtracted per partition inside Estimate/Recon, keeping each partition's mean
+//                     subtraction orthogonal to that partition's own decomposition. Used whenever
+//                     volume partitioning is active.
+enum class demean_site_t { NONE, PRECONDITIONER, ESTIMATOR };
+
 // These functions resolve dimensions of the matrix decomposition
 //   in the presence of precoditioning that make the data rank-deficient
 // - m = number of volumes
@@ -87,10 +105,16 @@ size_t num_volumes(const Header&);
 enum class noise_impute_type{ NAN_TO_ZERO, NONE };
 enum class noise_pad_type{ PAD, NONE };
 enum class noise_smooth_type{ SMOOTH, NONE };
+// When "coverage" is non-null, the padding is widened as necessary so that the returned map's
+//   field of view encloses that header's field of view (plus the interpolation margin). An
+//   externally-supplied map need not share the DWI voxel grid -- the estimator interpolates it --
+//   but it must be sampleable at every patch position the DWI grid can produce, which a map on a
+//   smaller or offset grid otherwise is not. Padded voxels replicate the nearest edge value.
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type impute = noise_impute_type::NAN_TO_ZERO,
                                  const noise_pad_type pad = noise_pad_type::PAD,
-                                 const noise_smooth_type smooth = noise_smooth_type::NONE);
+                                 const noise_smooth_type smooth = noise_smooth_type::NONE,
+                                 const Header *coverage = nullptr);
 
 // Construct the externally-provided noise level map (the variance-stabilising-transform scale)
 //   from a -noise_in command-line argument, which may be either:
@@ -100,8 +124,15 @@ Image<float> condition_noise_map(Image<float> &in,
 // The returned map is conditioned (padded) for safe cubic interpolation.
 Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
+// Decide whether a value-or-image argument (-noise_in, -rankpermm_in) was given as a plain
+//   number rather than an image path, returning the value if so. The raw text decides only which
+//   interpretation applies; the conversion then goes through ParsedArgument::as_float(), so the
+//   range declared on the option is what rejects an out-of-range value (and that exception
+//   propagates rather than being downgraded into an attempt to open the value as a filename).
+std::optional<default_type> imposed_scalar_value(const App::ParsedArgument &arg);
+
 // Per-voxel signal-rank density (estimated signal rank per mm of kernel radius), used to size the
-//   rank-adaptive spherical kernel (Kernel::SphereRank). Computed as
+//   rank-adaptive spherical kernel (Kernel::SphereRankAdaptive). Computed as
 //   rank_input / (num_partitions * max_dist), the scalar quantity accumulated across iterations in
 //   the dwidenoise2 / dwi2noise run() loops and (optionally) exported via -rankpermm_out. The
 //   returned scratch image shares the grid of max_dist (the subsample grid); voxels with a

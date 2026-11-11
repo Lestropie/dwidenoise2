@@ -37,8 +37,9 @@ public:
   void set_rank_pcanonzero(const std::string &path);
   void set_rank_input(const std::string &path);
   void set_rank_input();
-  void set_rank_output(const std::string &path);
-  void set_sum_optshrink(const std::string &path);
+  void set_trace_output(const std::string &path);
+  void set_dof_output(const std::string &path);
+  void set_trace_patch(const std::string &path);
   void set_max_dist(const std::string &path);
   void set_max_dist();
   void set_voxelcount(const std::string &path);
@@ -52,8 +53,20 @@ public:
   Image<float> lamplus;
   Image<uint16_t> rank_pcanonzero;
   Image<uint16_t> rank_input;
-  Image<float> rank_output;
-  Image<float> sum_optshrink;
+  // First spectral moment of the composite (aggregated) filter, tr(Sbar) = sum_i w_i: the effective
+  //   number of degrees of freedom retained per voxel. For a hard filter (truncation / optimal
+  //   thresholding) every w_i is 0 or 1 and this is exactly the output rank.
+  Image<float> trace_output;
+  // (Approximate) chi-squared-matching degrees of freedom of the residual energy of a model fit to
+  //   the denoised data, (sum_i w_i^2)^2 / sum_i w_i^4, formed after aggregation from the two
+  //   accumulators below. Identical to trace_output for a hard filter.
+  Image<float> dof_output;
+  // Aggregation-weighted accumulators for the second and fourth spectral moments, from which
+  //   dof_output is derived once aggregation is complete; scratch unless dof_output was requested.
+  Image<float> trace2_accum;
+  Image<float> trace4_accum;
+  // Unaggregated per-patch first moment, on the sub-sampled (patch centre) grid.
+  Image<float> trace_patch;
   Image<float> max_dist;
   Image<uint16_t> voxelcount;
   Image<uint16_t> patchcount;

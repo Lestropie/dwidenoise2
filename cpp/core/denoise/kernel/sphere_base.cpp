@@ -17,15 +17,37 @@
 
 #include "denoise/kernel/sphere_base.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "denoise/denoise.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Kernel {
 
+default_type SphereBase::fov_bounding_radius(const Header &voxel_grid) {
+  return std::sqrt(Math::pow2(voxel_grid.size(0) * voxel_grid.spacing(0))     //
+                   + Math::pow2(voxel_grid.size(1) * voxel_grid.spacing(1))   //
+                   + Math::pow2(voxel_grid.size(2) * voxel_grid.spacing(2))); //
+}
+
 SphereBase::Shared::Shared(const Header &voxel_grid,
                            const std::array<ssize_t, 3> &subsample_factors,
                            const std::array<default_type, 3> &halfvoxel_offsets,
-                           const default_type max_radius) {
+                           const default_type requested_radius) {
+  // An offset larger than the image's own extent can never index a voxel inside the FoV, and every
+  //   spherical kernel discards out-of-bounds offsets, so a radius beyond the image diagonal
+  //   contributes nothing but cost. Cap the searchlight accordingly: this changes no result, and it
+  //   is what keeps an over-large "radius=" or "voxels=" request bounded. Without it the table is
+  //   sized purely from the request -- 2001^3 entries for "radius=1000" on a 6x6x6 image, which
+  //   never finishes building, and ~7e8 entries for "voxels=100000", which throws std::bad_alloc
+  //   out of reserve() and escapes main as a non-Exception termination.
+  const default_type max_radius = std::min(requested_radius, fov_bounding_radius(voxel_grid));
+  if (max_radius < requested_radius)
+    INFO("Requested spherical kernel radius (" + str(requested_radius) +
+         "mm) exceeds the image field of view; "
+         "the search table is capped at the image bounding radius (" +
+         str(max_radius) + "mm)");
   const default_type max_radius_sq = Math::pow2(max_radius);
   Eigen::Array<int, 3, 2> bounding_box;
   for (ssize_t axis = 0; axis != 3; ++axis) {

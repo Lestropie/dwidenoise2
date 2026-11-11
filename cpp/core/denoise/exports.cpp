@@ -58,9 +58,18 @@ void Exports::set_rank_input() {
   rank_input = Image<uint16_t>::scratch(H, "Scratch image for PCA patch rank");
 }
 
-void Exports::set_rank_output(const std::string &path) { rank_output = Image<float>::create(path, *H_in); }
+void Exports::set_trace_output(const std::string &path) { trace_output = Image<float>::create(path, *H_in); }
 
-void Exports::set_sum_optshrink(const std::string &path) { sum_optshrink = Image<float>::create(path, *H_ss); }
+void Exports::set_dof_output(const std::string &path) {
+  dof_output = Image<float>::create(path, *H_in);
+  // The second and fourth moments are accumulated separately because the degrees-of-freedom measure
+  //   derived from them is non-linear: unlike the first moment it cannot be aggregated across
+  //   patches directly, so the two moments are aggregated and only then combined (see the commands).
+  trace2_accum = Image<float>::scratch(*H_in, "Scratch image for aggregated squared filter weights");
+  trace4_accum = Image<float>::scratch(*H_in, "Scratch image for aggregated fourth-power filter weights");
+}
+
+void Exports::set_trace_patch(const std::string &path) { trace_patch = Image<float>::create(path, *H_ss); }
 
 void Exports::set_max_dist(const std::string &path) { max_dist = Image<float>::create(path, *H_ss); }
 void Exports::set_max_dist() { max_dist = Image<float>::scratch(*H_ss, "Scratch image for maximal patch radius"); }

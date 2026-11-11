@@ -23,9 +23,9 @@
 #include "denoise/denoise.h"
 #include "denoise/kernel/base.h"
 #include "denoise/kernel/cuboid.h"
-#include "denoise/kernel/sphere_radius.h"
-#include "denoise/kernel/sphere_rank.h"
 #include "denoise/kernel/sphere_minvoxels.h"
+#include "denoise/kernel/sphere_radius.h"
+#include "denoise/kernel/sphere_rank_adaptive.h"
 #include "denoise/kernel/sphere_rmse.h"
 #include "math/math.h"
 
@@ -48,7 +48,11 @@ const char *const shape_description =
     "and so for voxels near the image edge a reduced number of voxels will be present in the kernel. "
     "For a cuboid kernel, "
     "the centre of the kernel will be offset from the voxel being processed "
-    "such that the entire volume of the kernel resides within the image FoV.";
+    "such that the entire volume of the kernel resides within the image FoV. "
+    "A requested radius or voxel count larger than the image itself is not an error: "
+    "the spherical search is capped at the extent of the image FoV "
+    "(beyond which no further voxel could be included), "
+    "so such a request simply saturates at the whole image.";
 
 const char *const default_size_description =
     "The following describes the ways in which "
@@ -65,7 +69,11 @@ const char *const default_size_description =
     "the command will select the smallest near-isotropic patch size "
     "whose voxel count is at least twice the number of DW images in the input data "
     "(the default aspect ratio; a different ratio may be requested as \"cuboid=<ratio>x\", "
-    "e.g. \"cuboid=1x\" for a patch of at least the number of DW images).";
+    "e.g. \"cuboid=1x\" for a patch of at least the number of DW images). "
+    "The auto-selected extent is additionally clamped to the image dimensions, "
+    "so that the patch always resides within the image FoV: "
+    "a thin slab therefore yields a within-plane patch "
+    "(and the requested aspect ratio may not be achievable).";
 
 const char *const cuboid_size_description =
     "Permissible sizes for the cuboid kernel depend on the subsampling factor. "
@@ -125,14 +133,14 @@ void warn_casorati_shape(const ssize_t n,
 }
 } // namespace
 
-std::shared_ptr<Base>
-make_kernel(const Header &H,
-            const std::array<ssize_t, 3> &subsample_factors,
-            const KernelSpec &kernel_spec,
-            const Image<float> &rank_per_mm,
-            const ssize_t full_num_volumes,
-            const ssize_t num_partitions,
-            const predicted_rmse_func &predicted_rmse) {
+std::shared_ptr<Base> make_kernel(const Header &H,
+                                  const std::array<ssize_t, 3> &subsample_factors,
+                                  const KernelSpec &kernel_spec,
+                                  const Image<float> &rank_per_mm,
+                                  const ssize_t full_num_volumes,
+                                  const ssize_t num_partitions,
+                                  const predicted_rmse_func &predicted_rmse,
+                                  const ssize_t num_null_components) {
   std::shared_ptr<Kernel::Base> kernel;
   // Whether the kernel size is derived from the volume count (true for the dynamic
   //   spherical kernels) or fixed by geometry (false for fixed-radius sphere / fixed voxel
@@ -143,6 +151,16 @@ make_kernel(const Header &H,
   //   preserves the target aspect ratio; the SVD then operates on m'/P x ~aspect*(m'/P) blocks.
   assert(num_partitions >= 1);
   const ssize_t volumes_for_sizing = std::max<ssize_t>(1, Denoise::num_volumes(H) / num_partitions);
+  // Volume-space dimensions that actually carry data. Demeaning regresses num_null_components
+  //   group means, so that many directions of the partition's Casorati matrix are identically
+  //   zero (cf. rank_nonzero() = min(m - rp, n)). The kernels below target a square *noise*
+  //   block, and a null direction is neither signal nor noise, so the target must be formed
+  //   from the non-degenerate volume count: n - r == m' - z, i.e. n >= (m' - z) + r. Sizing
+  //   from m' instead overshoots by exactly z. Under partitioning this matters more, not less:
+  //   every partition regresses the same group count out of only m'/P volumes, so z is a larger
+  //   fraction of each partition the more partitions there are.
+  assert(num_null_components >= 0);
+  const ssize_t volumes_nondegenerate = std::max<ssize_t>(1, volumes_for_sizing - num_null_components);
 
   // Every attribute of the kernel (shape and size) is taken from this iteration's schedule row
   //   (kernel_spec); there are no longer any command-line kernel options to override it.
@@ -170,25 +188,28 @@ make_kernel(const Header &H,
     if (!predicted_rmse)
       throw Exception("An RMSE-tolerance kernel requires a noise-level estimator with a "
                       "predicted-RMSE model; the selected estimator does not provide one");
-    kernel = std::make_shared<SphereRMSE>(H, subsample_factors, rank_per_mm, volumes_for_sizing,
-                                          kernel_spec.param, predicted_rmse);
+    kernel = std::make_shared<SphereRMSE>(
+        H, subsample_factors, rank_per_mm, volumes_for_sizing, kernel_spec.param, predicted_rmse, num_null_components);
     break;
   case kernel_spec_type::RANK:
     // Square noise block n >= m + r; reserved for the final reconstruction pass.
     if (!rank_per_mm.valid())
       throw Exception("A rank-adaptive (square noise block) kernel requires a signal-rank density "
                       "map from a prior iteration, but none is available");
-    kernel = std::make_shared<SphereRank>(H, subsample_factors, rank_per_mm, volumes_for_sizing);
+    kernel = std::make_shared<SphereRankAdaptive>(
+        H, subsample_factors, rank_per_mm, volumes_for_sizing, num_null_components);
     break;
-  case kernel_spec_type::RANK_FIXED: {
+  case kernel_spec_type::RANK_IMPOSED: {
     // n = m + r spherical kernel for the imposed fixed-rank estimator; r is the fixed signal rank
     //   supplied via dwidenoise2 -fixed_rank (a constant, not a per-voxel data-driven density).
     auto opt = get_options("fixed_rank");
     if (opt.empty())
-      throw Exception("The \"rank_fixed\" kernel (n = m + r) is applicable only when a fixed signal "
+      throw Exception("The \"rank_imposed\" kernel (n = m + r) is applicable only when a fixed signal "
                       "rank is imposed via -fixed_rank");
     const ssize_t r = ssize_t(opt[0][0]);
-    kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, volumes_for_sizing + r);
+    // Static counterpart of the SphereRankAdaptive criterion, with r a constant rather than a per-voxel
+    //   density: n = (m' - z) + r.
+    kernel = std::make_shared<SphereMinVoxels>(H, subsample_factors, volumes_nondegenerate + r);
     break;
   }
   case kernel_spec_type::CUBOID: {
@@ -213,17 +234,40 @@ make_kernel(const Header &H,
       //   aspect ratio; the bundled default is 2.0, since a near-square Casorati matrix estimates
       //   the noise level imprecisely).
       const default_type cuboid_factor = kernel_spec.param;
-      extent = {subsample_factors[0] & 1 ? 3 : 2, subsample_factors[1] & 1 ? 3 : 2, subsample_factors[2] & 1 ? 3 : 2};
-      ssize_t prev_num_voxels = 0; // Exit loop below if maximum achievable extent is reached
-      while (extent[0] * extent[1] * extent[2] < cuboid_factor * std::max(total_num_volumes, prev_num_voxels)) {
-        prev_num_voxels = extent[0] * extent[1] * extent[2];
+      // Largest per-axis extent that both fits within the image and carries the parity the
+      //   sub-sampling factor demands (odd extents for unity / odd sub-sampling, so that a unique
+      //   voxel lies at the kernel centre; even extents for even sub-sampling). The command is
+      //   choosing the extent here, so it must choose a feasible one: seeding at 3 (or 2) without
+      //   reference to H.size(axis) yields a patch that cannot reside within the image FoV, as
+      //   shape_description requires, and that the growth loop can never repair.
+      std::array<ssize_t, 3> cap;
+      for (ssize_t axis = 0; axis != 3; ++axis) {
+        const bool odd_extents = (subsample_factors[axis] & 1) != 0;
+        cap[axis] = odd_extents ? (H.size(axis) - ((H.size(axis) + 1) & 1)) // largest odd <= size
+                                : (H.size(axis) - (H.size(axis) & 1));      // largest even <= size
+        if (cap[axis] < (odd_extents ? 1 : 2))
+          throw Exception("Cannot construct a cuboid kernel for this image: axis " + str(axis) + " has only " +
+                          str(H.size(axis)) +
+                          " voxel(s), and sub-sampling by an even factor along that axis requires a kernel "
+                          "extent of at least 2 voxels; use unity or odd spatial sub-sampling on that axis, "
+                          "or a spherical kernel");
+        extent[axis] = std::min<ssize_t>(odd_extents ? 3 : 2, cap[axis]);
+      }
+      // Grow the near-isotropic patch until it holds at least cuboid_factor * m voxels, or until no
+      //   axis can grow any further. Terminating on "nothing grew" is what bounds this loop: the
+      //   voxel-count predicate alone cannot, since once every axis has saturated it reduces to
+      //   count < factor * count, permanently true for any factor > 1.
+      while (extent[0] * extent[1] * extent[2] < cuboid_factor * total_num_volumes) {
+        const std::array<ssize_t, 3> extent_before = extent;
         // If multiple axes are tied for spatial extent in mm, increment all of them
         const default_type min_length =
             std::min({extent[0] * H.spacing(0), extent[1] * H.spacing(1), extent[2] * H.spacing(2)});
         for (ssize_t axis = 0; axis != 3; ++axis) {
-          if (extent[axis] * H.spacing(axis) == min_length && extent[axis] + 2 <= H.size(axis))
+          if (extent[axis] * H.spacing(axis) == min_length && extent[axis] + 2 <= cap[axis])
             extent[axis] += 2;
         }
+        if (extent == extent_before)
+          break;
       }
     }
     INFO("selected cuboid patch size: " + str(extent[0]) + " x " + str(extent[1]) + " x " + str(extent[2]));
