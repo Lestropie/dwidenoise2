@@ -63,10 +63,22 @@ public:
   virtual default_type mean(const default_type nu, const default_type sigma) const = 0;
   virtual default_type variance(const default_type nu, const default_type sigma) const = 0;
 
-  // Number of receive channels combined by sum-of-squares (1 = Rician / Gaussian).
-  virtual ssize_t num_channels() const = 0;
-  // Statistical degrees of freedom (2 * num_channels for magnitude data).
-  virtual ssize_t dof() const = 0;
+  // Statistical degrees of freedom of the distribution (2 for Gaussian / Rician).
+  //   Real-valued rather than integral: what governs the magnitude distribution is not the number
+  //   of physical coil elements but the number of statistically independent channels the
+  //   reconstruction actually combined, which correlation between channels renders fractional
+  //   (see denoise/precondition/noise_model/coils.h).
+  //   This, not the channel count, is the quantity in which every internal computation is
+  //   expressed; a channel count supplied by the user is doubled at the point of parsing and is
+  //   not carried any further.
+  virtual default_type dof() const = 0;
+
+  // Effective number of receive channels combined by sum-of-squares, being exactly half the
+  //   degrees of freedom: each complex channel contributes two real Gaussian components. The
+  //   relation is a definition rather than an approximation, and holds for fractional counts, so
+  //   it is stated here once and derived rather than being separately implemented (and separately
+  //   liable to drift) by each model.
+  default_type num_channels() const { return 0.5 * dof(); }
 
   virtual std::string description() const = 0;
 

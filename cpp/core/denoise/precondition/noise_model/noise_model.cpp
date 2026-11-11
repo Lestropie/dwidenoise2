@@ -17,6 +17,7 @@
 
 #include "denoise/precondition/noise_model/noise_model.h"
 
+#include <algorithm>
 #include <cassert>
 
 #include "denoise/precondition/noise_model/gaussian.h"
@@ -26,8 +27,10 @@
 
 namespace MR::Denoise::Precondition::NoiseModel {
 
+default_type clamp_dof(const default_type dof) { return std::max(dof, NonCentralChi::min_dof); }
+
 std::shared_ptr<Base> make(const distribution_t distribution, //
-                           const ssize_t num_channels,        //
+                           const default_type dof,            //
                            const vst_method_t vst_method) {   //
   // -vst_method none / linear select the transform directly, independent of the
   //   underlying noise distribution:
@@ -48,7 +51,7 @@ std::shared_ptr<Base> make(const distribution_t distribution, //
   case distribution_t::RICIAN:
     return std::make_shared<Rician>(vst_method);
   case distribution_t::NONCENTRALCHI:
-    return std::make_shared<NonCentralChi>(num_channels, vst_method);
+    return std::make_shared<NonCentralChi>(dof, vst_method);
   }
   assert(false);
   return nullptr;

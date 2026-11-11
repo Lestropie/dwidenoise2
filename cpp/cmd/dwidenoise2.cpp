@@ -609,8 +609,10 @@ void run(Header &dwi,
   Image<float> vst_image(user_vst_image);
 
   // Noise model governing the variance-stabilising transform, configured from
-  //   the -noise_dof and -vst_method options (Gaussian for complex data).
-  std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value);
+  //   the -noise_channels / -noise_dof and -vst_method options (Gaussian for complex data). Where
+  //   magnitude data receive a non-linear transform and neither channel-count option was provided,
+  //   the effective receive-channel count is instead inferred from the header key-values.
+  std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value, dwi);
 
   Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model, grad);
   // Cold adaptive-phase-correction solves within the noise-estimation iterations below are

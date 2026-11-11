@@ -42,8 +42,7 @@ public:
   default_type jacobian(const default_type /*u*/, const default_type /*sigma*/) const final { return default_type(1); }
   default_type mean(const default_type nu, const default_type /*sigma*/) const final { return nu; }
   default_type variance(const default_type /*nu*/, const default_type sigma) const final { return sigma * sigma; }
-  ssize_t num_channels() const final { return 1; }
-  ssize_t dof() const final { return 2; }
+  default_type dof() const final { return default_type(2); }
   std::string description() const final { return "none (no variance-stabilising transform)"; }
   bool is_linear() const final { return true; }
 };

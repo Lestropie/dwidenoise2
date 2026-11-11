@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <cassert>
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -53,6 +55,15 @@ public:
   //   noise, i.e. rank 0), and lamplus_partition[p] is that partition's (normalised) boundary.
   std::vector<ssize_t> cutoff_p_partition;
   std::vector<double> lamplus_partition;
+
+  // Number of noise components in one decomposition of the patch: partition "partition", or the
+  //   patch's single decomposition where that index is -1 (for which the pooled cutoff_p is that
+  //   decomposition's own count). Consumers of a decomposition are written once against this,
+  //   rather than once per partitioning state against the two members separately.
+  ssize_t cutoff(const ssize_t partition) const {
+    assert(partition < 0 || partition < ssize_t(cutoff_p_partition.size()));
+    return partition < 0 ? cutoff_p : cutoff_p_partition[partition];
+  }
 };
 
 } // namespace MR::Denoise::Estimator
