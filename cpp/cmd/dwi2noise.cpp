@@ -319,10 +319,6 @@ void run(Header &dwi,
     const ssize_t mprime = preconditioner.header().size(3);
     const ssize_t num_partitions =
         Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
-    if (num_partitions > 1 && !estimator->supports_partitioning())
-      throw Exception("The selected noise level estimator does not support volume partitioning "
-                      "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
-                      " partitions); choose a different -estimator or remove partitioning from the schedule");
     // With partitioning the demeaning moves into Estimate (per partition); impose the resolved site
     //   before update_parameters() so the preconditioner skips the then-unused mean pass.
     const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
@@ -385,10 +381,6 @@ void run(Header &dwi,
   const ssize_t mprime_final = preconditioner.header().size(3);
   const ssize_t num_partitions =
       Iterative::resolve_num_partitions(iterations.back(), mprime_final, "The final schedule row");
-  if (num_partitions > 1 && !estimator->supports_partitioning())
-    throw Exception("The selected noise level estimator does not support volume partitioning "
-                    "(final schedule row requests " + str(num_partitions) +
-                    " partitions); choose a different -estimator or remove partitioning from the schedule");
   const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
   preconditioner.set_demean_site(demean_site);
   preconditioner.update_parameters(vst_image, input);

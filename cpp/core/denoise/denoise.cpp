@@ -22,11 +22,9 @@
 #include <cmath>
 #include <limits>
 #include <optional>
-#include <utility>
 
 #include "algo/threaded_loop.h"
 #include "axes.h"
-#include "denoise/metadata.h"
 #include "exception.h"
 #include "filter/smooth.h"
 #include "mrtrix.h"
@@ -175,20 +173,6 @@ size_t num_volumes(const Header& H) {
 
 namespace {
 
-// Siemens' zero-fill interpolation flags, as exported by dcm2niix from the CSA header.
-const std::vector<std::string> interpolation_keys{"Interpolation2D", "Interpolation3D"};
-
-// Header key-values reporting the in-plane matrix that was actually acquired:
-// - "AcquisitionMatrix": DICOM Acquisition Matrix (0018,1310), four values -- frequency rows,
-//     frequency columns, phase rows, phase columns -- of which the two that do not apply are zero.
-// - "BaseResolution": the Siemens readout base resolution, exported by dcm2niix from the CSA header
-//     ("# of acquisition lines").
-const std::vector<std::string> acquired_matrix_keys{"AcquisitionMatrix", "BaseResolution"};
-
-// Matrix sizes are integers, but arrive via the generic floating-point interpretation of a
-//   key-value provided by denoise/metadata.h.
-std::string str_matrix_size(const default_type value) { return str(ssize_t(std::lround(value))); }
-
 // Voxel-wise functors for ThreadedLoop. ThreadedLoop copies the functor per thread, so each
 //   thread receives independent Image voxel accessors (deep-copied); the operations below are
 //   strictly voxel-local, so no locking is required.
@@ -248,103 +232,6 @@ private:
   default_type partition_scale;
 };
 } // namespace
-
-void warn_if_metadata_precludes_mp(const Header &H) {
-  const KeyValues &keyval = H.keyval();
-
-  // 1. Resampling of the image data by interpolation, gradient non-linearity distortion correction
-  //    being the instance that image metadata most often reports.
-  //    Siemens declares the correction it has applied among the Image Type descriptors: "DIS2D" for
-  //    the in-plane-only correction of pre-XA software, "DIS3D" for the through-plane correction of
-  //    XA30 and later, and "ND" ("no distortion [correction]") as the corresponding negative
-  //    declaration. dcm2niix derives the BIDS "NonlinearGradientCorrection" field from those same
-  //    descriptors, but only for some software versions, so both are interrogated.
-  std::vector<std::string> resampled = find_metadata_tokens(keyval, descriptive_keys, {"DIS2D", "DIS3D"});
-  if (metadata_bool(keyval, "NonlinearGradientCorrection").value_or(false))
-    resampled.push_back("\"NonlinearGradientCorrection\" is set");
-  if (resampled.empty()) {
-    // The negative declaration is worth reporting: it distinguishes "the data are known not to have
-    //   been distortion-corrected" from the far more common "the header says nothing either way".
-    if (!find_metadata_tokens(keyval, descriptive_keys, {"ND"}).empty())
-      INFO("Image header explicitly declares that no gradient non-linearity distortion correction"
-           " has been applied to the input data");
-  } else {
-    WARN("Image header indicates that gradient non-linearity distortion correction"
-         " has been applied to the input data (" + join(resampled, "; ") + ");"
-         " the interpolation intrinsic to such resampling correlates the noise between"
-         " neighbouring voxels, so the eigenspectrum of each patch will not conform to the"
-         " Marchenko-Pastur distribution and the noise level will be underestimated;"
-         " denoising should instead be performed on the data as reconstructed by the scanner,"
-         " prior to any such correction");
-  }
-
-  // 2. Reconstruction of a finer image matrix than the acquired k-space supports, ie. zero-filling
-  //    of unacquired k-space.
-  std::vector<std::string> zerofilled;
-  // Siemens writes its zero-fill interpolation flags only when the feature was active, so the mere
-  //   presence of one of these fields is the indication; a value that is explicitly false or zero is
-  //   nonetheless respected.
-  for (const auto &key : interpolation_keys) {
-    if (keyval.find(key) != keyval.end() && metadata_bool(keyval, key).value_or(true))
-      zerofilled.push_back("\"" + key + "\" is set");
-  }
-  // dcm2niix exports both the number of phase-encode lines actually acquired (from DICOM MR
-  //   Acquisition Phase Encoding Steps In-plane (0018,9231)) and the reconstructed matrix size along
-  //   that same axis. Partial Fourier and in-plane parallel imaging each reduce the former relative
-  //   to the latter without the outer k-space having been zero-filled, so both are discounted before
-  //   the residual discrepancy is judged.
-  const std::optional<default_type> acquired_pe = metadata_float(keyval, "AcquisitionMatrixPE");
-  const std::optional<default_type> recon_pe = metadata_float(keyval, "ReconMatrixPE");
-  if (acquired_pe.has_value() && recon_pe.has_value() && acquired_pe.value() > 0.0) {
-    default_type partial_fourier = metadata_float(keyval, "PartialFourier").value_or(1.0);
-    if (partial_fourier > 1.0 && partial_fourier <= 100.0)
-      partial_fourier *= 0.01; // Written as a percentage rather than the BIDS fraction
-    if (!(partial_fourier > 0.0 && partial_fourier <= 1.0))
-      partial_fourier = 1.0;
-    default_type acceleration = metadata_float(keyval, "ParallelReductionFactorInPlane").value_or(1.0);
-    if (!(acceleration >= 1.0))
-      acceleration = 1.0;
-    const default_type supported = acquired_pe.value() * acceleration / partial_fourier;
-    // The tolerance absorbs the rounding of the acquired line count and the parallel imaging
-    //   reference lines, which inflate that count above the exact quotient.
-    if (recon_pe.value() > 1.05 * supported)
-      zerofilled.push_back("the reconstructed phase-encode matrix (\"ReconMatrixPE\" = " +
-                           str_matrix_size(recon_pe.value()) + ") exceeds what the " +
-                           str_matrix_size(acquired_pe.value()) +
-                           " acquired phase-encode lines (\"AcquisitionMatrixPE\") support");
-  }
-  // Where the acquired in-plane matrix is reported instead as a whole, it is compared against the
-  //   reconstructed in-plane matrix. In each case the larger of the two values is used: whichever
-  //   way round the readout and phase-encode axes lie, the larger acquired count is the readout base
-  //   resolution (the phase-encode count being the one reduced by a rectangular field of view), and
-  //   the readout direction is subject to neither parallel imaging nor, ordinarily, partial Fourier,
-  //   so this comparison requires no discounting.
-  std::vector<std::pair<std::string, default_type>> acquired_inplane;
-  for (const auto &key : acquired_matrix_keys) {
-    const std::optional<default_type> value = metadata_max(keyval, key);
-    if (value.has_value())
-      acquired_inplane.emplace_back(key, value.value());
-  }
-  if (!acquired_inplane.empty()) {
-    const ssize_t recon_inplane = std::max(H.size(0), H.size(1));
-    for (const auto &acquired : acquired_inplane) {
-      // Zero-fill interpolation doubles the reconstructed matrix, so requiring an excess of more
-      //   than half again retains that signature while tolerating the more modest enlargement
-      //   produced by phase oversampling (conventionally no more than 50%), which is not
-      //   zero-filling of unacquired k-space.
-      if (default_type(recon_inplane) > 1.5 * acquired.second)
-        zerofilled.push_back("the reconstructed in-plane matrix (" + str(recon_inplane) +
-                             ") exceeds the acquired matrix (\"" + acquired.first + "\" = " +
-                             str_matrix_size(acquired.second) + ")");
-    }
-  }
-  if (!zerofilled.empty())
-    WARN("Image header indicates that the input data were reconstructed at a finer image matrix"
-         " than the acquired k-space supports (" + join(zerofilled, "; ") + ");"
-         " zero-filling of unacquired k-space correlates the noise between neighbouring voxels,"
-         " so the eigenspectrum of each patch will not conform to the Marchenko-Pastur distribution"
-         " and the noise level will be underestimated");
-}
 
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type nan_to_zero,

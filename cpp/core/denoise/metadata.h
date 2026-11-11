@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "header.h"
 #include "types.h"
 
 // Generic interrogation of image header key-values.
@@ -86,5 +87,26 @@ std::optional<default_type> metadata_float(const KeyValues &keyval, const std::s
 // The largest of the numbers in a multi-valued numeric header key-value, or nullopt if the key is
 //   absent, or any of its values is not a finite number, or all of them are non-positive.
 std::optional<default_type> metadata_max(const KeyValues &keyval, const std::string &key);
+
+// Interrogate the input image header key-values for evidence that upstream image processing has
+//   already invalidated the assumptions on which Marchenko-Pastur-based noise level estimation
+//   rests, issuing a WARN() for each class of violation for which evidence is found.
+// Two such classes are discoverable from image metadata of DICOM provenance:
+// - Resampling of the image data by interpolation, of which vendor gradient non-linearity
+//   distortion correction is the most prevalent instance. Interpolation correlates the noise
+//   between neighbouring voxels, breaking the independence on which the Marchenko-Pastur
+//   distribution of the noise eigenvalues depends.
+// - Reconstruction of a finer image matrix than the acquired k-space supports, ie. zero-filling of
+//   unacquired k-space. The unmeasured outer k-space contributes signal but no noise, which
+//   likewise correlates the noise between neighbouring voxels.
+// In both cases the consequence for this command is the same: the noise portion of each patch's
+//   eigenspectrum is compressed relative to the Marchenko-Pastur prediction, and the noise level
+//   is consequently underestimated.
+// The absence of any warning is *not* evidence that the input data are suitable. Most of the
+//   relevant fields do not survive conversion from DICOM (that for the acquisition matrix
+//   especially rarely does), the vendor conventions interrogated here are not exhaustive, and
+//   resampling performed after conversion (eg. gradient unwarping or upsampling by a third-party
+//   tool) leaves no trace in the image header at all.
+void warn_if_metadata_precludes_mp(const Header &H);
 
 } // namespace MR::Denoise
