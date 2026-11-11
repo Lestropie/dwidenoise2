@@ -650,10 +650,6 @@ void run(Header &dwi,
     const ssize_t mprime = preconditioner.header().size(3);
     const ssize_t num_partitions =
         Iterative::resolve_num_partitions(iterations[iteration], mprime, "Schedule iteration " + str(iteration + 1));
-    if (num_partitions > 1 && !estimator->supports_partitioning())
-      throw Exception("The selected noise level estimator does not support volume partitioning "
-                      "(schedule iteration " + str(iteration + 1) + " requests " + str(num_partitions) +
-                      " partitions); choose a different -estimator or remove partitioning from the schedule");
     const demean_site_t demean_site = resolve_demean_site(demean, num_partitions);
     preconditioner.set_demean_site(demean_site);
     preconditioner.update_parameters(vst_image, input);
@@ -782,10 +778,6 @@ void run(Header &dwi,
       dynamic_cast<const Estimator::ImposedSigma *>(estimator.get()) == nullptr)
     estimator.reset(new Estimator::Unity());
 
-  if (num_partitions > 1 && !estimator->supports_partitioning())
-    throw Exception("The selected noise level estimator does not support volume partitioning "
-                    "(final schedule row requests " + str(num_partitions) +
-                    " partitions); choose a different -estimator or remove partitioning from the schedule");
   if (num_partitions > 1 && debias_anchor == debias_anchor_t::GROUP_MEAN)
     throw Exception("The GROUP_MEAN debias anchor is incompatible with volume partitioning; "
                     "use -debias_anchor sample (the default) when partitioning is enabled");
