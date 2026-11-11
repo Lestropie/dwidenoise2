@@ -463,7 +463,10 @@ fully user-configurable through a schedule file supplied via the `-schedule` opt
 Several schedules are bundled with the software,
 including "`default`" (the built-in behaviour described above),
 "`vlarge`" (a lighter schedule for very large series),
-and "`legacy`" (approximating the behaviour of the original `dwidenoise` command).
+"`legacy`" (approximating the behaviour of the original `dwidenoise` command),
+and "`nordic`" (approximating the NORDIC method of [Moeller et al. (2021)](#moeller2021),
+within the constraints of the information available to this software;
+the schedule file itself documents the correspondence, and the departures from it, in full).
 
 ## Acknowledgments
 
@@ -518,6 +521,14 @@ NeuroImage 2020:215;116852.
 J.V. Manjon, P. Coupe, L. Concha, A. Buades, D.L. Collins, M. Robles.
 Diffusion Weighted Image Denoising Using Overcomplete Local PCA.
 PLoS ONE 2013:8(9);e73021.
+
+<a id="moeller2021"></a>
+**Moeller et al. (2021)**
+S. Moeller, P.K. Pisharady, S. Ramanna, C. Lenglet, X. Wu, L. Dowdle, E. Yacoub, K. Ugurbil,
+M. Akcakaya.
+NOise reduction with DIstribution Corrected (NORDIC) PCA in dMRI
+with complex-valued parameter-free locally low-rank processing.
+NeuroImage 2021:226;117539.
 
 <a id="olesen2023"></a>
 **Olesen et al. (2023)**
