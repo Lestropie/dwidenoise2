@@ -57,6 +57,45 @@ const char *const demodulation_description =
     "similarly to performed in Cordero-Grande et al. 2019. "
     "'none' disables phase demodulation.";
 
+const char *const noise_channels_description =
+    "Options -noise_channels and -noise_dof configure the noise model for magnitude data"
+    " (both are ignored for complex input data)."
+    " -noise_channels takes the EFFECTIVE number of receive channels N"
+    " combined by sum-of-squares reconstruction of magnitude data,"
+    " such that the noise follows a non-central chi distribution with 2N degrees of freedom;"
+    " -noise_dof takes those degrees of freedom directly."
+    " The latter is exactly twice the former,"
+    " as each complex channel contributes two real Gaussian components."
+    " The two options are therefore two parameterisations of the same quantity and are mutually exclusive;"
+    " supply whichever of the two the value to hand is expressed in"
+    " (-noise_channels 4 and -noise_dof 8 are equivalent)."
+    " The effective channel count is not the number of elements in the receive coil,"
+    " nor the number of receiver channels:"
+    " coil elements may be combined into fewer channels before reconstruction,"
+    " and correlation of the noise between channels together with overlap of their sensitivity profiles"
+    " means that the channels combined do not contribute independent degrees of freedom."
+    " The effective count is consequently smaller than the element count,"
+    " often by a large factor, and need not be a whole number"
+    " (for example, 3.76 has been measured for a nominally 12-element head coil)."
+    " It is the quantity that a noise-distribution fit to the data estimates."
+    " If neither option is given, the count is inferred from the image header metadata where they permit it:"
+    " the coil combination mode is read from \"CoilCombinationMethod\""
+    " (or from a declaration of SENSE1 combination in the image comments,"
+    " as written by the CMRR multi-band sequences, which takes precedence over it),"
+    " and, only where that mode is sum of squares,"
+    " the effective channel count is resolved from \"Manufacturer\", \"ManufacturersModelName\","
+    " \"ReceiveCoilName\" and \"ReceiveCoilActiveElements\""
+    " against a table of receive coils built into this software."
+    " That table holds counts measured experimentally for a coil where such a measurement exists,"
+    " and otherwise, for coils whose active elements are reported as enumerated clusters of the receive array"
+    " (\"HC1-7;NC1,2\"), the number of clusters active,"
+    " on the hypothesis that each contributes one independent channel;"
+    " a value obtained the latter way is applied but reported as a hypothesis, with a warning."
+    " Any phase-sensitive combination (adaptive combine, SENSE1) yields N = 1."
+    " Where no inference can be drawn, a warning is issued and N = 1 (Rician) is assumed."
+    " An explicitly provided value is always used,"
+    " with a warning if it disagrees with what the metadata indicate.";
+
 // clang-format off
 OptionGroup precondition_options(const bool include_output)
 {
@@ -76,48 +115,14 @@ OptionGroup precondition_options(const bool include_output)
            "(default: 'shells' if DWI gradient table available; 'volume_groups' if volume groups present; 'all' otherwise)")
     + Argument("mode").type_choice<demean_type>()
   + Option("noise_channels",
-           "the EFFECTIVE number of receive channels N combined by sum-of-squares reconstruction of "
-           "magnitude data, such that the noise follows a non-central chi distribution with 2N degrees "
-           "of freedom. "
-           "This is not the number of elements in the receive coil, nor the number of receiver channels: "
-           "coil elements may be combined into fewer channels before reconstruction, "
-           "and correlation of the noise between channels together with overlap of their sensitivity "
-           "profiles means that the channels combined do not contribute independent degrees of freedom. "
-           "The effective count is consequently smaller than the element count, "
-           "often by a large factor, and need not be a whole number "
-           "(for example, 3.76 has been measured for a nominally 12-element head coil). "
-           "It is the quantity that a noise-distribution fit to the data estimates. "
-           "If neither this option nor -noise_dof is given, the count is inferred from the image header "
-           "metadata where they permit it: "
-           "the coil combination mode is read from \"CoilCombinationMethod\" "
-           "(or from a declaration of SENSE1 combination in the image comments, "
-           "as written by the CMRR multi-band sequences, which takes precedence over it), "
-           "and, only where that mode is sum of squares, "
-           "the effective channel count is resolved from \"Manufacturer\", \"ManufacturersModelName\", "
-           "\"ReceiveCoilName\" and \"ReceiveCoilActiveElements\" against a table of receive coils built "
-           "into this software. "
-           "That table holds counts measured experimentally for a coil where such a measurement exists, "
-           "and otherwise, for coils whose active elements are reported as enumerated clusters of the "
-           "receive array (\"HC1-7;NC1,2\"), the number of clusters active, on the hypothesis that each "
-           "contributes one independent channel; a value obtained the latter way is applied but reported "
-           "as a hypothesis, with a warning. "
-           "Any phase-sensitive combination (adaptive combine, SENSE1) yields N = 1. "
-           "Where no inference can be drawn, a warning is issued and N = 1 (Rician) is assumed. "
-           "An explicitly provided value is always used, "
-           "with a warning if it disagrees with what the metadata indicate "
-           "(ignored for complex input data)")
+           "the EFFECTIVE number of receive channels combined by sum-of-squares reconstruction of magnitude data, "
+           "which is not the number of coil elements "
+           "(see the Description section of the help page for details)")
     + Argument("count").type_float(0.0)
   + Option("noise_dof",
-           "the degrees of freedom of the non-central chi distribution followed by the noise in "
-           "sum-of-squares reconstructed magnitude data. "
-           "This is exactly twice the effective receive-channel count: each complex channel contributes "
-           "two real Gaussian components, so N effective channels give 2N degrees of freedom. "
-           "This option and -noise_channels are two parameterisations of the same quantity and are "
-           "mutually exclusive; supply whichever of the two the value to hand is expressed in "
-           "(-noise_channels 4 and -noise_dof 8 are equivalent). "
-           "See -noise_channels for how the value is inferred when neither option is given, "
-           "and for why the effective count differs from the number of coil elements "
-           "(ignored for complex input data)")
+           "the degrees of freedom of the non-central chi noise distribution of sum-of-squares magnitude data, "
+           "equal to twice the effective receive channel count "
+           "(see the Description section of the help page for details)")
     + Argument("count").type_float(0.0)
   + Option("vst_method",
            "the variance-stabilising transform to apply prior to PCA; "

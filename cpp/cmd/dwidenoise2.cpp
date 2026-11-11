@@ -108,6 +108,8 @@ void usage() {
 
   + Denoise::non_gaussian_noise_description
 
+  + noise_channels_description
+
   + "For magnitude (or multi-channel sum-of-squares) input data,"
     " the output by default has the noise-floor bias removed:"
     " the non-linear variance-stabilising transform is reversed by inverting it,"

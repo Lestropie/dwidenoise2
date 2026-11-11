@@ -74,6 +74,8 @@ void usage() {
 
   + Denoise::non_gaussian_noise_description
 
+  + noise_channels_description
+
   + "Important note:"
     " noise level estimation should only be performed as the first step of an image processing pipeline."
     " The routine is invalid if interpolation or smoothing has been applied to the data prior to denoising."

@@ -29,6 +29,7 @@
 namespace MR::Denoise::Precondition {
 
 extern const char *const demodulation_description;
+extern const char *const noise_channels_description;
 
 // Phase demodulation applied to complex data before PCA. This [none, linear, hann, apc]
 //   classification refines the historical [none, linear, nonlinear]: both "hann" and "apc"
