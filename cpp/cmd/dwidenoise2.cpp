@@ -154,6 +154,38 @@ void usage() {
             " it may nevertheless be informative in demonstrating those advanced features of dwidenoise2 active by default"
             " that must be explicitly disabled in order to approximate that behaviour.")
 
+  + Example("To approximate the NORDIC denoising method",
+            "mrcalc magnitude.nii phase_radians.nii -polar complex.mif;"
+            " dwidenoise2 complex.mif denoised.mif -schedule nordic"
+            " -demodulate hann -demean none -filter truncate -aggregator uniform -estimator exp2;"
+            " mrcalc denoised.mif -abs denoised_magnitude.mif",
+            "The bundled \"nordic\" schedule, in conjunction with the options above,"
+            " approximates the method of Moeller et al. (2021)"
+            " to the extent that the capabilities of this software permit"
+            " (the schedule file documents the correspondence in full)."
+            " Its first row transcribes NORDIC's own g-factor estimation pass"
+            " (a flat single-slice patch, strided by half its width, over a capped subset of the volumes);"
+            " the resulting map parameterises the variance-stabilising transform,"
+            " taking the place of the normalisation by the g-factor"
+            " with which NORDIC renders the noise spatially identical prior to PCA."
+            " Its second row performs the reconstruction"
+            " with a cuboid patch of NORDIC's default 11:1 ratio of voxels to volumes,"
+            " positioned on a grid of half the patch width,"
+            " and does not re-estimate the noise level:"
+            " the eigenvalue threshold is consequently the Marchenko-Pastur edge of a known noise level,"
+            " which is NORDIC's parameter-free threshold,"
+            " rather than a level fitted to each patch."
+            " Those features of NORDIC that depend on information unavailable to this software"
+            "---no-excitation volumes,"
+            " the g-factor of the parallel imaging reconstruction,"
+            " and calibration of the threshold by simulation of the noise matrix---"
+            "are not reproduced."
+            " Note that NORDIC derives two of these settings from the number of volumes,"
+            " which a schedule file cannot express as a rule:"
+            " the schedule as bundled states the values for a series of ~99 volumes"
+            " (the acquisition on which the manuscript's recommendations are based),"
+            " and documents the arithmetic for re-deriving both for a series of different length.")
+
   + Example("Denoising multi-echo fMRI data",
             "mrcat original_TE1.mif original_TE2.mif original_TE3.mif original_all.mif -axis 4;"
             " dwidenoise2 original_all.mif denoised_all.mif;"
@@ -255,6 +287,13 @@ void usage() {
     "Manzano Patron, J.P.; Moeller, S.; Andersson, J.L.R.; Ugurbil, K.; Yacoub, E.; Sotiropoulos, S.N. "
     "Denoising diffusion MRI: Considerations and implications for analysis. "
     "Imaging Neuroscience, 2024, 2, 00060"
+
+  + "* If using -schedule nordic: "
+    "Moeller, S.; Pisharady, P.K.; Ramanna, S.; Lenglet, C.; Wu, X.; Dowdle, L.; "
+    "Yacoub, E.; Ugurbil, K.; Akcakaya, M. "
+    "NOise reduction with DIstribution Corrected (NORDIC) PCA in dMRI "
+    "with complex-valued parameter-free locally low-rank processing. "
+    "NeuroImage, 2021, 226, 117539"
 
   + "* If denoising magnitude data with any non-linear variance-stabilising transform:  "
     "Foi A. "
