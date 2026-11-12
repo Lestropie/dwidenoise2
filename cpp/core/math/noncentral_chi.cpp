@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "math/gamma.h"
+
 namespace MR::Math::NonCentralChi {
 
 namespace {
@@ -46,7 +48,7 @@ default_type normalised_mean(const default_type a, const default_type dof) {
   const default_type N = 0.5 * dof;
   const default_type w = 0.5 * a * a;
   if (w <= 350.0) {
-    const default_type gamma_ratio = std::exp(std::lgamma(N + 0.5) - std::lgamma(N));
+    const default_type gamma_ratio = std::exp(log_gamma(N + 0.5) - log_gamma(N));
     return std::sqrt(2.0) * gamma_ratio * std::exp(-w) * oneF1_pos(N + 0.5, N, w);
   }
   return std::sqrt(a * a + (dof - 1.0));

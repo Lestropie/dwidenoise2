@@ -41,6 +41,14 @@ namespace MR::Math {
 // Everything below is real-valued and defined for strictly positive arguments; each function
 //   documents what it does with an argument outside its domain. All are re-entrant (the only
 //   shared state is the lgamma mutex that MRtrix3 core already maintains for the same purpose).
+//   Code using log-gamma anywhere that may run concurrently should call log_gamma() below rather
+//   than std::lgamma().
+
+// log |Gamma(x)|, safe to call concurrently from multiple threads (unlike std::lgamma(), which
+//   writes the sign of Gamma(x) to a global). Uses the re-entrant lgamma_r() where MRtrix3's CMake
+//   has detected it (MRTRIX_HAVE_LGAMMA_R), and otherwise serialises std::lgamma() on the mutex
+//   that MRtrix3 core provides for the same purpose (Math::mutex_lgamma, math/betainc.h).
+default_type log_gamma(const default_type x);
 
 // psi(x) = d/dx log Gamma(x), for x > 0.
 // Evaluated by the recurrence psi(x) = psi(x+1) - 1/x until the argument is large enough for the

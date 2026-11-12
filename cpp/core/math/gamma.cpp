@@ -35,22 +35,23 @@ extern "C" double lgamma_r(double, int *);
 
 namespace MR::Math {
 
-namespace {
-
-// log Gamma(x), thread-safely. std::lgamma() writes the sign of the result to a global (signgam),
-//   so calling it concurrently is undefined; MRtrix3 core resolves this once, preferring the
-//   re-entrant lgamma_r() where the platform has it and otherwise serialising on a mutex that it
-//   owns. That mutex is reused here rather than a second one being introduced, so that all users
-//   of std::lgamma() within the process contend on the same lock.
+// std::lgamma() writes the sign of the result to a global (signgam), so calling it concurrently is
+//   undefined; MRtrix3 core resolves this once (MRtrix3 #2866), preferring the re-entrant lgamma_r()
+//   where the platform has it and otherwise serialising on a mutex that it owns. That mutex is
+//   reused here rather than a second one being introduced, so that all users of std::lgamma()
+//   within the process contend on the same lock.
 default_type log_gamma(const default_type x) {
 #ifdef MRTRIX_HAVE_LGAMMA_R
   int sign = 0;
   return lgamma_r(x, &sign);
 #else
   const std::lock_guard<std::mutex> lock(MR::Math::mutex_lgamma);
+  // NOLINTNEXTLINE(concurrency-mt-unsafe)
   return std::lgamma(x);
 #endif
 }
+
+namespace {
 
 // Argument above which the asymptotic Bernoulli series for psi and psi' is used directly. At 20
 //   the first omitted term is below 1e-14 relative for both functions, so the recurrence that
