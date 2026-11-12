@@ -585,11 +585,13 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   };
 
   // --- Discrepancy-criterion (Morozov) selection of lambda ------------------------------
-  // Seeded by Chambolle (2004) eq. 7 and targeting a weighted residual energy of
+  // Seeded by Pizzolato's eq. 7 (the empirical seed of Getreuer 2012 / Duran et al. 2013) and
+  //   targeting a weighted residual energy of
   //   Rr^2 + Ri^2 = 2 * ndomain * sigmabar_lambda^2 (spatially-varying form, their eq. 11). Image
   //   and lambda are refined jointly: the solver is warm-started across lambda updates, so each
   //   update's sweeps continue the previous one's rather than restarting. Which search is used --
-  //   their eq. 6 multiplicative update, or one of two bracketing searches for the same condition
+  //   their eq. 6 (which transcribes Chambolle's 2004 multiplicative update), or one of two
+  //   bracketing searches for the same condition
   //   -- is Params::lambda_solver, documented in apc.h.
   // The noise level driving the seed and the target is scaled by params.discrepancy_scale, so the
   //   residual is targeted above the noise energy the criterion nominally prescribes; the fidelity
@@ -599,15 +601,23 @@ bool AdaptivePhaseEstimator::solve_plane(const Eigen::Ref<const Eigen::ArrayXXd>
   const double sigmabar2_lambda = Math::pow2(sigmabar_lambda);
   // The seed's second term is not dimensionally consistent with its first -- it scales as 1/k^2
   //   where that one scales as 1/k -- so its share of the seed depends on the intensity units of
-  //   the data: 1.4e-4 of it at sigmabar ~ 178, but 13% at sigmabar ~ 0.178. The search converges
+  //   the data: 5.4e-3 of it at sigmabar ~ 178, but 84% at sigmabar ~ 0.178. The search converges
   //   away from its seed, so this costs iterations rather than accuracy, and what survives is a
-  //   small difference in where the search stops: rescaling real data by 1e-3 moves the phase this
-  //   estimator returns by 1.6e-4 rad on a warm solve and 4.7e-3 rad on the cold chain. Dropping the
-  //   term makes the solve exactly scale-invariant -- every such comparison then falls to the
-  //   float32 floor of the phase map, ~1.5e-7 rad -- while moving the phase by under 1e-7 rad at the
-  //   intensity the defaults were calibrated at. It is kept only because it is what Chambolle's
-  //   eq. 7 states; removing it is measured, sound, and independent of anything else here.
-  const double lambda_seed = 2.1237 / sigmabar_lambda + 0.0547 / sigmabar2_lambda; // eq. 7
+  //   small difference in where the search stops. Dropping the term makes the solve exactly
+  //   scale-invariant, at a cost of under 1e-7 rad in the returned phase at the intensity the
+  //   defaults were calibrated at; it is kept only because it is what the published seed states.
+  //
+  // The coefficient of that second term was 0.0547 here until a dropped leading digit was found
+  //   against the source: Pizzolato's eq. 7, after Getreuer (2012) and Duran et al. (2013), reads
+  //   2.0547. The scale-dependence figures quoted above are recomputed at the corrected value, but
+  //   the *measurements* of what that dependence costs were made at 0.0547 -- rescaling real data
+  //   by 1e-3 moved the returned phase by 1.6e-4 rad on a warm solve and 4.7e-3 rad on the cold
+  //   chain, against a float32 phase-map floor of ~1.5e-7 rad -- and the term is now some 5.6x
+  //   larger at that scaling, so those two numbers are lower bounds and not current readings. At
+  //   the calibrated intensity the correction moves the seed by 0.54%, against a crossing that lies
+  //   a factor of two to sixteen below it; nothing downstream of the seed was re-derived, and the
+  //   case for dropping the term outright is stronger at 2.0547 than it was at 0.0547.
+  const double lambda_seed = 2.1237 / sigmabar_lambda + 2.0547 / sigmabar2_lambda; // eq. 7
   // Where the search for lambda begins. The eq. 7 seed is a function of the noise level alone and
   //   knows nothing of the plane; where the caller has kept what a previous pass over this same
   //   plane converged to, that is a far better starting point, and the search then only has to
