@@ -96,6 +96,7 @@ NoiseStats apply_threshold_standardized(const std::vector<Spectrum> &spectra, co
     const ssize_t nonzero = c - spectrum.rz();
     stats.sum += spectrum.raw_sum(spectrum.rz(), nonzero);
     stats.dof += spectrum.dof(nonzero);
+    stats.dof_deflated += spectrum.dof_deflated(nonzero, spectrum.rnz() - nonzero);
     stats.count += nonzero;
     stats.z_max = std::max(stats.z_max, spectrum.max_noise_standardized(c));
     result.cutoff_p_partition[p] = c;

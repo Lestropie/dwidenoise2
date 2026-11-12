@@ -533,18 +533,9 @@ void run() {
   } else if (vst_none) {
     WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively "
          "refining the noise level estimate would have no effect on subsequent iterations "
-         "and is therefore wasted computation; performing a single pass instead");
-    Iterative::Iteration config;
-    config.spatial_subsample_ratios = {default_spatial_subsample_ratio,
-                                       default_spatial_subsample_ratio,
-                                       default_spatial_subsample_ratio};
-    // Single pass, no prior rank map available: size by a (rank-naive) aspect ratio (n ~ 2m).
-    config.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
-    config.kernel.param = 2.0;
-    config.smooth_noiseout_fwhm = 0.0;
-    config.temporal_subsample = 1.0;
-    config.update_noise = true;
-    iterations.push_back(config);
+         "and is therefore wasted computation; the bundled single-row \"novst\" schedule is "
+         "used in place of the bundled \"default\" schedule");
+    iterations = Schedule::load_bundled("dwi2noise", "novst", false);
   } else {
     iterations = Schedule::load_default("dwi2noise", false);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));

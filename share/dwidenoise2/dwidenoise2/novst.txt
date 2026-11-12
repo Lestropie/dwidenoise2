@@ -1,0 +1,38 @@
+# Required Notice: Copyright (c) 2026 Robert E. Smith <robert.smith@florey.edu.au>;
+# Required Notice: The Florey Institute of Neuroscience and Mental Health.
+#
+# Licensed under the PolyForm Noncommercial License 1.0.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
+#
+#     https://polyformproject.org/licenses/noncommercial/1.0.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied.
+# See the License of the specific language
+# governing permissions and limitations under the License.
+#
+# dwidenoise2 denoising schedule: "novst"
+#
+# The schedule engaged automatically when -vst_method none is given without -schedule.
+#
+# The multi-resolution "default" schedule refines its noise level estimate by feeding each
+# iteration's estimate forward as the variance-stabilising transform of the next. With
+# -vst_method none there is no such transform, so nothing couples the iterations and the
+# additional rows would be wasted computation; a single pass is performed instead.
+#
+# The single row both estimates the noise level and reconstructs from it ("update_noise true"):
+# there is no preceding iteration whose estimate could be carried through. No rank density is
+# available to a first (and only) iteration, so the kernel is sized by the rank-naive aspect
+# ratio n ~ 2m.
+#
+# The reconstruction grid is the command's default spatial sub-sampling factor. Because this row
+# is therefore also the final (reconstruction) row, this schedule cannot be combined with
+# -aggregator exclusive, which requires unity spatial sub-sampling on the final row; for that
+# combination the bundled "novst_exclusive" schedule, which differs only in performing no
+# spatial sub-sampling, is engaged automatically instead.
+#
+spatial_subsample   temporal_subsample   kernel        update_noise   smooth_noise
+2                   1                    aspect=2.0    true           false

@@ -553,10 +553,11 @@ const Option schedule_option =
            " the argument is either the name of a schedule bundled with the software"
            " or the path to a schedule file (see Description for the file format)."
            " Note that when this option is omitted the schedule selected automatically is not"
-           " always the bundled \"default\" schedule: for dwidenoise2, -vst_method none instead"
-           " selects a single-pass schedule (a multi-row schedule cannot do anything useful"
-           " without a variance-stabilising transform to couple its iterations), and -fixed_rank"
-           " selects the bundled \"fixedrank\" schedule") +
+           " always the bundled \"default\" schedule: -vst_method none instead selects the"
+           " bundled single-row \"novst\" schedule (a multi-row schedule cannot do anything useful"
+           " without a variance-stabilising transform to couple its iterations),"
+           " or for dwidenoise2 with -aggregator exclusive the bundled \"novst_exclusive\" schedule;"
+           " and for dwidenoise2, -fixed_rank selects the bundled \"fixedrank\" schedule") +
     Argument("name/file").type_text();
 
 const char *schedule_description =

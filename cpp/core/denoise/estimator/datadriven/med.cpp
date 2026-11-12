@@ -50,9 +50,20 @@ Result Med::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unuse
   //   the minimum-variance estimator of sigma^2 is their energy divided by their degrees of
   //   freedom (the Marchenko-Pastur / MPPCA estimate, consistent with the other estimators).
   //   Recompute sigma^2 that way, then recompute the signal/noise cutoff from the refined level.
+  // Those degrees of freedom are those of the DEFLATED decomposition. The k retained components
+  //   are not the whole spectrum of an rnz x qnz noise matrix: this same classification has just
+  //   assigned p = rnz - k directions to signal, and under the spiked model the noise surviving in
+  //   the orthogonal complement of a p-dimensional signal subspace occupies a
+  //   (rnz - p) x (qnz - p) block -- each direction removed costs one direction of the long
+  //   dimension as well as one component. Its energy therefore has expectation
+  //   sigma^2 k (qnz - p), and dividing by the undeflated k qnz under-states sigma^2 by the factor
+  //   (qnz - p)/qnz: nil for a rank-zero patch, and the dominant error once the patch carries
+  //   appreciable signal (on a 60x125 patch with five strong components the undeflated form runs
+  //   4% low, and the deflation removes essentially all of it). This is the same correction
+  //   MRM2023 makes within its own scan, and Spectrum::dof_deflated() exists for it.
   if (result.cutoff_p > rz) {
     const ssize_t k = result.cutoff_p - rz;
-    sigma2 = spectrum.raw_sum(rz, k) / spectrum.dof(k);
+    sigma2 = spectrum.raw_sum(rz, k) / spectrum.dof_deflated(k, rnz - k);
     result.cutoff_p = spectrum.noise_count(sigma2);
   }
   result.sigma2 = sigma2;
@@ -74,9 +85,12 @@ Result Med::operator()(const std::vector<Spectrum> &spectra, //
   // The signal/noise boundary is each partition's own MP upper edge sigma^2 (1+sqrt(beta_p))^2,
   //   which is the standardised cut z == sigma^2.
   NoiseStats stats = apply_threshold_standardized(spectra, sigma2, result);
-  // Refine sigma^2 as the pooled noise energy per degree of freedom, then reclassify.
+  // Refine sigma^2 as the pooled noise energy per degree of freedom, then reclassify. The degrees
+  //   of freedom are deflated by the rank the cut has just assigned, partition by partition; see
+  //   NoiseStats for why the deflation cannot be applied to the pooled figure, and the single-PCA
+  //   path above for what the undeflated form costs.
   if (!stats.empty()) {
-    sigma2 = stats.sigma2();
+    sigma2 = stats.sigma2_deflated();
     stats = apply_threshold_standardized(spectra, sigma2, result);
   }
   result.sigma2 = sigma2;
@@ -88,7 +102,7 @@ double Med::predicted_rmse(const ssize_t m, const ssize_t n, const double r) con
   const double lm = std::log(double(m));
   const double ln = std::log(double(n));
   const double lr = std::log(std::max(r, 1.0));
-  return std::exp(2.26745 - 1.08083 * lm - 0.92260 * ln + 0.56761 * lr + 0.097574 * lm * ln);
+  return std::exp(2.37845 - 0.92930 * lm - 1.00066 * ln + 0.74355 * lr + 0.064218 * lm * ln);
 }
 
 double Med::mu(const double beta) const {

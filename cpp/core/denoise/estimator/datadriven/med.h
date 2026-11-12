@@ -49,7 +49,21 @@ public:
                     const Eigen::Vector3d & /*unused*/) const final;
 
   // Predicted relative RMSE of the (corrected) median noise level estimate; calibrated by numerical
-  //   simulation of log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n). R^2 = 0.87.
+  //   simulation of log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n). R^2 = 0.92.
+  // Refitted for the deflated degrees of freedom used above. The protocol, which the preceding fit
+  //   did not record and which any future change to this estimator must repeat, is:
+  //   Y = W L + G, with W (m x r) orthonormal, L (r x n) iid N(0, theta) and G iid N(0, 1), so the
+  //   population spike is theta and the Baik-Ben Arous-Peche threshold is theta > sqrt(beta);
+  //   m in {30, 60, 120, 250, 500, 1000, 2000}; n/m in {1.1, 1.5, 2, 3, 4}, and additionally
+  //   {6, 8} for m <= 120; rank r = round(a n^(1/3)) for a in {0.25, 0.5, 1, 2, 4}; theta in
+  //   {1.5, 4}; 200 realisations per cell, falling to 20 at m = 2000; ordinary least squares on
+  //   the conservative subset theta == 1.5, n >= m, r < m/2 (199 cells). Fitting the undeflated
+  //   arithmetic under this protocol reproduces the coefficients it replaces to within 1.6% of
+  //   predicted RMSE everywhere, so the change is the deflation and not sampling drift.
+  // Deflating lowers the true error across most of that grid -- the median per-cell ratio is 0.50,
+  //   reaching 0.34 for m >= 500, and the bias falls from -0.6% to -0.01% where the estimate is
+  //   precise enough to be used -- so the predicted values fall with it, and the RMSE-tolerance
+  //   kernel stops growing the patch sooner than it did.
   double predicted_rmse(const ssize_t m, const ssize_t n, const double r) const final;
 
 protected:
