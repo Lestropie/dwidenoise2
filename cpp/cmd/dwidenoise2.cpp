@@ -115,6 +115,12 @@ void usage() {
 
   + noise_channels_description
 
+  + noise_dof_estimation_description
+
+  + noise_dof_selection_description
+
+  + noise_dof_limitations_description
+
   + "For magnitude (or multi-channel sum-of-squares) input data,"
     " the output by default has the noise-floor bias removed:"
     " the non-linear variance-stabilising transform is reversed by inverting it,"

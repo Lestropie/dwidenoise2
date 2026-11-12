@@ -32,6 +32,11 @@ namespace MR::Denoise::Precondition {
 
 extern const char *const demodulation_description;
 extern const char *const noise_channels_description;
+// DESCRIPTION paragraphs detailing estimation of the noise distribution's degrees of freedom
+//   from the background voxels of the data (-noise_dof_method), shared by both commands.
+extern const char *const noise_dof_estimation_description;
+extern const char *const noise_dof_selection_description;
+extern const char *const noise_dof_limitations_description;
 
 // Phase demodulation applied to complex data before PCA. This [none, linear, hann, apc]
 //   classification refines the historical [none, linear, nonlinear]: both "hann" and "apc"

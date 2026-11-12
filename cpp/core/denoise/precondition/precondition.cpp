@@ -104,6 +104,73 @@ const char *const noise_channels_description =
     " Note also that these degrees of freedom are unrelated to the -dof_output option of the dwidenoise2 command,"
     " which concerns the degrees of freedom of the residual energy remaining after denoising.";
 
+const char *const noise_dof_estimation_description =
+    "Option -noise_dof_method estimates the degrees of freedom of the magnitude noise distribution"
+    " from the voxels of the input data that contain noise alone, following St-Jean et al. (2020)."
+    " The effective channel count is seldom known for any particular receive hardware,"
+    " and the header metadata from which it might otherwise be inferred are frequently absent,"
+    " such that for the great majority of real data a Rician distribution would otherwise be assumed."
+    " For a voxel carrying no signal,"
+    " the squared magnitude divided by twice the noise variance follows a Gamma distribution"
+    " whose shape parameter is precisely the effective channel count N (half the degrees of freedom);"
+    " as the sum of such values across volumes is itself Gamma-distributed,"
+    " each voxel can be tested individually against that model."
+    " The voxels carrying no signal are identified automatically,"
+    " by iteratively rejecting those whose summed statistic falls outside the central 95%"
+    " of the Gamma distribution implied by the current estimates of noise level and degrees of freedom,"
+    " and re-fitting both to the voxels retained."
+    " This rejection discards not only voxels containing tissue signal,"
+    " but equally those corrupted by ghosting, slice leakage or spikes,"
+    " which is what makes the procedure automatic rather than dependent on a mask."
+    " Two solutions of the same model are offered:"
+    " 'ml' solves the maximum likelihood equations, and has the lower variance of the two;"
+    " 'moments' solves the closed-form method-of-moments equations."
+    " The estimation is applicable only to magnitude input data,"
+    " and is performed only where a non-linear variance-stabilising transform (-vst_method foi, koay or mom)"
+    " is to make use of its result."
+    " Where an explicit value is also provided via -noise_channels or -noise_dof,"
+    " the explicit value is used, and any disagreement with the estimate is reported.";
+
+const char *const noise_dof_selection_description =
+    "Estimation of the degrees of freedom from the data is performed independently for each slice,"
+    " with slices separated along the axis indicated by the \"SliceEncodingDirection\" header key-value"
+    " where present, and along the third spatial axis otherwise (this can be overridden using -noise_dof_axis)."
+    " A slice from which too few background voxels are identified yields no estimate;"
+    " the procedure declines altogether if too few slices yield an estimate,"
+    " or if the majority of the field of view is identically zero in every volume."
+    " By default (-noise_dof_scope global), the per-slice estimates are reduced to their median,"
+    " which is robust to slices at the extremities of the field of view"
+    " and to those contaminated by wrap-around or slice leakage."
+    " With -noise_dof_scope slice, the per-slice estimates are instead retained,"
+    " and a separate variance-stabilising transform is constructed for each slice,"
+    " with any slice that yielded no estimate of its own taking the global median."
+    " Because parallel imaging makes the effective channel count vary over space,"
+    " slice-wise estimates may be closer to the truth;"
+    " they are however individually noisier, being fitted from the background voxels of one slice only."
+    " A large spread of the per-slice estimates is the signature of a spatially varying distribution."
+    " Two diagnostic exports are available:"
+    " -noise_dof_out tabulates the per-slice estimates,"
+    " and -noise_voxels_out writes a mask of the voxels identified as containing noise alone;"
+    " inspection of the latter is the single most informative check on whether the procedure did what it should.";
+
+const char *const noise_dof_limitations_description =
+    "Three limitations are intrinsic to estimating the noise distribution from background voxels,"
+    " rather than being defects of this implementation."
+    " Firstly, it requires that background voxels exist:"
+    " data with no air in the field of view, or whose reconstruction has already masked the background,"
+    " carry no information for this estimator, and the procedure declines rather than returning a value."
+    " Secondly, under k-space parallel imaging (e.g. GRAPPA) the effective channel count depends on the local signal,"
+    " such that a value estimated in the background is an upper bound on that which applies within the head."
+    " Thirdly, simultaneous multi-slice acquisition aliases signal into what should be background,"
+    " which inflates the estimate."
+    " It nonetheless remains a large improvement on assuming a Rician distribution."
+    " Note also that while the procedure necessarily estimates a background noise level"
+    " alongside the degrees of freedom,"
+    " that value is not used as the noise level in any subsequent computation:"
+    " under parallel imaging a background estimate understates the noise level within the head,"
+    " and the patch-wise Marchenko-Pastur estimate remains its sole source;"
+    " the background noise level is exported via -noise_dof_out as a diagnostic only.";
+
 // clang-format off
 OptionGroup precondition_options(const option_scope_t scope)
 {

@@ -77,6 +77,12 @@ void usage() {
 
   + noise_channels_description
 
+  + noise_dof_estimation_description
+
+  + noise_dof_selection_description
+
+  + noise_dof_limitations_description
+
   + "Important note:"
     " noise level estimation should only be performed as the first step of an image processing pipeline."
     " The routine is invalid if interpolation or smoothing has been applied to the data prior to denoising."
