@@ -26,18 +26,18 @@
 
 #include "algo/loop.h"
 #include "algo/threaded_loop.h"
-#include "denoise/precondition/noise_model/gamma_stats.h"
 #include "exception.h"
 #include "image.h"
+#include "math/gamma_functions.h"
 #include "metadata/bids.h"
 #include "mrtrix.h"
 
 namespace MR::Denoise::Precondition::NoiseModel {
 
-using GammaStats::digamma;
-using GammaStats::gamma_p_inv;
-using GammaStats::inverse_digamma;
-using GammaStats::trigamma;
+using Math::digamma;
+using Math::gamma_p_inv;
+using Math::inverse_digamma;
+using Math::trigamma;
 
 Accumulation::Accumulation(const std::array<ssize_t, 3> &size, const size_t slice_axis)
     : voxels(size_t(size[0]) * size_t(size[1]) * size_t(size[2])), size(size), slice_axis(slice_axis) {

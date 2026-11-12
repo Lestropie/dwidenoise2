@@ -19,23 +19,24 @@
 
 #include "types.h"
 
-namespace MR::Denoise::Precondition::NoiseModel::GammaStats {
+namespace MR::Math {
 
-// Special functions of the Gamma distribution required by the estimation of the magnitude noise
-//   model's degrees of freedom from background voxels (background.h).
+// Special functions related to the Gamma function and the Gamma distribution: the digamma and
+//   trigamma functions and the inverse of the digamma function (as required to fit a Gamma
+//   distribution by maximum likelihood), and the regularised lower incomplete gamma function
+//   together with its inverse (the cumulative distribution function and quantile of a Gamma
+//   distribution).
 //
-// WHY THESE ARE WRITTEN HERE RATHER THAN TAKEN FROM A LIBRARY. The estimator's central operation
-//   is the Gamma quantile P^{-1}(alpha, p), which fixes the interval within which a voxel's summed
-//   statistic must fall for that voxel to be accepted as background. No inverse regularised
-//   incomplete gamma exists in the C++ standard library, in MRtrix3, or in Eigen (supported or
-//   unsupported modules alike), so it has to be written; and writing it requires P(alpha, x) for
-//   the iteration that refines the initial estimate. Once P is in hand, the digamma and trigamma
-//   functions that the maximum-likelihood estimator needs are the smaller half of what remains.
-//   Eigen's unsupported/SpecialFunctions module does provide digamma / polygamma / igamma, but
-//   MRtrix3's CMake never defines MRTRIX_HAVE_EIGEN_UNSUPPORTED_SPECIAL_FUNCTIONS and every use of
-//   that module in MRtrix3 core is paired with a hand-written fallback; depending on it
-//   unconditionally from here would break the configuration core takes care to support, and would
-//   in any case not supply the one function that cannot be done without.
+// WHY THESE ARE WRITTEN HERE RATHER THAN TAKEN FROM A LIBRARY. No inverse regularised incomplete
+//   gamma exists in the C++ standard library, in MRtrix3, or in Eigen (supported or unsupported
+//   modules alike), so it has to be written; and writing it requires P(alpha, x) for the iteration
+//   that refines the initial estimate. Once P is in hand, the digamma and trigamma functions are
+//   the smaller half of what remains. Eigen's unsupported/SpecialFunctions module does provide
+//   digamma / polygamma / igamma, but MRtrix3's CMake never defines
+//   MRTRIX_HAVE_EIGEN_UNSUPPORTED_SPECIAL_FUNCTIONS and every use of that module in MRtrix3 core is
+//   paired with a hand-written fallback (see math/betainc.h); depending on it unconditionally from
+//   here would break the configuration core takes care to support, and would in any case not
+//   supply the quantile function.
 //
 // Everything below is real-valued and defined for strictly positive arguments; each function
 //   documents what it does with an argument outside its domain. All are re-entrant (the only
@@ -53,7 +54,7 @@ default_type trigamma(const default_type x);
 // The inverse of psi: the unique x > 0 with psi(x) == y, for any real y.
 // Minka's approximation supplies the starting value, and Newton's method with psi' refines it;
 //   the shape parameter of a Gamma distribution is recovered from its log-likelihood equations
-//   this way (background.h, estimator L).
+//   this way.
 default_type inverse_digamma(const default_type y);
 
 // P(alpha, x): the regularised LOWER incomplete gamma function, i.e. the cumulative distribution
@@ -72,4 +73,4 @@ default_type gamma_p(const default_type alpha, const default_type x);
 //   spelling "gamma_q_inv" is used for this function elsewhere in the literature and is misleading.
 default_type gamma_p_inv(const default_type alpha, const default_type p);
 
-} // namespace MR::Denoise::Precondition::NoiseModel::GammaStats
+} // namespace MR::Math

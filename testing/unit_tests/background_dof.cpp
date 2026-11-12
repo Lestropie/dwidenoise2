@@ -17,7 +17,7 @@
 
 // Validation of the estimation of the magnitude noise model's degrees of freedom from background
 // voxels (denoise/precondition/noise_model/background.{h,cpp} and its supporting special functions
-// in gamma_stats.{h,cpp}), following St-Jean et al. (2020).
+// in math/gamma_functions.{h,cpp}), following St-Jean et al. (2020).
 //
 // Fitting the degrees of freedom to the residual of a filtered PCA reconstruction was found not to
 // work at ordinary signal ranks. The estimator tested here sees raw magnitudes instead, with no PCA,
@@ -70,9 +70,9 @@
 #include <vector>
 
 #include "denoise/precondition/noise_model/background.h"
-#include "denoise/precondition/noise_model/gamma_stats.h"
 #include "header.h"
 #include "image.h"
+#include "math/gamma_functions.h"
 #include "math/noncentral_chi.h"
 #include "ncchi_sampler.h"
 
@@ -85,11 +85,11 @@ using MR::Denoise::Precondition::NoiseModel::Estimate;
 using MR::Denoise::Precondition::NoiseModel::estimate_background;
 using MR::Denoise::Precondition::NoiseModel::estimate_from_sums;
 using MR::Denoise::Precondition::NoiseModel::SampleSums;
-using MR::Denoise::Precondition::NoiseModel::GammaStats::digamma;
-using MR::Denoise::Precondition::NoiseModel::GammaStats::gamma_p;
-using MR::Denoise::Precondition::NoiseModel::GammaStats::gamma_p_inv;
-using MR::Denoise::Precondition::NoiseModel::GammaStats::inverse_digamma;
-using MR::Denoise::Precondition::NoiseModel::GammaStats::trigamma;
+using MR::Math::digamma;
+using MR::Math::gamma_p;
+using MR::Math::gamma_p_inv;
+using MR::Math::inverse_digamma;
+using MR::Math::trigamma;
 using MR::Math::NonCentralChi::normalised_mean;
 using MR::Math::NonCentralChi::normalised_variance;
 using MR::Testing::NCChi::sample_fractional;

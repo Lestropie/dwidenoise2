@@ -15,7 +15,7 @@
  * governing permissions and limitations under the License.
  */
 
-#include "denoise/precondition/noise_model/gamma_stats.h"
+#include "math/gamma_functions.h"
 
 #include <cassert>
 #include <cmath>
@@ -26,14 +26,14 @@
 #endif
 
 #include "math/betainc.h"
-#include "math/math.h"
 #include "math/erfinv.h"
+#include "math/math.h"
 
 #ifdef MRTRIX_HAVE_LGAMMA_R
 extern "C" double lgamma_r(double, int *);
 #endif
 
-namespace MR::Denoise::Precondition::NoiseModel::GammaStats {
+namespace MR::Math {
 
 namespace {
 
@@ -60,8 +60,8 @@ constexpr default_type ASYMPTOTIC_THRESHOLD = 20.0;
 
 // Relative precision to which the incomplete-gamma series / continued fraction are summed, and
 //   the iteration cap that protects against a non-terminating sum. The cap is generous because
-//   the number of terms the series needs grows as sqrt(alpha), and alpha here is K * dof / 2 over
-//   the whole volume series -- of order thousands for a long acquisition.
+//   the number of terms the series needs grows as sqrt(alpha), and shape parameters of order
+//   thousands arise naturally (e.g. a sum of many Gamma variates of common rate).
 constexpr default_type SERIES_EPS = 1.0e-15;
 constexpr int SERIES_ITMAX = 100000;
 
@@ -246,8 +246,7 @@ default_type gamma_p_inv(const default_type alpha, const default_type p) {
   // Initial estimate.
   // - alpha >= 1: Wilson-Hilferty, which is the statement that (X/alpha)^(1/3) is approximately
   //     normal with mean 1 - 2/(9 alpha) and variance 2/(9 alpha). It is asymptotically exact as
-  //     alpha grows, which is the regime the estimator spends most of its time in (alpha is
-  //     K * dof / 2 summed over every volume of the series).
+  //     alpha grows.
   // - alpha < 1: the density is unbounded at the origin and the cube-root approximation fails;
   //     the leading term of P(alpha, x) = x^alpha / Gamma(alpha+1) + O(x^(alpha+1)) is inverted
   //     instead, which is exact in the limit of small x and merely a starting point elsewhere.
@@ -306,4 +305,4 @@ default_type gamma_p_inv(const default_type alpha, const default_type p) {
   return x;
 }
 
-} // namespace MR::Denoise::Precondition::NoiseModel::GammaStats
+} // namespace MR::Math
