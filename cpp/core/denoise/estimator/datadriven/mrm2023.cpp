@@ -49,14 +49,17 @@ Result MRM2023::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*u
     if (s[i] < lamplus) {
       result.cutoff_p = i + 1;
       result.sigma2 = sigmasq;
-      result.lamplus = lamplus / nprime;
+      // lamplus above is on the raw eigenvalue scale (it is compared against s[i]); the boundaries
+      //   recorded on the Result are normalised, and sigma2 * edge() reproduces lamplus / nprime
+      //   identically, edge() being (sqrt(nprime) + sqrt(mprime))^2 / nprime.
+      result.set_boundaries(spectrum.edge(), spectrum.max_noise_standardized(result.cutoff_p));
       return result;
     }
     clam -= s[i];
   }
   result.cutoff_p = 0;
   result.sigma2 = 0.0;
-  result.lamplus = 0.0;
+  result.set_boundaries(spectrum.edge(), 0.0);
   return result;
 }
 
@@ -103,16 +106,16 @@ Result MRM2023::operator()(const std::vector<Spectrum> &spectra, //
     //   fall-through, in which cutoff_p / sigma2 / lamplus are all zero).
     result.cutoff_p = 0;
     result.sigma2 = 0.0;
-    result.lamplus = 0.0;
+    result.set_boundaries(mean_edge(spectra), 0.0);
     result.cutoff_p_partition.assign(spectra.size(), 0);
     result.lamplus_partition.assign(spectra.size(), 0.0);
     return result;
   }
-  apply_threshold_standardized(spectra, zstar, result);
+  const NoiseStats stats = apply_threshold_standardized(spectra, zstar, result);
   result.sigma2 = sigma2_found;
   // Marchenko-Pastur edge (normalised) at the representative aspect ratio, as in the single-PCA
   //   path; the per-partition boundaries actually applied are in Result::lamplus_partition.
-  result.lamplus = sigma2_found * mean_edge(spectra);
+  result.set_boundaries(mean_edge(spectra), stats.z_max);
   return result;
 }
 

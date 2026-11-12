@@ -59,9 +59,13 @@ Result Exp<version>::operator()(const Spectrum &spectrum,                   //
     if (sigsq2 < sigsq1) {
       result.sigma2 = sigsq1;
       result.cutoff_p = p + 1;
-      result.lamplus = lam;
     }
   }
+  // The criterion cuts where its two noise-variance estimates cross, which is nowhere near
+  //   lambda+ in general; both boundaries are therefore formed here, once the scan has settled on
+  //   its classification, rather than lam being smuggled into lamplus as it once was.
+  if (result.cutoff_p >= 0)
+    result.set_boundaries(spectrum.edge(), spectrum.max_noise_standardized(result.cutoff_p));
   return result;
 }
 
@@ -143,9 +147,9 @@ Result Exp<version>::operator()(const std::vector<Spectrum> &spectra, //
   }
   if (!found)
     return result;
-  apply_threshold_standardized(spectra, zstar, result);
+  const NoiseStats stats = apply_threshold_standardized(spectra, zstar, result);
   result.sigma2 = best_sigma2;
-  result.lamplus = zstar * mean_edge(spectra);
+  result.set_boundaries(mean_edge(spectra), stats.z_max);
   return result;
 }
 

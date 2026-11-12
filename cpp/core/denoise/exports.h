@@ -34,6 +34,7 @@ public:
   void set_noise_out(const std::string &path);
   void set_noise_out();
   void set_lamplus(const std::string &path);
+  void set_lammax_noise(const std::string &path);
   void set_rank_pcanonzero(const std::string &path);
   void set_rank_input(const std::string &path);
   void set_rank_input();
@@ -50,7 +51,15 @@ public:
   void set_eigenspectra_path(const std::string &path);
 
   Image<float> noise_out;
+  // The two signal/noise boundary maps of Estimator::Result, which are not the same quantity; see
+  //   the commentary on that class. lamplus holds the theoretical Marchenko-Pastur edge on the
+  //   normalised eigenvalue scale (sigma^2 * edge); lammax_noise holds the largest eigenvalue
+  //   actually classified as noise, on the STANDARDISED scale (Result::lammax_noise_standardized(),
+  //   ie. divided by that patch's own edge) so that its voxels remain comparable where the Casorati
+  //   aspect ratio varies between kernels. Both are proportional to sigma^2, so both are undone by
+  //   the square of the variance-stabilising noise level.
   Image<float> lamplus;
+  Image<float> lammax_noise;
   Image<uint16_t> rank_pcanonzero;
   Image<uint16_t> rank_input;
   // First spectral moment of the composite (aggregated) filter, tr(Sbar) = sum_i w_i: the effective

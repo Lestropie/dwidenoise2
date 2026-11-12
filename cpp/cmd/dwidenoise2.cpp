@@ -367,9 +367,28 @@ void usage() {
            " and is therefore larger by a factor of sqrt(2).")
     + Argument("image").type_image_out()
   + Option("lamplus",
-           "The estimated upper bound of the noise portion of the eigenspectrum (\"lambda-plus\"). "
+           "The THEORETICAL upper bound of the noise portion of the eigenspectrum (\"lambda-plus\"):"
+           " the Marchenko-Pastur bulk edge implied by the estimated noise level and the aspect ratio"
+           " of the Casorati matrix, ie. sigma^2 multiplied by (1+sqrt(beta))^2. "
            "This is an eigenvalue, and is therefore in units of the SQUARE of the noise level"
-           " reported by -noise_out; as for that map, the noise level in question is per-channel")
+           " reported by -noise_out; as for that map, the noise level in question is per-channel. "
+           "Being a function of that estimated noise level and the patch geometry alone,"
+           " it says nothing about where the signal/noise boundary actually fell;"
+           " for that, see -lammax_noise")
+    + Argument("image").type_image_out()
+  + Option("lammax_noise",
+           "The EMPIRICAL upper bound of the noise portion of the eigenspectrum:"
+           " the largest eigenvalue that the estimator classified as noise. "
+           "Because the aspect ratio of the Casorati matrix varies from patch to patch wherever the"
+           " kernel size does, and with it the width of the Marchenko-Pastur bulk,"
+           " this map is standardised: each value is divided by that patch's own bulk edge"
+           " (1+sqrt(beta))^2, placing it in units of the SQUARE of the noise level reported by"
+           " -noise_out irrespective of patch geometry. "
+           "It is therefore comparable both between voxels and against that squared noise map,"
+           " which it equals exactly when the classification cut falls on the bulk edge;"
+           " it lies below it where the discrete spectrum holds no component near that edge,"
+           " and may exceed it for estimators whose cut is not the edge"
+           " (-estimator exp1 / exp2, or -fixed_rank)")
     + Argument("image").type_image_out()
   + Option("rank_pcanonzero",
            "The (non-zero) rank of the PCA decomposition for each patch absent any denoising")
@@ -935,14 +954,19 @@ void run(Header &dwi,
       ThreadedLoop(final_exports.noise_out)
           .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), final_exports.noise_out);
     }
+    // Note: each boundary voxel is scaled by the noise level interpolated at *its own* scanner
+    //   position (the looped image's index), correcting a prior copy-paste that sampled
+    //   final_exports.noise_out's index here.
+    // The SQUARE of the noise level: lambda+ is an eigenvalue (sigma^2 * edge), and the
+    //   standardised maximal noise eigenvalue is likewise proportional to sigma^2 rather than to
+    //   sigma, so the stabilisation of the data is removed from both by sigma^2.
     if (final_exports.lamplus.valid()) {
-      // Note: each lamplus voxel is scaled by the noise level interpolated at *its own* scanner
-      //   position (the looped image's index), correcting a prior copy-paste that sampled
-      //   final_exports.noise_out's index here.
-      // The SQUARE of the noise level: lambda+ is an eigenvalue (sigma^2 * edge), not a noise
-      //   level, so the stabilisation of the data is removed from it by sigma^2 and not by sigma.
       ThreadedLoop(final_exports.lamplus)
           .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), final_exports.lamplus);
+    }
+    if (final_exports.lammax_noise.valid()) {
+      ThreadedLoop(final_exports.lammax_noise)
+          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), final_exports.lammax_noise);
     }
   }
 
@@ -1324,6 +1348,9 @@ void run() {
   opt = get_options("lamplus");
   if (!opt.empty())
     final_exports.set_lamplus(opt[0][0].as_text());
+  opt = get_options("lammax_noise");
+  if (!opt.empty())
+    final_exports.set_lammax_noise(opt[0][0].as_text());
   opt = get_options("rank_pcanonzero");
   if (!opt.empty())
     final_exports.set_rank_pcanonzero(opt[0][0].as_text());

@@ -249,9 +249,27 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
                                     ? float(std::sqrt(threshold.sigma2))       //
                                     : std::numeric_limits<float>::quiet_NaN(); //
   }
+  // The two signal/noise boundaries are exported separately because they are separate quantities
+  //   (see Estimator::Result). lambda+ is the boundary the model predicts from the noise level and
+  //   the Casorati aspect ratio, and is written on the normalised eigenvalue scale on which the
+  //   estimators work; the maximal noise eigenvalue is the boundary the data actually realised, and
+  //   is written STANDARDISED (divided by the patch's own Marchenko-Pastur edge), because the
+  //   aspect ratio varies between patches wherever the kernel size does, and only the standardised
+  //   value is therefore comparable from voxel to voxel -- and directly against the square of the
+  //   -noise_out map, which it equals when the cut lands exactly on the edge.
+  // Both are NaN, rather than the signalling NaN of a default-constructed Result, where no usable
+  //   threshold was found; as for -noise_out.
   if (exports.lamplus.valid()) {
     assign_pos_of(ss_index).to(exports.lamplus);
-    exports.lamplus.value() = threshold.lamplus;
+    exports.lamplus.value() = bool(threshold)                                //
+                                  ? float(threshold.lamplus)                 //
+                                  : std::numeric_limits<float>::quiet_NaN(); //
+  }
+  if (exports.lammax_noise.valid()) {
+    assign_pos_of(ss_index).to(exports.lammax_noise);
+    exports.lammax_noise.value() = bool(threshold)                                    //
+                                       ? float(threshold.lammax_noise_standardized()) //
+                                       : std::numeric_limits<float>::quiet_NaN();     //
   }
   if (exports.rank_pcanonzero.valid()) {
     assign_pos_of(ss_index).to(exports.rank_pcanonzero);

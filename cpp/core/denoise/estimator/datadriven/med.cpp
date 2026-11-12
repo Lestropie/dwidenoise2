@@ -56,7 +56,7 @@ Result Med::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unuse
     result.cutoff_p = spectrum.noise_count(sigma2);
   }
   result.sigma2 = sigma2;
-  result.lamplus = sigma2 * spectrum.edge();
+  result.set_boundaries(spectrum.edge(), spectrum.max_noise_standardized(result.cutoff_p));
   return result;
 }
 
@@ -80,7 +80,7 @@ Result Med::operator()(const std::vector<Spectrum> &spectra, //
     stats = apply_threshold_standardized(spectra, sigma2, result);
   }
   result.sigma2 = sigma2;
-  result.lamplus = sigma2 * mean_edge(spectra); // representative edge (mean beta)
+  result.set_boundaries(mean_edge(spectra), stats.z_max); // representative edge (mean beta)
   return result;
 }
 

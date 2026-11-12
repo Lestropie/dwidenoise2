@@ -56,8 +56,8 @@ Result Rank::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unus
     //   unchanged -- which is exactly the no-op this case calls for. The Result is explicitly
     //   populated rather than left default-constructed.
     result.cutoff_p = 0;
-    result.lamplus = 0.0;
     result.sigma2 = 0.0;
+    result.set_boundaries(spectrum.edge(), 0.0);
     return result;
   }
   result.cutoff_p = spectrum.r() - (rank - rz);
@@ -65,7 +65,10 @@ Result Rank::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unus
   // NOTE: the denominator carries one component more than the numerator sums. Preserved as-is,
   //   and mirrored in the partitioned form below, rather than silently altered here.
   result.sigma2 = spectrum.raw_sum(rz, noise_nonzero) / spectrum.dof(noise_nonzero + 1);
-  result.lamplus = spectrum.normalized(result.cutoff_p - 1);
+  // An imposed rank cuts wherever it is told to; the empirical boundary that produces bears no
+  //   necessary relation to the lambda+ that the resulting noise level implies, which is precisely
+  //   why the two are recorded separately.
+  result.set_boundaries(spectrum.edge(), spectrum.max_noise_standardized(result.cutoff_p));
   return result;
 }
 
@@ -102,7 +105,7 @@ Result Rank::operator()(const std::vector<Spectrum> &spectra, //
     // Keep all nonzero components as signal.
     result.cutoff_p = 0;
     result.sigma2 = 0.0;
-    result.lamplus = 0.0;
+    result.set_boundaries(mean_edge(spectra), 0.0);
     result.cutoff_p_partition.assign(spectra.size(), 0);
     result.lamplus_partition.assign(spectra.size(), 0.0);
     return result;
@@ -117,7 +120,7 @@ Result Rank::operator()(const std::vector<Spectrum> &spectra, //
   //   sums; that extra component is charged the mean degrees of freedom per noise component, so
   //   that a single partition reproduces qnz * (k + 1) exactly.
   result.sigma2 = stats.sum / (stats.dof * double(stats.count + 1) / double(stats.count));
-  result.lamplus = zstar * mean_edge(spectra);
+  result.set_boundaries(mean_edge(spectra), stats.z_max);
   return result;
 }
 
