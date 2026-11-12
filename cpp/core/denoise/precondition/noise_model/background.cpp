@@ -90,6 +90,10 @@ private:
 
 template <class ImageType> Accumulation accumulate_background(ImageType &input, const size_t slice_axis) {
   Accumulation result({input.size(0), input.size(1), input.size(2)}, slice_axis);
+  size_t num_volumes = 1;
+  for (size_t axis = 3; axis < input.ndim(); ++axis)
+    num_volumes *= size_t(input.size(axis));
+  result.num_volumes = uint32_t(num_volumes);
   ThreadedLoop("Accumulating magnitude statistics for noise distribution estimation", input, 0, 3)
       .run(AccumulateFunctor<ImageType>(result), input);
   return result;
@@ -499,6 +503,7 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
   result.slice_axis = accumulation.slice_axis;
   result.size = accumulation.size;
   result.zeroed_fraction = accumulation.zeroed_fraction();
+  result.num_volumes = accumulation.num_volumes;
   if (method == background_method_t::NONE) {
     result.decline = "no estimation was requested";
     return result;
@@ -587,6 +592,19 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
     }
   }
 
+  if (accumulation.num_volumes > 0) {
+    size_t total = 0;
+    size_t usable = 0;
+    for (size_t index = 0; index != result.selected.size(); ++index) {
+      if (result.selected[index] == 0)
+        continue;
+      total += accumulation.num_volumes;
+      usable += accumulation.voxels[index].count;
+    }
+    if (total > 0)
+      result.excluded_fraction = default_type(total - usable) / default_type(total);
+  }
+
   std::vector<default_type> dofs;
   std::vector<default_type> sigmas;
   for (const SliceEstimate &slice : result.slices) {
@@ -626,6 +644,70 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
   result.dof_iqr = quantile_of(dofs, 0.75) - quantile_of(dofs, 0.25);
   result.estimated = true;
   return result;
+}
+
+namespace {
+// Thresholds of estimate_caveats(). They were set against synthetic phantoms (non-central chi noise
+//   of 1 to 16 degrees of freedom; 4 to 64 volumes; ample, scarce and absent background; ghosting;
+//   an in-plane gradient of noise level; radially varying degrees of freedom; clipped and
+//   integer-rounded magnitudes), and have not been calibrated against real data.
+//
+// Relative interquartile range of the per-slice degrees of freedom, as a floor: healthy phantoms
+//   of 64 x 64 voxels per slice gave at most 0.021 (and smaller ones with 4 to 6 volumes up to 0.048,
+//   which the sampling term below accommodates), and those in which tissue was selected in some
+//   slices at least 0.071.
+constexpr default_type max_relative_dof_iqr = 0.05;
+// The same, as a multiple of the spread expected from sampling variation alone, which governs where
+//   slices yield few samples. The relative standard deviation of a Gamma shape estimate from n samples
+//   is at most sqrt(2/n) by maximum likelihood (its large-shape limit) and about sqrt(4/n) by the
+//   method of moments at the smallest admissible shape; the latter is taken, and converted to an
+//   interquartile range by the factor 1.349 of the normal distribution.
+constexpr default_type max_dof_iqr_sampling_ratio = 3.0;
+// Proportion of excluded (zero) samples among those of the selected voxels: exactly zero for every
+//   unclipped floating-point phantom; 0.03 to 0.39 where clipping or rounding to zero had inflated
+//   the estimate by 18% to 200%.
+constexpr default_type max_excluded_fraction = 0.01;
+} // namespace
+
+std::vector<std::string> estimate_caveats(const BackgroundResult &result) {
+  std::vector<std::string> caveats;
+  if (!result || !(result.dof > 0.0))
+    return caveats;
+
+  std::vector<default_type> samples;
+  for (const SliceEstimate &slice : result.slices) {
+    if (slice.estimated)
+      samples.push_back(default_type(slice.num_selected) * default_type(result.num_volumes));
+  }
+  default_type threshold = max_relative_dof_iqr;
+  if (!samples.empty() && result.num_volumes > 0) {
+    std::nth_element(samples.begin(), samples.begin() + samples.size() / 2, samples.end());
+    const default_type typical = samples[samples.size() / 2];
+    if (typical > 0.0)
+      threshold = std::max(threshold, max_dof_iqr_sampling_ratio * 1.349 * std::sqrt(4.0 / typical));
+  }
+  const default_type relative_iqr = result.dof_iqr / result.dof;
+  if (relative_iqr > threshold) {
+    caveats.push_back("The per-slice estimates of the degrees of freedom disagree by more than sampling"
+                      " variation explains (interquartile range " +
+                      str(result.dof_iqr, 3) + " about a median of " + str(result.dof, 4) +
+                      "). This can reflect a noise distribution that genuinely varies across slices, but"
+                      " is also what results where the field of view contains too little air and the"
+                      " voxels selected in some slices lie within the head, in which case the degrees of"
+                      " freedom are typically underestimated; inspect the voxels selected"
+                      " (-noise_voxels_out) and the per-slice estimates (-noise_dof_out)");
+  }
+
+  if (result.excluded_fraction > max_excluded_fraction) {
+    caveats.push_back(str(100.0 * result.excluded_fraction, 3) +
+                      "% of the samples of the voxels identified as containing noise alone are zero (or"
+                      " non-finite), and were excluded from the fit. Noise magnitudes are essentially never"
+                      " exactly zero, so these are most likely low magnitudes that the reconstruction"
+                      " clipped, or that integer storage of data with a low noise level rounded, to zero;"
+                      " the fit then sees a truncated distribution, and the degrees of freedom are"
+                      " overestimated");
+  }
+  return caveats;
 }
 
 size_t select_slice_axis(const Header &H) {

@@ -69,6 +69,7 @@
 #include <string>
 #include <vector>
 
+#include "algo/loop.h"
 #include "denoise/precondition/noise_model/background.h"
 #include "header.h"
 #include "image.h"
@@ -76,15 +77,17 @@
 #include "math/noncentral_chi.h"
 #include "ncchi_sampler.h"
 
-using MR::Denoise::Precondition::NoiseModel::Accumulation;
 using MR::Denoise::Precondition::NoiseModel::accumulate_background;
+using MR::Denoise::Precondition::NoiseModel::Accumulation;
 using MR::Denoise::Precondition::NoiseModel::background_method_t;
 using MR::Denoise::Precondition::NoiseModel::BackgroundParameters;
 using MR::Denoise::Precondition::NoiseModel::BackgroundResult;
 using MR::Denoise::Precondition::NoiseModel::Estimate;
 using MR::Denoise::Precondition::NoiseModel::estimate_background;
+using MR::Denoise::Precondition::NoiseModel::estimate_caveats;
 using MR::Denoise::Precondition::NoiseModel::estimate_from_sums;
 using MR::Denoise::Precondition::NoiseModel::SampleSums;
+using MR::Denoise::Precondition::NoiseModel::SliceEstimate;
 using MR::Math::digamma;
 using MR::Math::gamma_p;
 using MR::Math::gamma_p_inv;
@@ -851,6 +854,90 @@ void test_algorithm(std::FILE *out, std::FILE *tsv) {
   }
 }
 
+// Whether any of the caveats contains a phrase, which is how the two kinds are told apart.
+bool has_caveat(const std::vector<std::string> &caveats, const std::string &phrase) {
+  return std::any_of(caveats.begin(), caveats.end(), [&phrase](const std::string &caveat) {
+    return caveat.find(phrase) != std::string::npos;
+  });
+}
+
+// The warnings that flag, without correcting, a successful estimate that is likely to be wrong.
+//   Each is asserted to fire on the failure it is for and to stay silent on healthy data, since a
+//   warning that fires on clean data teaches users to ignore it.
+void test_caveats(std::FILE *out) {
+  std::fprintf(out, "\n");
+  const PhantomSpec clean;
+  const std::string spread_phrase = "disagree by more than sampling";
+  const std::string zero_phrase = "excluded from the fit";
+
+  // Clean data: nothing excluded, nothing flagged.
+  {
+    MR::Image<float> image = make_phantom(clean, 424242u);
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    check(bool(result), "caveats (clean): an estimate is produced");
+    check(result.num_volumes == uint32_t(clean.nvol), "caveats (clean): the volume count is recorded");
+    check_near(result.excluded_fraction, 0.0, 0.0, "caveats (clean): no sample of the selected voxels is excluded");
+    const std::vector<std::string> caveats = estimate_caveats(result);
+    check(caveats.empty(), "caveats (clean): no caveat is raised");
+    std::fprintf(out, "%-26s excluded=%.4f caveats=%zu\n", "caveats: clean", result.excluded_fraction, caveats.size());
+  }
+
+  // Rician background clipped below one noise level, as a reconstruction that discards low
+  //   magnitudes would: 39% of background samples become zero, the estimate is inflated, and the
+  //   zero-sample caveat is what reports it.
+  {
+    PhantomSpec spec = clean;
+    spec.dof = 2.0;
+    MR::Image<float> image = make_phantom(spec, 424242u);
+    for (auto l = MR::Loop(image)(image); l; ++l) {
+      if (image.value() < float(slice_sigma(spec, image.index(2))))
+        image.value() = 0.0f;
+    }
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    check(bool(result), "caveats (clipped): an estimate is produced");
+    const std::vector<std::string> caveats = estimate_caveats(result);
+    std::fprintf(out,
+                 "%-26s dof=%.4f excluded=%.4f caveats=%zu\n",
+                 "caveats: clipped",
+                 result.dof,
+                 result.excluded_fraction,
+                 caveats.size());
+    check(result.excluded_fraction > 0.3, "caveats (clipped): the zeroed samples are counted");
+    check(has_caveat(caveats, zero_phrase), "caveats (clipped): the zero-sample caveat is raised");
+    check(!has_caveat(caveats, spread_phrase), "caveats (clipped): the spread caveat is not raised");
+  }
+
+  // The spread caveat, on constructed results, so that its threshold is tested directly: per-slice
+  //   estimates spread as they are where tissue is selected in some slices (relative interquartile
+  //   range 0.13) are flagged where the slices are well sampled, a spread typical of clean data
+  //   (0.005) is not, and the former is NOT flagged where so few samples were available per slice
+  //   that sampling variation alone would explain it.
+  const auto constructed = [](const double dof, const double iqr, const size_t voxels, const uint32_t volumes) {
+    BackgroundResult result;
+    result.estimated = true;
+    result.dof = dof;
+    result.dof_iqr = iqr;
+    result.num_volumes = volumes;
+    result.slices.resize(8);
+    for (SliceEstimate &slice : result.slices) {
+      slice.estimated = true;
+      slice.dof = dof;
+      slice.num_selected = voxels;
+    }
+    return result;
+  };
+  check(has_caveat(estimate_caveats(constructed(2.5, 0.33, 2000, 64)), spread_phrase),
+        "caveats: a wide spread of well-sampled per-slice estimates is flagged");
+  check(estimate_caveats(constructed(8.0, 0.04, 2000, 64)).empty(),
+        "caveats: the spread of clean per-slice estimates is not flagged");
+  check(estimate_caveats(constructed(2.5, 0.33, 100, 4)).empty(),
+        "caveats: a spread that sampling variation explains is not flagged");
+  BackgroundResult declined = constructed(2.5, 0.33, 2000, 64);
+  declined.estimated = false;
+  declined.excluded_fraction = 0.5;
+  check(estimate_caveats(declined).empty(), "caveats: nothing is raised about a declined estimate");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -884,6 +971,7 @@ int main(int argc, char **argv) {
   test_estimators(out, tsv, evidence);
   test_scale_equivariance(out);
   test_algorithm(out, tsv);
+  test_caveats(out);
 
   if (tsv != nullptr)
     std::fclose(tsv);

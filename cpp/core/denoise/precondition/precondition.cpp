@@ -99,9 +99,11 @@ const char *const noise_channels_description =
     " a value obtained the latter way is applied but reported as a hypothesis, with a warning."
     " Any phase-sensitive combination (adaptive combine, SENSE1) yields N = 1."
     " Where no inference can be drawn, a warning is issued and N = 1 (Rician) is assumed."
+    " A measured count is applied with a statement of its provenance;"
+    " the Rician value of a phase-sensitive combination is applied without a warning."
     " An explicitly provided value is always used,"
-    " with a warning if it disagrees with what the metadata indicate"
-    " or with the value estimated from the data via -noise_dof_method."
+    " with a warning if it disagrees with a value that the metadata establish rather than hypothesise,"
+    " or by more than 5% with the value estimated from the data via -noise_dof_method."
     " Note also that these degrees of freedom, including those tabulated by -noise_dof_out,"
     " are unrelated to the -dof_output option of the dwidenoise2 command,"
     " which concerns the (Satterthwaite) degrees of freedom of the residual energy remaining after denoising;"
@@ -156,7 +158,9 @@ const char *const noise_dof_selection_description =
     " Because parallel imaging makes the effective channel count vary over space,"
     " slice-wise estimates may be closer to the truth;"
     " they are however individually noisier, being fitted from the background voxels of one slice only."
-    " A large spread of the per-slice estimates is the signature of a spatially varying distribution."
+    " A large spread of the per-slice estimates is the signature of a spatially varying distribution,"
+    " but equally of slices in which the voxels selected are not background (see below);"
+    " a spread greater than sampling variation explains is reported with a warning."
     " Two diagnostic exports are available."
     " -noise_dof_out writes a tab-separated text file with one row per slice,"
     " giving the estimated degrees of freedom, the equivalent effective receive channel count,"
@@ -174,12 +178,19 @@ const char *const noise_dof_limitations_description =
     " rather than being defects of this implementation."
     " Firstly, it requires that background voxels exist:"
     " data with no air in the field of view, or whose reconstruction has already masked the background,"
-    " carry no information for this estimator, and the procedure declines rather than returning a value."
+    " carry no information for this estimator, and the procedure declines rather than returning a value;"
+    " where there is only a little air, voxels within the head may be selected instead,"
+    " which typically yields too few degrees of freedom and per-slice estimates that disagree."
     " Secondly, under k-space parallel imaging (e.g. GRAPPA) the effective channel count depends on the local signal,"
     " such that a value estimated in the background is an upper bound on that which applies within the head."
     " Thirdly, simultaneous multi-slice acquisition aliases signal into what should be background,"
     " which inflates the estimate."
     " It nonetheless remains a large improvement on assuming a Rician distribution."
+    " Separately, zero-valued samples are excluded from the fit,"
+    " so magnitudes that were clipped or rounded to zero"
+    " (as integer storage of data with a low noise level can do)"
+    " truncate the distribution and inflate the estimate;"
+    " a warning is issued where more than 1% of the samples fitted are zero."
     " Note also that while the procedure necessarily estimates a background noise level"
     " alongside the degrees of freedom,"
     " that value is not used as the noise level in any subsequent computation:"
@@ -496,6 +507,8 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
          result.decline +
          ". The degrees of freedom will instead be taken from the image header metadata where they permit it, "
          "and from the Rician default otherwise");
+  for (const std::string &caveat : NoiseModel::estimate_caveats(result))
+    WARN(caveat);
 
   // .as_text() rather than an implicit conversion: App::ParsedArgument asserts in debug builds when
   //   a filesystem-typed argument is converted to std::string.
@@ -551,7 +564,12 @@ NoiseModel::Set make_noise_model(const NoiseModelOptions &options,
       background ? std::optional<default_type>(background.dof) : std::nullopt;
   const std::string data_evidence = background ? describe_estimate(options, background) : std::string();
   const default_type dof =
-      NoiseModel::resolve_noise_dof(H, options.user_dof, options.user_option, data_dof, data_evidence);
+      NoiseModel::resolve_noise_dof(H,
+                                    options.user_dof,
+                                    options.user_option,
+                                    data_dof,
+                                    data_evidence,
+                                    options.background_method != NoiseModel::background_method_t::NONE);
 
   // Slice-wise scope, which only a successful estimate that the user has not overridden can supply.
   if (options.background_scope == NoiseModel::background_scope_t::SLICE && background && !user_specified) {

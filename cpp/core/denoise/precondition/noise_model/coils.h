@@ -138,11 +138,16 @@ CoilInference infer_noise_dof(const Header &H);
 // - no user value, data estimate available: the estimate. It outranks the header inference because
 //     it is a measurement of the data at hand rather than a claim about the hardware that produced
 //     them, and because the inference is in most cases either unavailable or hypothesised.
-// - no user value, no data estimate, inference successful: the inferred value, reported at INFO
-//     level; where it was hypothesised from the coil's cluster count rather than measured for the
-//     coil, a warning says so, since the value parameterises the noise model exactly as a measured
-//     one would and nothing in the results would otherwise distinguish the two.
-// - none of the above: 2 (Rician), with a warning stating as much.
+// - no user value, no data estimate, inference successful: the inferred value. The severity at
+//     which it is reported follows from what it rests on. The Rician value of a phase-sensitive
+//     combination is evidenced and is the default model in any case, so it is reported at INFO
+//     level. A measured count from the built-in table changes the model away from that default on
+//     the strength of a measurement made on another acquisition, so it is stated at CONSOLE level
+//     together with its provenance. A count hypothesised from the coil's cluster count is reported
+//     with a warning, since it parameterises the noise model exactly as a measured one would and
+//     nothing in the results would otherwise distinguish the two.
+// - none of the above: 2 (Rician), with a warning stating as much and naming the options that
+//     would supply a value.
 //
 // WHERE BOTH A DATA ESTIMATE AND A HEADER INFERENCE EXIST, both are reported together with their
 //   discrepancy, whichever of them is used. That comparison is the mechanism by which the built-in
@@ -154,11 +159,18 @@ CoilInference infer_noise_dof(const Header &H);
 //   used; it is ignored when "user_value" is empty. "data_evidence" is one phrase describing how
 //   "data_value" was obtained, for inclusion in the messages that report it. "user_value" and
 //   "data_value" are in every case degrees-of-freedom values: a channel count is doubled by the
-//   caller before arriving here.
+//   caller before arriving here. "data_requested" states whether an estimate from the data was
+//   attempted, whether or not it succeeded, so that the Rician fallback does not recommend an
+//   estimation that has already declined.
+//
+// A data estimate is compared with the other two values against a relative tolerance of 5% rather
+//   than for equality, since it carries sampling error and would otherwise "disagree" with a
+//   correct value on every run.
 default_type resolve_noise_dof(const Header &H,
                                const std::optional<default_type> &user_value,
                                const std::string &user_option,
                                const std::optional<default_type> &data_value,
-                               const std::string &data_evidence);
+                               const std::string &data_evidence,
+                               bool data_requested);
 
 } // namespace MR::Denoise::Precondition::NoiseModel

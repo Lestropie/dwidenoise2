@@ -169,6 +169,10 @@ public:
   std::vector<VoxelStats> voxels;
   std::array<ssize_t, 3> size;
   size_t slice_axis;
+  // Number of volumes accumulated per voxel, from which the number of samples that VoxelStats::count
+  //   excluded can be recovered. Zero where unknown (an Accumulation not filled by
+  //   accumulate_background()), in which case nothing that depends on it is reported.
+  uint32_t num_volumes{0};
 };
 
 // Accumulate the statistics above from a magnitude image, in one pass. Explicitly instantiated for
@@ -243,6 +247,14 @@ public:
   std::vector<SliceEstimate> slices;
   size_t num_selected_total{0};
   default_type zeroed_fraction{0.0};
+  // Of all samples (voxel-volume pairs) of the voxels selected as background, the proportion that
+  //   were zero or non-finite and therefore excluded from the fit. Not a decline criterion but a
+  //   diagnostic (see estimate_caveats()): background magnitudes are continuous and essentially never
+  //   exactly zero, so zeros among them are low magnitudes that were clipped or rounded away, and
+  //   excluding them truncates the distribution being fitted.
+  default_type excluded_fraction{0.0};
+  // As Accumulation::num_volumes.
+  uint32_t num_volumes{0};
   // Why no global estimate was produced; empty iff estimated.
   std::string decline;
   // Per spatial voxel: was this voxel accepted as background by the iteration that converged?
@@ -261,6 +273,22 @@ public:
 BackgroundResult estimate_background(const Accumulation &accumulation,
                                      const background_method_t method,
                                      const BackgroundParameters &parameters = BackgroundParameters());
+
+// Warnings about a SUCCESSFUL estimate, one string per condition detected, for the caller to issue.
+//   These flag (and do not correct) the two ways in which the estimator has been observed to return
+//   a confident but wrong value on synthetic data:
+// - The per-slice estimates are spread far more widely than sampling variation explains. Where the
+//   field of view holds too little air, the voxels selected in some slices lie within the head;
+//   the plausibility ceiling does not catch this because the value obtained is low rather than
+//   high (around two to three degrees of freedom whatever the truth), but it varies from slice to
+//   slice with the tissue selected, whereas genuine background gives per-slice estimates that agree
+//   to within about 2% even from few volumes. A genuinely spatially varying distribution may also
+//   produce a spread, which the message acknowledges.
+// - More than a small proportion of the samples fitted are zero (BackgroundResult::excluded_fraction),
+//   meaning that the low tail of the distribution has been clipped or rounded away; the degrees of
+//   freedom are then overestimated.
+// Empty for a result that did not produce an estimate.
+std::vector<std::string> estimate_caveats(const BackgroundResult &result);
 
 // The image axis along which slices are separated, taken from "SliceEncodingDirection" where the
 //   header provides it and otherwise assumed to be the third spatial axis.
