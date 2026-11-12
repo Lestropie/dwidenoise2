@@ -122,9 +122,24 @@ std::vector<double> pool_rescaled(const std::vector<Spectrum> &spectra, const st
 //   noise components and the degrees of freedom they carry, from which the noise level follows as
 //   sigma^2 = sum / dof (see note 2 at the head of this file).
 struct NoiseStats {
-  double sum = 0.0;  // sum_p sum_{i in noise_p} s_{p,i}, ie. energy
-  double dof = 0.0;  // sum_p k_p qnz_p
-  ssize_t count = 0; // sum_p k_p, counting nonzero noise components only
+  double sum = 0.0;          // sum_p sum_{i in noise_p} s_{p,i}, ie. energy
+  double dof = 0.0;          // sum_p k_p qnz_p
+  double dof_deflated = 0.0; // sum_p k_p max(1, qnz_p - (rnz_p - k_p))
+  ssize_t count = 0;         // sum_p k_p, counting nonzero noise components only
+  // Two degrees-of-freedom conventions are accumulated, because a classification that assigns
+  //   rank to a partition also changes the shape of the noise block its retained components are
+  //   drawn from. "dof" is the undeflated sum_p k_p qnz_p: the degrees of freedom the noise
+  //   components carry on the assumption that the decomposition is the full rnz_p x qnz_p one.
+  //   "dof_deflated" additionally removes from each partition's long dimension the
+  //   p_p = rnz_p - k_p directions that this same classification has just called signal, which is
+  //   what the spiked model prescribes: the noise surviving in the orthogonal complement of an
+  //   estimated p_p-dimensional signal subspace occupies a (rnz_p - p_p) x (qnz_p - p_p) block,
+  //   so the sum of its k_p eigenvalues has expectation sigma^2 k_p (qnz_p - p_p). Dividing the
+  //   energy by the undeflated figure instead under-states sigma^2 by (qnz_p - p_p)/qnz_p, an
+  //   error that vanishes only for a rank-zero patch and grows with the rank removed.
+  // The deflation is per partition and cannot be applied to any aggregate: the cut is one
+  //   standardised value, but the number of directions it calls signal differs between
+  //   partitions, and it is each partition's own p_p that shrinks its own long dimension.
   // Standardised value of the most significant component classified as noise anywhere in the
   //   patch, ie. max_p Spectrum::max_noise_standardized(k_p): the empirical signal/noise boundary
   //   actually realised, as against the theoretical one that the noise level implies. Zero where
@@ -133,7 +148,11 @@ struct NoiseStats {
   //   one because partitions of unequal aspect ratio are commensurable only on that scale.
   double z_max = 0.0;
   bool empty() const { return count == 0; }
-  double sigma2() const { return sum / dof; }
+  // Pooled noise level on the deflated degrees of freedom, ie. the refinement Estimator::Med
+  //   makes once the median has isolated the noise components. The undeflated counterpart has no
+  //   accessor because its one reader, Estimator::Rank, forms its level from "sum" and "dof"
+  //   under a further correction of its own.
+  double sigma2_deflated() const { return sum / dof_deflated; }
 };
 
 // Classify every partition against the standardised cut z, which is simultaneously a boundary
