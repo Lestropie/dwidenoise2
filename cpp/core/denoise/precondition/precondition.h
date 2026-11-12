@@ -74,7 +74,7 @@ enum class bias_handling_t { DEBIAS, PRESERVE };
 //     inverse is always evaluated pointwise (a faithful, grouping-independent reversal).
 enum class debias_anchor_t { SAMPLE, GROUP_MEAN };
 
-App::OptionGroup precondition_options(const bool include_output);
+App::OptionGroup precondition_options(const option_scope_t scope);
 
 // Construct the noise model governing the variance-stabilising transform
 //   from the -noise_channels / -noise_dof and -vst_method command-line options.

@@ -52,6 +52,12 @@ using vector_type = Eigen::Array<double, Eigen::Dynamic, 1>;
 //   complex input is the aggregate across the two channels and is therefore larger by sqrt(2).
 template <typename F> constexpr double casorati_entry_channels() { return is_complex<F>::value ? 2.0 : 1.0; }
 
+// Which command a shared OptionGroup is being constructed for:
+//   ESTIMATION for noise level estimation alone (dwi2noise),
+//   DENOISING for denoising with optional noise level estimation (dwidenoise2).
+//   Options pertaining only to the reconstruction of a denoised image series are omitted for the former.
+enum class option_scope_t { ESTIMATION, DENOISING };
+
 extern const char *patent_description;
 extern const char *first_step_description;
 extern const char *non_gaussian_noise_description;

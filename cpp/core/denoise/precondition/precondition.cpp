@@ -97,7 +97,7 @@ const char *const noise_channels_description =
     " with a warning if it disagrees with what the metadata indicate.";
 
 // clang-format off
-OptionGroup precondition_options(const bool include_output)
+OptionGroup precondition_options(const option_scope_t scope)
 {
   OptionGroup result ("Options for preconditioning data prior to PCA");
   result
@@ -136,7 +136,7 @@ OptionGroup precondition_options(const bool include_output)
            "for complex data the noise is Gaussian and the non-linear methods foi/koay/mom "
            "reduce to 'linear', though 'none' is still honoured)")
     + Argument("method").type_choice<NoiseModel::vst_method_t>();
-  if (include_output) {
+  if (scope == option_scope_t::DENOISING) {
     result
     + Option("preconditioned_input",
              "export the preconditioned version of the input image that is the input to PCA")

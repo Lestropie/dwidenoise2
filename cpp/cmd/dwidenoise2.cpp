@@ -141,6 +141,8 @@ void usage() {
 
   + Denoise::aggregation_description
 
+  + noise_boundary_description
+
   + Schedule::schedule_description;
 
   EXAMPLES
@@ -310,7 +312,7 @@ void usage() {
            " it is rejected with a multi-row schedule, which builds the rank density itself.")
     + Argument("value/image").type_float(0.0).type_image_in()
   + Schedule::schedule_option
-  + precondition_options(true)
+  + precondition_options(option_scope_t::DENOISING)
 
   + OptionGroup("Options that affect reconstruction of the output image series")
   + Option("filter",
@@ -351,127 +353,8 @@ void usage() {
            " with -demean none there is no per-group mean and the anchor degenerates to a global one)")
     + Argument("mode").type_choice<debias_anchor_t>()
 
-  + OptionGroup("Options for exporting additional data regarding PCA behaviour")
-  + Option("noise_out",
-           "The output noise map,"
-           " i.e., the estimated noise level 'sigma' in the data. "
-           "This is always the noise level of a single real-valued channel,"
-           " for complex input data as much as for magnitude:"
-           " the value estimated from a complex series is that which would be estimated"
-           " from the corresponding magnitude series at high SNR,"
-           " and the map may therefore be exchanged freely between the two"
-           " (via -noise_in) without rescaling. "
-           "Note that this differs from the \"dwidenoise\" command in MRtrix3,"
-           " whose noise map for complex input data is instead"
-           " the aggregate level across the real and imaginary channels,"
-           " and is therefore larger by a factor of sqrt(2).")
-    + Argument("image").type_image_out()
-  + Option("lamplus",
-           "The THEORETICAL upper bound of the noise portion of the eigenspectrum (\"lambda-plus\"):"
-           " the Marchenko-Pastur bulk edge implied by the estimated noise level and the aspect ratio"
-           " of the Casorati matrix, ie. sigma^2 multiplied by (1+sqrt(beta))^2. "
-           "This is an eigenvalue, and is therefore in units of the SQUARE of the noise level"
-           " reported by -noise_out; as for that map, the noise level in question is per-channel. "
-           "Being a function of that estimated noise level and the patch geometry alone,"
-           " it says nothing about where the signal/noise boundary actually fell;"
-           " for that, see -lammax_noise")
-    + Argument("image").type_image_out()
-  + Option("lammax_noise",
-           "The EMPIRICAL upper bound of the noise portion of the eigenspectrum:"
-           " the largest eigenvalue that the estimator classified as noise. "
-           "Because the aspect ratio of the Casorati matrix varies from patch to patch wherever the"
-           " kernel size does, and with it the width of the Marchenko-Pastur bulk,"
-           " this map is standardised: each value is divided by that patch's own bulk edge"
-           " (1+sqrt(beta))^2, placing it in units of the SQUARE of the noise level reported by"
-           " -noise_out irrespective of patch geometry. "
-           "It is therefore comparable both between voxels and against that squared noise map,"
-           " which it equals exactly when the classification cut falls on the bulk edge;"
-           " it lies below it where the discrete spectrum holds no component near that edge,"
-           " and may exceed it for estimators whose cut is not the edge"
-           " (-estimator exp1 / exp2, or -fixed_rank)")
-    + Argument("image").type_image_out()
-  + Option("rank_pcanonzero",
-           "The (non-zero) rank of the PCA decomposition for each patch absent any denoising")
-    + Argument("image").type_image_out()
-  + Option("rank_input",
-           "The estimated rank of the input data for each denoising patch")
-    + Argument("image").type_image_out()
-  + Option("trace_output",
-           "The effective number of degrees of freedom retained per voxel in the output image data,"
-           " accounting for multi-patch aggregation:"
-           " the trace of the composite reconstruction filter (the sum of its eigenvector weights)."
-           " For a hard filter (-filter truncate or -filter optthresh) every weight is 0 or 1 and this"
-           " is exactly the rank of the output data;"
-           " under the default optimal shrinkage the weights are fractional and the trace is smaller"
-           " than the number of surviving components."
-           " This is the appropriate divisor for converting a residual sum of squares computed on the"
-           " denoised data into an unbiased noise level estimate (see also -dof_output)")
-    + Argument("image").type_image_out()
-  + Option("dof_output",
-           "The (approximate) degrees of freedom of the residual energy of a statistical model"
-           " subsequently fit to the output image data,"
-           " for use in place of the image volume count when setting that model's degrees of freedom."
-           " This is the chi-squared-matching (Satterthwaite) measure"
-           " (sum of squared filter weights, squared, divided by the sum of their fourth powers),"
-           " which is the quantity governing the reference distribution of a t- or F-statistic;"
-           " it is identical to -trace_output for a hard filter."
-           " Under optimal shrinkage the two differ, in a direction set by the shape of the weight"
-           " spectrum: many components of similar sub-unity weight drive it above the trace,"
-           " whereas a few near-unity weights accompanied by many small ones drive it below."
-           " Approximate in two respects:"
-           " the higher moments from which it is formed are averaged across the patches contributing"
-           " to each voxel, which neglects inter-patch cross terms"
-           " (it is exact for -aggregator exclusive only);"
-           " and, as for -trace_output, it treats the PCA basis as fixed rather than as having been"
-           " estimated from the same data, which understates the true degrees of freedom by a factor"
-           " of roughly 1 + (num_volumes - rank) / num_patch_voxels")
-    + Argument("image").type_image_out()
-  + Option("rankpermm_out",
-           "Export the per-voxel signal-rank density (signal rank per mm of kernel radius) that was"
-           " used to size the rank-adaptive reconstruction kernel."
-           " For a multi-resolution schedule this is the density derived from the penultimate"
-           " iteration; for a single-row schedule it is whatever was supplied via -rankpermm_in"
-           " (nothing is written if no such density is available).")
-    + Argument("image").type_image_out()
-  + Option("variance_removed",
-           "the fraction of variance removed in producing the output denoised data "
-           "(note that this applies strictly to the PCA and omits effects of preconditioning)")
-    + Argument("image").type_image_out()
-  + Option("eigenspectra",
-           "Output a matrix containing the spectra of eigenvalues across patches"
-           " (one row per patch). Where volume partitioning is in effect, each row is the"
-           " per-partition eigenspectra concatenated and sorted, normalised by partition size,"
-           " rather than a single decomposition's spectrum.")
-    + Argument("file").type_file_out()
-  + Option("residual_statistics",
-           "export images containing statistics of the residuals between input and denoised data,"
-          " with image paths in order representing: mean, standard deviation, maxabs."
-          " The standard deviation is that of a single real-valued channel,"
-          " matching the convention of the -noise_out map,"
-          " and is therefore directly comparable to it"
-          " wherever the residual consists of noise alone")
-    + Argument("mean_image").type_image_out()
-    + Argument("std_image").type_image_out()
-    + Argument("maxabs_image").type_image_out()
-
-
-  + OptionGroup("Options for debugging the operation of sliding window kernels")
-  + Option("max_dist",
-           "The maximum distance between a voxel and another voxel that was included in the local denoising patch")
-    + Argument("image").type_image_out()
-  + Option("voxelcount",
-           "The number of voxels that contributed to the PCA for processing of each voxel")
-    + Argument("image").type_image_out()
-  + Option("patchcount",
-           "The number of unique patches to which an image voxel contributes")
-    + Argument("image").type_image_out()
-  + Option("sum_aggregation",
-           "The sum of aggregation weights of those patches contributing to each output voxel")
-    + Argument("image").type_image_out()
-  + Option("trace_patch",
-           "the sum of eigenvector weights computed for the denoising patch centred at each voxel; "
-           "the unaggregated, per-patch counterpart to -trace_output, on the sub-sampled grid")
-    + Argument("image").type_image_out()
+  + export_options(option_scope_t::DENOISING)
+  + kernel_debug_options(option_scope_t::DENOISING)
 
   + DWI::GradImportOptions();
 

@@ -118,6 +118,8 @@ void usage() {
 
   + Kernel::cuboid_size_description
 
+  + noise_boundary_description
+
   + Schedule::schedule_description;
 
   EXAMPLES
@@ -221,65 +223,13 @@ void usage() {
            " (see the description above)")
     + Argument("value/image").type_float(0.0).type_image_in()
   + Schedule::schedule_option
-  + precondition_options(false)
+  + precondition_options(option_scope_t::ESTIMATION)
 
   + DWI::GradImportOptions()
   + DWI::GradExportOptions()
 
-  + OptionGroup("Options for exporting additional data regarding PCA behaviour")
-  + Option("rank_pcanonzero",
-           "The (non-zero) rank of the PCA decomposition prior to any noise level estimation")
-    + Argument("image").type_image_out()
-  + Option("lamplus",
-           "The THEORETICAL upper bound of the noise portion of the eigenspectrum (\"lambda-plus\"):"
-           " the Marchenko-Pastur bulk edge implied by the estimated noise level and the aspect ratio"
-           " of the Casorati matrix, ie. sigma^2 multiplied by (1+sqrt(beta))^2. "
-           "This is an eigenvalue, and is therefore in units of the SQUARE of the noise level"
-           " reported by -noise_out; as for that map, the noise level in question is per-channel. "
-           "Being a function of that estimated noise level and the patch geometry alone,"
-           " it says nothing about where the signal/noise boundary actually fell;"
-           " for that, see -lammax_noise")
-    + Argument("image").type_image_out()
-  + Option("lammax_noise",
-           "The EMPIRICAL upper bound of the noise portion of the eigenspectrum:"
-           " the largest eigenvalue that the estimator classified as noise. "
-           "Because the aspect ratio of the Casorati matrix varies from patch to patch wherever the"
-           " kernel size does, and with it the width of the Marchenko-Pastur bulk,"
-           " this map is standardised: each value is divided by that patch's own bulk edge"
-           " (1+sqrt(beta))^2, placing it in units of the SQUARE of the noise level reported by"
-           " -noise_out irrespective of patch geometry. "
-           "It is therefore comparable both between voxels and against that squared noise map,"
-           " which it equals exactly when the classification cut falls on the bulk edge;"
-           " it lies below it where the discrete spectrum holds no component near that edge,"
-           " and may exceed it for estimators whose cut is not the edge"
-           " (-estimator exp1 / exp2, or -fixed_rank)")
-    + Argument("image").type_image_out()
-  + Option("rank_input",
-           "The estimated rank of the input data for each denoising patch")
-    + Argument("image").type_image_out()
-  + Option("rankpermm_out",
-           "Export the per-voxel signal-rank density (estimated signal rank per mm of kernel radius)."
-           " This is the quantity dwidenoise2 uses to size its rank-adaptive reconstruction kernel;"
-           " exporting it here and importing it into dwidenoise2 via -rankpermm_in allows a"
-           " single-row (e.g. \"apriori\") dwidenoise2 schedule to reproduce that kernel.")
-    + Argument("image").type_image_out()
-  + Option("eigenspectra",
-           "Output a matrix containing the spectra of eigenvalues across patches"
-           " (one row per patch). Where volume partitioning is in effect, each row is the"
-           " per-partition eigenspectra concatenated and sorted, normalised by partition size,"
-           " rather than a single decomposition's spectrum.")
-    + Argument("file").type_file_out()
-
-  + OptionGroup("Options for debugging the operation of sliding window kernels")
-  + Option("max_dist",
-           "The maximum distance between the centre of the patch and a voxel that was included within that patch")
-    + Argument("image").type_image_out()
-  + Option("voxelcount",
-           "The number of voxels that contributed to the PCA for processing of each patch")
-    + Argument("image").type_image_out()
-  + Option("patchcount",
-           "The number of unique patches to which an input image voxel contributes")
-    + Argument("image").type_image_out();
+  + export_options(option_scope_t::ESTIMATION)
+  + kernel_debug_options(option_scope_t::ESTIMATION);
 }
 // clang-format on
 
