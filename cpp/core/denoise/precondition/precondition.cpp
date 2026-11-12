@@ -81,8 +81,8 @@ const char *const noise_channels_description =
     " The effective count is consequently smaller than the element count,"
     " often by a large factor, and need not be a whole number"
     " (for example, 3.76 has been measured for a nominally 12-element head coil)."
-    " It is the quantity that a noise-distribution fit to the data estimates,"
-    " and -noise_dof_method performs exactly such a fit, from the voxels of the data that contain noise alone."
+    " It is the quantity that a fit of the noise distribution to the data estimates,"
+    " as performed by -noise_dof_method (see below)."
     " If neither option is given, and no such fit was requested or it did not succeed,"
     " the count is inferred from the image header metadata where they permit it:"
     " the coil combination mode is read from \"CoilCombinationMethod\""
@@ -100,9 +100,12 @@ const char *const noise_channels_description =
     " Any phase-sensitive combination (adaptive combine, SENSE1) yields N = 1."
     " Where no inference can be drawn, a warning is issued and N = 1 (Rician) is assumed."
     " An explicitly provided value is always used,"
-    " with a warning if it disagrees with what the metadata indicate."
-    " Note also that these degrees of freedom are unrelated to the -dof_output option of the dwidenoise2 command,"
-    " which concerns the degrees of freedom of the residual energy remaining after denoising.";
+    " with a warning if it disagrees with what the metadata indicate"
+    " or with the value estimated from the data via -noise_dof_method."
+    " Note also that these degrees of freedom, including those tabulated by -noise_dof_out,"
+    " are unrelated to the -dof_output option of the dwidenoise2 command,"
+    " which concerns the (Satterthwaite) degrees of freedom of the residual energy remaining after denoising;"
+    " the two quantities merely share a name.";
 
 const char *const noise_dof_estimation_description =
     "Option -noise_dof_method estimates the degrees of freedom of the magnitude noise distribution"
@@ -122,22 +125,28 @@ const char *const noise_dof_estimation_description =
     " This rejection discards not only voxels containing tissue signal,"
     " but equally those corrupted by ghosting, slice leakage or spikes,"
     " which is what makes the procedure automatic rather than dependent on a mask."
-    " Two solutions of the same model are offered:"
+    " Two alternative solutions of this same Gamma model are offered:"
     " 'ml' solves the maximum likelihood equations, and has the lower variance of the two;"
     " 'moments' solves the closed-form method-of-moments equations."
+    " 'none', the default, disables the estimation,"
+    " leaving the degrees of freedom to be taken from -noise_channels / -noise_dof"
+    " or inferred from the image header metadata as described above."
     " The estimation is applicable only to magnitude input data,"
     " and is performed only where a non-linear variance-stabilising transform (-vst_method foi, koay or mom)"
-    " is to make use of its result."
-    " Where an explicit value is also provided via -noise_channels or -noise_dof,"
-    " the explicit value is used, and any disagreement with the estimate is reported.";
+    " is to make use of its result.";
 
 const char *const noise_dof_selection_description =
-    "Estimation of the degrees of freedom from the data is performed independently for each slice,"
+    "Options -noise_dof_scope, -noise_dof_axis, -noise_dof_out and -noise_voxels_out"
+    " each require that an estimator be selected via -noise_dof_method."
+    " Estimation of the degrees of freedom from the data is performed independently for each slice,"
     " with slices separated along the axis indicated by the \"SliceEncodingDirection\" header key-value"
     " where present, and along the third spatial axis otherwise (this can be overridden using -noise_dof_axis)."
     " A slice from which too few background voxels are identified yields no estimate;"
     " the procedure declines altogether if too few slices yield an estimate,"
     " or if the majority of the field of view is identically zero in every volume."
+    " Option -noise_dof_scope determines whether one value of the degrees of freedom is used"
+    " for the whole image or one per slice;"
+    " the estimation itself is performed per slice in either case."
     " By default (-noise_dof_scope global), the per-slice estimates are reduced to their median,"
     " which is robust to slices at the extremities of the field of view"
     " and to those contaminated by wrap-around or slice leakage."
@@ -148,10 +157,17 @@ const char *const noise_dof_selection_description =
     " slice-wise estimates may be closer to the truth;"
     " they are however individually noisier, being fitted from the background voxels of one slice only."
     " A large spread of the per-slice estimates is the signature of a spatially varying distribution."
-    " Two diagnostic exports are available:"
-    " -noise_dof_out tabulates the per-slice estimates,"
-    " and -noise_voxels_out writes a mask of the voxels identified as containing noise alone;"
-    " inspection of the latter is the single most informative check on whether the procedure did what it should.";
+    " Two diagnostic exports are available."
+    " -noise_dof_out writes a tab-separated text file with one row per slice,"
+    " giving the estimated degrees of freedom, the equivalent effective receive channel count,"
+    " the estimated background noise level, the number of voxels identified as containing noise alone,"
+    " the number of iterations of voxel rejection,"
+    " and whether a converged estimate was obtained (with the reason where it was not);"
+    " comment lines preceding the table report the slice axis"
+    " and the global median and interquartile range of the per-slice estimates."
+    " -noise_voxels_out writes a mask of the voxels identified as containing noise alone,"
+    " from which the noise distribution was estimated;"
+    " inspection of this mask is the single most informative check on whether the procedure did what it should.";
 
 const char *const noise_dof_limitations_description =
     "Three limitations are intrinsic to estimating the noise distribution from background voxels,"
@@ -212,59 +228,33 @@ OptionGroup precondition_options(const option_scope_t scope)
            "reduce to 'linear', though 'none' is still honoured)")
     + Argument("method").type_choice<NoiseModel::vst_method_t>()
   + Option("noise_dof_method",
-           "estimate the degrees of freedom of the magnitude noise distribution from the voxels of the "
-           "input data that contain noise alone, following St-Jean et al. (2020); "
+           "estimate the degrees of freedom of the magnitude noise distribution "
+           "from the voxels of the input data that contain noise alone; "
            "options are: " + Enum::join<NoiseModel::background_method_t>(",") + " "
-           "(default: none). "
-           "'moments' uses the method-of-moments equations and 'ml' the maximum likelihood equations of "
-           "the Gamma distribution to which the background magnitudes are transformed; the two are "
-           "alternative solutions of the same model, 'ml' having the lower variance. "
-           "'none' disables the estimation, leaving the degrees of freedom to be taken from -noise_dof / "
-           "-noise_channels or inferred from the image header metadata. "
-           "Three limitations are intrinsic to estimating in the background and are not defects of this "
-           "implementation: it requires that background voxels exist, so it declines on data whose "
-           "reconstruction has already masked them; under k-space parallel imaging (GRAPPA) the effective "
-           "channel count depends on the local signal, so a value estimated in the background is an upper "
-           "bound on the value that applies within the head; and simultaneous-multi-slice acquisition "
-           "aliases signal into what should be background, which inflates the estimate. "
-           "It remains a large improvement on assuming a Rician distribution, which is what is otherwise "
-           "done for the great majority of data")
+           "(default: none; see the Description section of the help page for details)")
     + Argument("method").type_choice<NoiseModel::background_method_t>()
   + Option("noise_dof_scope",
-           "whether one value of the degrees of freedom is used for the whole image, or one per slice; "
+           "whether one value of the degrees of freedom of the noise distribution is used for the whole image, "
+           "or one per slice; "
            "options are: " + Enum::join<NoiseModel::background_scope_t>(",") + " "
-           "(default: global). "
-           "The estimation is performed per slice in either case; 'global' reduces those estimates to "
-           "their median, whereas 'slice' retains them and builds a separate variance-stabilising "
-           "transform for each slice. Parallel imaging makes the effective channel count vary over space, "
-           "so slice-wise estimates may be closer to the truth; they are also individually noisier, being "
-           "fitted from the background voxels of one slice only, and slices that fail to yield an estimate "
-           "fall back to the global median. "
-           "Requires -noise_dof_method to select an estimator")
+           "(default: global; requires -noise_dof_method; "
+           "see the Description section of the help page for details)")
     + Argument("scope").type_choice<NoiseModel::background_scope_t>()
   + Option("noise_dof_axis",
-           "the image axis along which slices are separated for the purpose of noise distribution "
-           "estimation "
-           "(default: taken from the \"SliceEncodingDirection\" header key-value where present, "
-           "otherwise the third spatial axis). "
-           "Requires -noise_dof_method to select an estimator")
+           "the image axis along which slices are separated for estimation of the noise distribution "
+           "(default: from the \"SliceEncodingDirection\" header key-value where present, "
+           "otherwise the third spatial axis; requires -noise_dof_method; "
+           "see the Description section of the help page for details)")
     + Argument("index").type_integer(0, 2)
   + Option("noise_dof_out",
-           "export a text file tabulating, per slice, the estimated degrees of freedom, the equivalent "
-           "effective receive channel count, the estimated background noise level, the number of voxels "
-           "identified as containing only noise, and whether the estimate converged. "
-           "Note that this is unrelated to -dof_output of the dwidenoise2 command, which is the "
-           "Satterthwaite degrees of freedom of the residual energy remaining after denoising; the "
-           "collision of everyday terminology is unfortunate but the two quantities have nothing to do "
-           "with one another. "
-           "Requires -noise_dof_method to select an estimator")
+           "export a text file tabulating the per-slice estimates of the noise distribution"
+           + std::string(scope == option_scope_t::DENOISING ? ", which are unrelated to -dof_output" : "") + " "
+           "(requires -noise_dof_method; see the Description section of the help page for details)")
     + Argument("file").type_file_out()
   + Option("noise_voxels_out",
-           "export a mask of the voxels identified as containing only noise, from which the noise "
-           "distribution was estimated. "
-           "Inspecting this mask is the single most informative check on whether the estimation did what "
-           "it should. "
-           "Requires -noise_dof_method to select an estimator")
+           "export a mask of the voxels identified as containing noise alone, "
+           "from which the noise distribution was estimated "
+           "(requires -noise_dof_method; see the Description section of the help page for details)")
     + Argument("image").type_image_out();
   if (scope == option_scope_t::DENOISING) {
     result
