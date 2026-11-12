@@ -18,6 +18,7 @@
 #include "denoise/precondition/precondition.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <memory>
 #include <optional>
@@ -26,7 +27,10 @@
 
 #include "app.h"
 #include "axes.h"
+#include "algo/loop.h"
 #include "denoise/precondition/noise_model/coils.h"
+#include "file/ofstream.h"
+#include "image.h"
 #include "dwi/gradient.h"
 #include "dwi/shells.h"
 #include "metadata/bids.h"
@@ -77,8 +81,10 @@ const char *const noise_channels_description =
     " The effective count is consequently smaller than the element count,"
     " often by a large factor, and need not be a whole number"
     " (for example, 3.76 has been measured for a nominally 12-element head coil)."
-    " It is the quantity that a noise-distribution fit to the data estimates."
-    " If neither option is given, the count is inferred from the image header metadata where they permit it:"
+    " It is the quantity that a noise-distribution fit to the data estimates,"
+    " and -noise_dof_method performs exactly such a fit, from the voxels of the data that contain noise alone."
+    " If neither option is given, and no such fit was requested or it did not succeed,"
+    " the count is inferred from the image header metadata where they permit it:"
     " the coil combination mode is read from \"CoilCombinationMethod\""
     " (or from a declaration of SENSE1 combination in the image comments,"
     " as written by the CMRR multi-band sequences, which takes precedence over it),"
@@ -94,7 +100,9 @@ const char *const noise_channels_description =
     " Any phase-sensitive combination (adaptive combine, SENSE1) yields N = 1."
     " Where no inference can be drawn, a warning is issued and N = 1 (Rician) is assumed."
     " An explicitly provided value is always used,"
-    " with a warning if it disagrees with what the metadata indicate.";
+    " with a warning if it disagrees with what the metadata indicate."
+    " Note also that these degrees of freedom are unrelated to the -dof_output option of the dwidenoise2 command,"
+    " which concerns the degrees of freedom of the residual energy remaining after denoising.";
 
 // clang-format off
 OptionGroup precondition_options(const option_scope_t scope)
@@ -135,7 +143,62 @@ OptionGroup precondition_options(const option_scope_t scope)
            "(default: foi for magnitude data; "
            "for complex data the noise is Gaussian and the non-linear methods foi/koay/mom "
            "reduce to 'linear', though 'none' is still honoured)")
-    + Argument("method").type_choice<NoiseModel::vst_method_t>();
+    + Argument("method").type_choice<NoiseModel::vst_method_t>()
+  + Option("noise_dof_method",
+           "estimate the degrees of freedom of the magnitude noise distribution from the voxels of the "
+           "input data that contain noise alone, following St-Jean et al. (2020); "
+           "options are: " + Enum::join<NoiseModel::background_method_t>(",") + " "
+           "(default: none). "
+           "'moments' uses the method-of-moments equations and 'ml' the maximum likelihood equations of "
+           "the Gamma distribution to which the background magnitudes are transformed; the two are "
+           "alternative solutions of the same model, 'ml' having the lower variance. "
+           "'none' disables the estimation, leaving the degrees of freedom to be taken from -noise_dof / "
+           "-noise_channels or inferred from the image header metadata. "
+           "Three limitations are intrinsic to estimating in the background and are not defects of this "
+           "implementation: it requires that background voxels exist, so it declines on data whose "
+           "reconstruction has already masked them; under k-space parallel imaging (GRAPPA) the effective "
+           "channel count depends on the local signal, so a value estimated in the background is an upper "
+           "bound on the value that applies within the head; and simultaneous-multi-slice acquisition "
+           "aliases signal into what should be background, which inflates the estimate. "
+           "It remains a large improvement on assuming a Rician distribution, which is what is otherwise "
+           "done for the great majority of data")
+    + Argument("method").type_choice<NoiseModel::background_method_t>()
+  + Option("noise_dof_scope",
+           "whether one value of the degrees of freedom is used for the whole image, or one per slice; "
+           "options are: " + Enum::join<NoiseModel::background_scope_t>(",") + " "
+           "(default: global). "
+           "The estimation is performed per slice in either case; 'global' reduces those estimates to "
+           "their median, whereas 'slice' retains them and builds a separate variance-stabilising "
+           "transform for each slice. Parallel imaging makes the effective channel count vary over space, "
+           "so slice-wise estimates may be closer to the truth; they are also individually noisier, being "
+           "fitted from the background voxels of one slice only, and slices that fail to yield an estimate "
+           "fall back to the global median. "
+           "Requires -noise_dof_method to select an estimator")
+    + Argument("scope").type_choice<NoiseModel::background_scope_t>()
+  + Option("noise_dof_axis",
+           "the image axis along which slices are separated for the purpose of noise distribution "
+           "estimation "
+           "(default: taken from the \"SliceEncodingDirection\" header key-value where present, "
+           "otherwise the third spatial axis). "
+           "Requires -noise_dof_method to select an estimator")
+    + Argument("index").type_integer(0, 2)
+  + Option("noise_dof_out",
+           "export a text file tabulating, per slice, the estimated degrees of freedom, the equivalent "
+           "effective receive channel count, the estimated background noise level, the number of voxels "
+           "identified as containing only noise, and whether the estimate converged. "
+           "Note that this is unrelated to -dof_output of the dwidenoise2 command, which is the "
+           "Satterthwaite degrees of freedom of the residual energy remaining after denoising; the "
+           "collision of everyday terminology is unfortunate but the two quantities have nothing to do "
+           "with one another. "
+           "Requires -noise_dof_method to select an estimator")
+    + Argument("file").type_file_out()
+  + Option("noise_voxels_out",
+           "export a mask of the voxels identified as containing only noise, from which the noise "
+           "distribution was estimated. "
+           "Inspecting this mask is the single most informative check on whether the estimation did what "
+           "it should. "
+           "Requires -noise_dof_method to select an estimator")
+    + Argument("image").type_image_out();
   if (scope == option_scope_t::DENOISING) {
     result
     + Option("preconditioned_input",
@@ -154,12 +217,86 @@ OptionGroup precondition_options(const option_scope_t scope)
 }
 // clang-format on
 
-std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex, const Header &H) {
+namespace {
+
+// One phrase describing how a data estimate was obtained, for the messages that report it.
+std::string describe_estimate(const NoiseModelOptions &options, const NoiseModel::BackgroundResult &background) {
+  size_t estimated = 0;
+  for (const auto &slice : background.slices)
+    estimated += slice.estimated ? 1 : 0;
+  return std::string(options.background_method == NoiseModel::background_method_t::ML
+                         ? "maximum likelihood fit"
+                         : "method-of-moments fit") +
+         " to " + str(background.num_selected_total) + " voxels over " + str(estimated) + " of " +
+         str(background.slices.size()) + " slices, median across slices, interquartile range " +
+         str(background.dof_iqr, 3) + " degrees of freedom";
+}
+
+// The per-slice table of -noise_dof_out. Slices that declined are written with the voxel count they
+//   did achieve and with empty estimate fields, so that the file distinguishes "estimated as this"
+//   from "could not estimate" rather than conflating the two into a blank row.
+void write_dof_table(const std::string &path,
+                     const NoiseModelOptions &options,
+                     const NoiseModel::BackgroundResult &background) {
+  File::OFStream out(path);
+  out << "# " << App::command_history_string << "\n";
+  out << "# Estimation of the degrees of freedom of the magnitude noise distribution from the voxels\n"
+         "#   of each slice that contain noise alone (St-Jean et al. 2020).\n"
+         "# The noise level sigma is reported as a diagnostic only: it is NOT the noise level used by\n"
+         "#   the denoising, which comes from the per-patch Marchenko-Pastur estimate, and under\n"
+         "#   parallel imaging a background estimate understates the value within the head.\n";
+  out << "# slice axis: " << background.slice_axis << "\n";
+  if (background)
+    out << "# global (median across slices): dof " << background.dof << ", channels " << 0.5 * background.dof
+        << ", interquartile range " << background.dof_iqr << "\n";
+  else
+    out << "# no global estimate: " << background.decline << "\n";
+  out << "slice\tdof\tchannels\tsigma\tvoxels\titerations\tconverged\tcomment\n";
+  for (const auto &slice : background.slices) {
+    out << slice.index << "\t";
+    if (slice.estimated)
+      out << slice.dof << "\t" << 0.5 * slice.dof << "\t" << slice.sigma << "\t";
+    else
+      out << "\t\t\t";
+    out << slice.num_selected << "\t" << slice.num_iterations << "\t" << (slice.estimated ? 1 : 0) << "\t"
+        << (slice.estimated ? std::string() : slice.decline) << "\n";
+  }
+  INFO("Exported per-slice noise distribution estimates to \"" + path + "\"");
+}
+
+// The mask of -noise_voxels_out: which voxels the acceptance step chose. Written even where the
+//   estimation declined, since a picture of what it selected is exactly what is wanted in order to
+//   understand why.
+template <class ImageType>
+void write_voxel_mask(const std::string &path, ImageType &input, const NoiseModel::BackgroundResult &background) {
+  Header H(input);
+  H.ndim() = 3;
+  H.datatype() = DataType::Bit;
+  Image<bool> mask = Image<bool>::create(path, H);
+  const std::array<ssize_t, 3> size{{H.size(0), H.size(1), H.size(2)}};
+  const bool populated =
+      background.selected.size() == size_t(size[0]) * size_t(size[1]) * size_t(size[2]);
+  for (auto l = Loop(mask, 0, 3)(mask); l; ++l) {
+    mask.value() =
+        populated &&
+        background.selected[NoiseModel::voxel_index(size, mask.index(0), mask.index(1), mask.index(2))] != 0;
+  }
+  if (!populated)
+    WARN("Option -noise_voxels_out was requested, but no voxel was identified as containing noise alone;"
+         " the exported mask is empty");
+}
+
+} // namespace
+
+NoiseModelOptions noise_model_options(const bool complex, const Header &H) {
+  NoiseModelOptions result;
+  result.complex = complex;
+
   // -noise_channels and -noise_dof are two parameterisations of one quantity, related by
-  //   dof = 2 * channels. They are resolved here, once, into the effective channel count that the
-  //   model is built from; everything downstream sees only that. Supplying both is not a
-  //   redundancy to be tolerated -- the two arguments could contradict one another, and there is
-  //   no basis on which to prefer either -- so it is refused.
+  //   dof = 2 * channels. They are resolved here, once, into the degrees of freedom that the model
+  //   is built from; everything downstream sees only that. Supplying both is not a redundancy to be
+  //   tolerated -- the two arguments could contradict one another, and there is no basis on which to
+  //   prefer either -- so it is refused.
   auto opt_channels = get_options("noise_channels");
   auto opt_dof = get_options("noise_dof");
   if (!opt_channels.empty() && !opt_dof.empty())
@@ -168,17 +305,16 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex, const Hea
                     "dof = 2 x channels (-noise_channels 4 is -noise_dof 8). Supply whichever one "
                     "matches the value you have");
   // The option through which the user expressed the count, for messages that quote it back.
-  const std::string user_option = opt_channels.empty() ? std::string("noise_dof") : std::string("noise_channels");
+  result.user_option = opt_channels.empty() ? std::string("noise_dof") : std::string("noise_channels");
   // Reduced to the common currency -- degrees of freedom, in which every internal computation is
   //   expressed -- at the point of parsing, so that the doubling of a channel-count request happens
   //   exactly once and in one place, and nothing downstream has to know which option was used.
-  const std::optional<default_type> user_dof =
-      !opt_channels.empty() ? std::optional<default_type>(2.0 * default_type(opt_channels[0][0]))
-      : !opt_dof.empty()    ? std::optional<default_type>(default_type(opt_dof[0][0]))
-                            : std::nullopt;
-  const bool user_specified = user_dof.has_value();
+  result.user_dof = !opt_channels.empty() ? std::optional<default_type>(2.0 * default_type(opt_channels[0][0]))
+                    : !opt_dof.empty()    ? std::optional<default_type>(default_type(opt_dof[0][0]))
+                                          : std::nullopt;
+  const bool user_specified = result.user_dof.has_value();
 
-  const NoiseModel::vst_method_t vst_method = get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
+  result.vst_method = get_option_choice("vst_method", NoiseModel::vst_method_t::FOI);
   // Options that exist only to parameterise the non-linear magnitude noise models have no
   //   meaning for complex data, whose demodulated noise is Gaussian: the variance-stabilising
   //   transform is then linear and carries no distribution bias. Requesting one is an incoherent
@@ -187,58 +323,203 @@ std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex, const Hea
   //   -vst_method {none, linear} are excluded: both are genuinely honoured for complex data.
   if (complex) {
     if (user_specified)
-      throw Exception("Option -" + user_option +
+      throw Exception("Option -" + result.user_option +
                       " cannot be used with complex input data: "
                       "it parameterises the magnitude (Rician / non-central chi) noise model, whereas the "
                       "demodulated complex noise is Gaussian and carries two degrees of freedom per sample "
                       "however many channels were combined to produce it");
-    if (!get_options("vst_method").empty() &&             //
-        vst_method != NoiseModel::vst_method_t::LINEAR && //
-        vst_method != NoiseModel::vst_method_t::NONE)     //
-      throw Exception("Option -vst_method " + Enum::lowercase_name(vst_method) +
+    if (!get_options("vst_method").empty() &&                //
+        result.vst_method != NoiseModel::vst_method_t::LINEAR && //
+        result.vst_method != NoiseModel::vst_method_t::NONE)     //
+      throw Exception("Option -vst_method " + Enum::lowercase_name(result.vst_method) +
                       " cannot be used with complex input data: "
                       "it is a non-linear transform for magnitude data, whereas the noise here is "
                       "Gaussian-distributed and its variance-stabilising transform is linear. "
                       "Specify -vst_method linear, or -vst_method none, or omit the option");
   }
+
+  // Estimation of the degrees of freedom from the data themselves.
+  const bool method_named = !get_options("noise_dof_method").empty();
+  NoiseModel::background_method_t method =
+      get_option_choice("noise_dof_method", NoiseModel::background_method_t::NONE);
+  auto opt_scope = get_options("noise_dof_scope");
+  auto opt_axis = get_options("noise_dof_axis");
+  const bool exports_requested = !get_options("noise_dof_out").empty() || !get_options("noise_voxels_out").empty();
+  result.background_scope = get_option_choice("noise_dof_scope", NoiseModel::background_scope_t::GLOBAL);
+
+  // Everything that governs or reports the estimation presupposes that an estimation is happening.
+  //   Where none was asked for, naming one of them is an incoherent request rather than a redundant
+  //   one, and is refused rather than silently ignored.
+  if (method == NoiseModel::background_method_t::NONE) {
+    std::vector<std::string> dependent;
+    if (!opt_scope.empty())
+      dependent.push_back("-noise_dof_scope");
+    if (!opt_axis.empty())
+      dependent.push_back("-noise_dof_axis");
+    if (!get_options("noise_dof_out").empty())
+      dependent.push_back("-noise_dof_out");
+    if (!get_options("noise_voxels_out").empty())
+      dependent.push_back("-noise_voxels_out");
+    if (!dependent.empty())
+      throw Exception("Option" + std::string(dependent.size() > 1 ? "s " : " ") + join(dependent, ", ") +
+                      (dependent.size() > 1 ? " require" : " requires") +
+                      " -noise_dof_method to select an estimator: " +
+                      (method_named ? "-noise_dof_method none was specified, so there is no estimation for "
+                                      "them to govern or to report"
+                                    : "no estimation of the noise distribution from the data is performed "
+                                      "unless one is requested"));
+  }
+  // Complex data have two degrees of freedom per sample by construction; there is nothing to
+  //   estimate, and an estimate made from the magnitude of complex data would parameterise a model
+  //   that is not applied to them.
+  if (complex && method != NoiseModel::background_method_t::NONE)
+    throw Exception("Option -noise_dof_method " + Enum::lowercase_name(method) +
+                    " cannot be used with complex input data: "
+                    "the degrees of freedom it estimates parameterise the magnitude (Rician / non-central "
+                    "chi) noise model, whereas the demodulated complex noise is Gaussian and carries two "
+                    "degrees of freedom per sample however many channels were combined to produce it");
+  // -vst_method none / linear do not use the degrees of freedom at all, so the pass that estimates
+  //   them would be a read of the whole image to produce a number that nothing consumes. Reported
+  //   as ignored, exactly as -noise_channels is on those same paths.
+  if (method != NoiseModel::background_method_t::NONE &&
+      (result.vst_method == NoiseModel::vst_method_t::NONE ||
+       result.vst_method == NoiseModel::vst_method_t::LINEAR)) {
+    WARN("Option -noise_dof_method is ignored when -vst_method " + Enum::lowercase_name(result.vst_method) +
+         " is specified: that transform does not model the magnitude noise distribution, so the estimated "
+         "degrees of freedom would not be used" +
+         (exports_requested ? ", and the requested diagnostic exports are not produced" : ""));
+    method = NoiseModel::background_method_t::NONE;
+  }
+  // An explicitly named estimator is run even where the user has imposed a value, so that the two
+  //   can be compared; but where the estimator is merely the default, running it would cost a read
+  //   of the data to produce a number that the user's own value supersedes.
+  if (method != NoiseModel::background_method_t::NONE && user_specified && !method_named) {
+    INFO("Not estimating the noise distribution from the data: " + result.user_option +
+         " was specified, and its value is what would be used. Name -noise_dof_method explicitly to "
+         "estimate anyway and have the two compared");
+    method = NoiseModel::background_method_t::NONE;
+  }
+  // A scalar imposed on the command line cannot vary by slice, so there is nothing for a slice-wise
+  //   scope to be slice-wise about.
+  if (!opt_scope.empty() && result.background_scope == NoiseModel::background_scope_t::SLICE && user_specified)
+    throw Exception("Option -noise_dof_scope slice cannot be used together with -" + result.user_option +
+                    ": a value imposed on the command line is one number for the whole image, and it is "
+                    "what would be used at every slice");
+  result.background_method = method;
+
+  if (result.background_method != NoiseModel::background_method_t::NONE) {
+    result.background_slice_axis =
+        opt_axis.empty() ? NoiseModel::select_slice_axis(H) : size_t(int(opt_axis[0][0]));
+  }
+  return result;
+}
+
+template <class ImageType>
+NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const NoiseModelOptions &options) {
+  NoiseModel::BackgroundResult result;
+  if (options.background_method == NoiseModel::background_method_t::NONE)
+    return result;
+
+  // One pass over the 4D data, forming four sufficient statistics per spatial voxel; everything
+  //   thereafter is on a 3D array (see noise_model/background.h).
+  const NoiseModel::Accumulation accumulation =
+      NoiseModel::accumulate_background(input, options.background_slice_axis);
+  result = NoiseModel::estimate_background(accumulation, options.background_method);
+
+  for (const auto &slice : result.slices) {
+    if (slice.estimated)
+      INFO("Noise distribution at slice " + str(slice.index) + ": " + str(slice.dof, 4) + " degrees of freedom, " +
+           "sigma " + str(slice.sigma, 4) + ", from " + str(slice.num_selected) + " voxels in " +
+           str(slice.num_iterations) + " iterations");
+    else
+      INFO("No noise distribution estimate at slice " + str(slice.index) + ": " + slice.decline);
+  }
+  if (!result)
+    WARN("Unable to estimate the noise distribution from the voxels of these data that contain noise alone: " +
+         result.decline +
+         ". The degrees of freedom will instead be taken from the image header metadata where they permit it, "
+         "and from the Rician default otherwise");
+
+  // .as_text() rather than an implicit conversion: App::ParsedArgument asserts in debug builds when
+  //   a filesystem-typed argument is converted to std::string.
+  auto opt = get_options("noise_dof_out");
+  if (!opt.empty())
+    write_dof_table(opt[0][0].as_text(), options, result);
+  opt = get_options("noise_voxels_out");
+  if (!opt.empty())
+    write_voxel_mask(opt[0][0].as_text(), input, result);
+  return result;
+}
+
+template NoiseModel::BackgroundResult estimate_background_dof<Image<float>>(Image<float> &, const NoiseModelOptions &);
+template NoiseModel::BackgroundResult estimate_background_dof<Image<double>>(Image<double> &,
+                                                                             const NoiseModelOptions &);
+
+NoiseModel::Set make_noise_model(const NoiseModelOptions &options,
+                                 const Header &H,
+                                 const NoiseModel::BackgroundResult &background) {
+  const bool user_specified = options.user_dof.has_value();
   // -vst_method none: no variance-stabilising transform (identity), for any data type.
   //   The noise distribution and the channel count are irrelevant, and the data reach PCA
   //   unmodified (save for any demeaning); see the single-pass fallback / warning in
   //   the calling commands.
-  if (vst_method == NoiseModel::vst_method_t::NONE) {
+  if (options.vst_method == NoiseModel::vst_method_t::NONE) {
     if (user_specified)
-      WARN("Option -" + user_option +
+      WARN("Option -" + options.user_option +
            " is ignored when -vst_method none is specified: "
            "no variance-stabilising transform is applied");
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, vst_method);
+    return NoiseModel::Set(NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, options.vst_method));
   }
   // Any magnitude-specific request has already been refused above; the default (foi) simply
   //   collapses to the linear transform for Gaussian noise.
-  if (complex)
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, vst_method);
+  if (options.complex)
+    return NoiseModel::Set(NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, options.vst_method));
   // -vst_method linear: the simple linear transform u = m / sigma for magnitude data too.
   //   This only normalises the scale (the magnitude noise remains heteroscedastic near
   //   the floor) and performs no noise-floor debiasing; the channel count has no effect.
-  if (vst_method == NoiseModel::vst_method_t::LINEAR) {
+  if (options.vst_method == NoiseModel::vst_method_t::LINEAR) {
     if (user_specified)
-      WARN("Option -" + user_option +
+      WARN("Option -" + options.user_option +
            " is ignored when -vst_method linear is specified: "
            "the linear transform does not model the magnitude noise distribution");
-    return NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, vst_method);
+    return NoiseModel::Set(NoiseModel::make(NoiseModel::distribution_t::GAUSSIAN, 2.0, options.vst_method));
   }
   // This is the only code path on which the degrees of freedom have any effect: a non-linear
   //   transform for magnitude data, whose forward transform and bias-corrected inverse are both
   //   built from the noise distribution. It is therefore also the only path on which the header is
   //   interrogated for that count, so that no claim is made about a quantity that the requested
-  //   transform would then ignore. Where the user named a count it is used regardless, but the
-  //   inference still runs so that any disagreement with the metadata is reported.
-  const default_type dof = NoiseModel::resolve_noise_dof(H, user_dof, user_option);
+  //   transform would then ignore. Where the user named a count it is used regardless, but both the
+  //   data estimate and the inference are still reported so that any disagreement is surfaced.
+  const std::optional<default_type> data_dof =
+      background ? std::optional<default_type>(background.dof) : std::nullopt;
+  const std::string data_evidence = background ? describe_estimate(options, background) : std::string();
+  const default_type dof =
+      NoiseModel::resolve_noise_dof(H, options.user_dof, options.user_option, data_dof, data_evidence);
+
+  // Slice-wise scope, which only a successful estimate that the user has not overridden can supply.
+  if (options.background_scope == NoiseModel::background_scope_t::SLICE && background && !user_specified) {
+    std::vector<default_type> dof_per_slice(background.slices.size());
+    size_t num_fallback = 0;
+    for (size_t slice = 0; slice != background.slices.size(); ++slice) {
+      dof_per_slice[slice] = background.dof_at_slice(ssize_t(slice));
+      num_fallback += background.slices[slice].estimated ? 0 : 1;
+    }
+    NoiseModel::Set models =
+        NoiseModel::make_slicewise(dof_per_slice, background.slice_axis, options.vst_method);
+    INFO("Built " + str(models.num_distinct_models()) + " distinct variance-stabilising transforms for " +
+         str(dof_per_slice.size()) + " slices" +
+         (num_fallback > 0 ? "; " + str(num_fallback) + " slices yielded no estimate of their own and take the "
+                             "global median of " + str(dof, 4) + " degrees of freedom"
+                           : ""));
+    return models;
+  }
+
   // The Rician label is reserved for exactly two degrees of freedom (one effective channel); any
   //   other value, integral or not, is described as what it is.
   const NoiseModel::distribution_t distribution = dof == default_type(2)                           //
                                                       ? NoiseModel::distribution_t::RICIAN         //
                                                       : NoiseModel::distribution_t::NONCENTRALCHI; //
-  return NoiseModel::make(distribution, dof, vst_method);
+  return NoiseModel::Set(NoiseModel::make(distribution, dof, options.vst_method));
 }
 
 Demodulation select_demodulation(const Header &H) {

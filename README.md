@@ -445,10 +445,56 @@ which renders the data approximately Gaussian and homoscedastic across the full 
 The effective number of receive channels *N* combined by the reconstruction
 (such that the noise has 2*N* degrees of freedom)
 may be specified either as that count, using the `-noise_channels` option,
-or as the degrees of freedom themselves, using the `-noise_dof` option;
-where neither is given, the value is inferred from the image header metadata where those permit it,
-falling back to *N* = 1 (i.e. Rician) with a warning where they do not.
+or as the degrees of freedom themselves, using the `-noise_dof` option.
+Where neither is given, three further routes are attempted in order:
+estimation from the data themselves (below, if requested via `-noise_dof_method`);
+inference from the image header metadata, where those permit it;
+and finally *N* = 1 (i.e. Rician), with a warning.
 The form of the transform is selected using the `-vst_method` option.
+
+##### Estimating the degrees of freedom from the data
+
+The effective channel count is a quantity that almost nobody has measured for their own hardware,
+and the header metadata that would permit it to be inferred are frequently absent,
+so for the great majority of real data the software would otherwise fall back to Rician
+and say so.
+The `-noise_dof_method` option instead estimates the degrees of freedom from
+the voxels of the data that contain noise alone,
+by a direct implementation of [St-Jean et al. (2020)](#stjean2020).
+For a voxel carrying no signal, the squared magnitude divided by twice the noise variance
+follows a Gamma distribution whose *shape* parameter is exactly the quantity sought,
+so the problem is solved by the sample moments of that statistic;
+and the voxels carrying no signal are identified automatically,
+by iteratively rejecting those whose statistic falls outside a calibrated central interval
+of the Gamma distribution the current parameters imply.
+That rejection step also discards voxels corrupted by ghosting, slice leakage or spikes,
+which is what makes the procedure automatic rather than mask-dependent.
+Two solutions of the same model are offered:
+`-noise_dof_method ml` (maximum likelihood, the lower-variance of the two)
+and `-noise_dof_method moments` (closed-form method of moments).
+The estimation is performed independently for each slice;
+by default those estimates are reduced to their median for the whole image,
+whereas `-noise_dof_scope slice` retains them
+and builds a separate variance-stabilising transform for each slice.
+Two diagnostics may be exported:
+`-noise_dof_out` tabulates the per-slice estimates,
+and `-noise_voxels_out` writes a mask of the voxels the procedure selected,
+which is the single most informative check on whether it did what it should.
+
+Three limitations are intrinsic to estimating in the background,
+and are reported by the software rather than concealed:
+the method requires that background voxels exist,
+and declines rather than answering on data whose reconstruction has already masked them;
+under k-space parallel imaging (GRAPPA) the effective channel count depends on the local signal,
+so a value estimated in the background is an upper bound on the value that applies within the head;
+and simultaneous-multi-slice acquisition aliases signal into what should be background,
+which inflates the estimate.
+It nonetheless remains a large improvement on assuming a Rician distribution.
+Note also that while the procedure estimates a background noise level as well,
+that value is *not* used to set the noise level for denoising
+--- under parallel imaging a background estimate understates the level within the head,
+and the per-patch Marchenko-Pastur estimate remains the sole source of it ---
+and is reported only as a diagnostic.
 
 The default transform (`-vst_method foi`) uses the exact-unbiased forward transform and inverse of
 [Foi (2011)](#foi2011).
@@ -607,6 +653,12 @@ NeuroImage 2020:206;116274.
 R.E. Smith.
 dwidenoise2.
 Zenodo. https://doi.org/10.5281/zenodo.21601472.
+
+<a id="stjean2020"></a>
+**St-Jean et al. (2020)**
+S. St-Jean, A. De Luca, C.M.W. Tax, M.A. Viergever, A. Leemans.
+Automated characterization of noise distributions in diffusion MRI data.
+Medical Image Analysis 2020:65;101758.
 
 <a id="veraart2016a"></a>
 **Veraart et al. (2016a)**

@@ -85,14 +85,14 @@ Preconditioner<T>::Preconditioner(Image<T> &image,
                                   const Demodulation &demodulation,
                                   const demean_type demean,
                                   Image<float> &vst_noise,
-                                  std::shared_ptr<NoiseModel::Base> noise_model,
+                                  NoiseModel::Set noise_models,
                                   const Eigen::MatrixXd &grad)
     : H_in(image),                 //
       H_out(image),                //
       // The un-partitioned resolution; an iteration that partitions imposes ESTIMATOR before use.
       demean_site(demean == demean_type::NONE ? demean_site_t::NONE : demean_site_t::PRECONDITIONER), //
       num_volume_groups(1),        //
-      noise_model(noise_model),    //
+      noise_models(std::move(noise_models)), //
       vst_noise_image(vst_noise) { //
 
   for (ssize_t axis = 4; axis != H_in.ndim(); ++axis) {
@@ -437,8 +437,11 @@ void Preconditioner<T>::serialise_and_stabilise(Image<T> &input,
                                   default_type(input.index(1)),    //
                                   default_type(input.index(2))})); //
     const default_type sigma = vst->value();
+    // The model governing this voxel: the sole model of a scalar set, or this slice's own where the
+    //   set is slice-wise. Resolved once per voxel, outside the loop over its volumes.
+    const NoiseModel::Base &model = noise_models.at(input.index(noise_models.slice_axis()));
     for (ssize_t v = 0; v != H_out.size(3); ++v)
-      data[v] = vst_forward<T>(*noise_model, data[v], sigma);
+      data[v] = vst_forward<T>(model, data[v], sigma);
   }
 }
 
@@ -624,6 +627,9 @@ public:
                                     default_type(input.index(1)),    //
                                     default_type(input.index(2))})); //
       const default_type sigma = vst->value();
+      // The model governing this voxel, which must be the one that stabilised it: a slice-wise set
+      //   is indexed at the same position on the way back out as on the way in.
+      const NoiseModel::Base &model = pre.noise_models.at(input.index(pre.noise_models.slice_axis()));
 
       if (bias_handling == bias_handling_t::DEBIAS && debias_anchor == debias_anchor_t::GROUP_MEAN &&
           use_mean) {
@@ -634,8 +640,8 @@ public:
           if (mean.ndim() > 3)
             mean.index(3) = group;
           const T op = mean.value();
-          group_dc[group] = vst_inverse_unbiased<T>(*pre.noise_model, op, sigma);
-          group_gain[group] = vst_jacobian<T>(*pre.noise_model, op, sigma);
+          group_dc[group] = vst_inverse_unbiased<T>(model, op, sigma);
+          group_gain[group] = vst_jacobian<T>(model, op, sigma);
         }
         for (ssize_t v = 0; v != pre.H_out.size(3); ++v) {
           const ssize_t group = num_groups == 1                                    //
@@ -664,9 +670,9 @@ public:
                                     : (!pre.index2shell.empty() ? pre.index2shell[v]   //
                                                                 : pre.index2group[v]); //
           const T u_recon = data[v] + group_offset[group];
-          data[v] = (bias_handling == bias_handling_t::DEBIAS)                //
-                        ? vst_inverse_unbiased<T>(*pre.noise_model, u_recon, sigma) //
-                        : vst_inverse<T>(*pre.noise_model, u_recon, sigma);         //
+          data[v] = (bias_handling == bias_handling_t::DEBIAS)         //
+                        ? vst_inverse_unbiased<T>(model, u_recon, sigma) //
+                        : vst_inverse<T>(model, u_recon, sigma);         //
         }
       }
     } else if (use_mean) {
@@ -818,8 +824,8 @@ void Preconditioner<T>::operator()(Image<T> input,
       if (use_mean)
         append("reverting demeaning");
       if (vst_noise_image.valid()) {
-        append(noise_model->description() + " noise model");
-        if (!noise_model->is_linear())
+        append(noise_models.description() + " noise model");
+        if (!noise_models.is_linear())
           append(bias_handling == bias_handling_t::DEBIAS ? "removing noise-floor bias"
                                                           : "preserving noise-floor bias");
       }
