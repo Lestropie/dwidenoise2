@@ -36,6 +36,7 @@ namespace MR::Denoise::Precondition::NoiseModel {
 
 using Math::digamma;
 using Math::gamma_p_inv;
+using Math::gamma_q_inv;
 using Math::inverse_digamma;
 using Math::trigamma;
 
@@ -393,7 +394,7 @@ SliceEstimate estimate_slice(std::vector<Group> &groups,
     for (size_t g = 0; g != groups.size(); ++g) {
       const default_type volumes = default_type(groups[g].count);
       lambda_lo[g] = gamma_p_inv(volumes * dof_lo / 2.0, 0.5 * parameters.p);
-      lambda_hi[g] = gamma_p_inv(volumes * dof_hi / 2.0, 1.0 - 0.5 * parameters.p);
+      lambda_hi[g] = gamma_q_inv(volumes * dof_hi / 2.0, 0.5 * parameters.p);
     }
     // The candidate noise level is the one that accepts the most voxels: a level too small or too
     //   large places the interval away from the bulk of the background and admits few voxels,
@@ -481,7 +482,7 @@ void mark_selected(const std::vector<Group> &groups,
     const default_type alpha = default_type(group.count) * slice.dof / 2.0;
     const default_type scale = 2.0 * slice.sigma * slice.sigma;
     const auto range = group.accepted(scale * gamma_p_inv(alpha, 0.5 * parameters.p),
-                                      scale * gamma_p_inv(alpha, 1.0 - 0.5 * parameters.p));
+                                      scale * gamma_q_inv(alpha, 0.5 * parameters.p));
     for (size_t i = range.first; i != range.second; ++i)
       selected[group.voxels[i]] = 1;
   }

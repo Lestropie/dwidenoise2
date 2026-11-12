@@ -23,20 +23,26 @@ namespace MR::Math {
 
 // Special functions related to the Gamma function and the Gamma distribution: the digamma and
 //   trigamma functions and the inverse of the digamma function (as required to fit a Gamma
-//   distribution by maximum likelihood), and the regularised lower incomplete gamma function
-//   together with its inverse (the cumulative distribution function and quantile of a Gamma
-//   distribution).
+//   distribution by maximum likelihood), and the regularised lower and upper incomplete gamma
+//   functions together with their inverses (the cumulative distribution function, survival
+//   function and quantiles of a Gamma distribution).
 //
 // WHY THESE ARE WRITTEN HERE RATHER THAN TAKEN FROM A LIBRARY. No inverse regularised incomplete
 //   gamma exists in the C++ standard library, in MRtrix3, or in Eigen (supported or unsupported
-//   modules alike), so it has to be written; and writing it requires P(alpha, x) for the iteration
-//   that refines the initial estimate. Once P is in hand, the digamma and trigamma functions are
-//   the smaller half of what remains. Eigen's unsupported/SpecialFunctions module does provide
-//   digamma / polygamma / igamma, but MRtrix3's CMake never defines
-//   MRTRIX_HAVE_EIGEN_UNSUPPORTED_SPECIAL_FUNCTIONS and every use of that module in MRtrix3 core is
-//   paired with a hand-written fallback (see math/betainc.h); depending on it unconditionally from
-//   here would break the configuration core takes care to support, and would in any case not
-//   supply the quantile function.
+//   modules alike), so it has to be written; and writing it requires P(alpha, x) and Q(alpha, x)
+//   for the iteration that refines the initial estimate. Once those are in hand, the digamma and
+//   trigamma functions are the smaller half of what remains. Eigen's unsupported/SpecialFunctions
+//   module (lgamma, digamma, polygamma, igamma, igammac) is available to any MRtrix3 build: Eigen
+//   3.4 is required, and core already includes the module unconditionally for that version
+//   (dwi/tractography/tracking/early_exit.h). Taking these functions from it would nonetheless
+//   gain nothing. In Eigen 3.4 none of them is vectorised on the CPU (the HasLGamma, HasDiGamma,
+//   HasIGamma, HasIGammac and HasPolygamma packet traits are 0 for SSE, AVX, AVX-512 and NEON), so
+//   applied to an array they evaluate the same scalar series per element; they are in any case
+//   called here a handful of times per group of voxels and not once per voxel; and the quantile
+//   would still have to be written. (MRTRIX_HAVE_EIGEN_UNSUPPORTED_SPECIAL_FUNCTIONS, which
+//   math/betainc.h and math/zstatistic.cpp test, is a remnant of the configure script that preceded
+//   CMake and is no longer defined by anything, so those files always take their hand-written
+//   paths.)
 //
 // Everything below is real-valued and defined for strictly positive arguments; each function
 //   documents what it does with an argument outside its domain. All are re-entrant (the only
@@ -71,14 +77,27 @@ default_type inverse_digamma(const default_type y);
 //   otherwise, which is where each converges quickly.
 default_type gamma_p(const default_type alpha, const default_type x);
 
+// Q(alpha, x) = 1 - P(alpha, x): the regularised UPPER incomplete gamma function, i.e. the
+//   survival function of Gamma(alpha, 1). One for x <= 0; alpha must be positive.
+// Computed directly rather than as 1 - P, so that it retains full relative precision in the upper
+//   tail, where Q is small and 1 - P would be dominated by the rounding of P.
+default_type gamma_q(const default_type alpha, const default_type x);
+
 // P^{-1}(alpha, p): the quantile of Gamma(alpha, 1), i.e. the x for which P(alpha, x) == p.
 // Zero at p == 0 and +infinity at p == 1; alpha must be positive and p must lie in [0, 1].
 // The Wilson-Hilferty cube-root normal approximation provides the initial estimate for
 //   alpha >= 1 and the leading-order inversion x ~ (p Gamma(alpha+1))^(1/alpha) for smaller alpha;
-//   bracketed Halley iteration on P(alpha, x) - p then takes it to machine precision.
-//
-// NAMING. It is the inverse of P, and not of the complement Q = 1 - P, so it is named for P; the
-//   spelling "gamma_q_inv" is used for this function elsewhere in the literature and is misleading.
+//   bracketed Newton iteration on the logarithm of the smaller of the two tail probabilities
+//   (log P(alpha, x) in the lower half of the distribution, log Q(alpha, x) in the upper half) then
+//   takes it to machine precision.
 default_type gamma_p_inv(const default_type alpha, const default_type p);
+
+// Q^{-1}(alpha, q): the x for which Q(alpha, x) == q, i.e. the quantile of Gamma(alpha, 1) at
+//   probability 1 - q. +infinity at q == 0 and zero at q == 1; alpha must be positive and q must
+//   lie in [0, 1].
+// The same iteration as gamma_p_inv(), but given the upper-tail probability itself, which is
+//   therefore not first rounded by forming 1 - q: an upper-tail quantile should be requested
+//   through this function rather than as gamma_p_inv(alpha, 1 - q).
+default_type gamma_q_inv(const default_type alpha, const default_type q);
 
 } // namespace MR::Math

@@ -66,12 +66,13 @@ constexpr default_type ASYMPTOTIC_THRESHOLD = 20.0;
 constexpr default_type SERIES_EPS = 1.0e-15;
 constexpr int SERIES_ITMAX = 100000;
 
-// Standard normal quantile, used only to seed the Wilson-Hilferty estimate of the Gamma quantile.
-//   Formed from the complementary inverse error function on whichever tail p lies in, so that no
-//   precision is lost to the cancellation 1 - p for p close to either bound.
-default_type normal_quantile(const default_type p) {
+// Standard normal quantile at lower-tail probability p == 1 - q, used only to seed the
+//   Wilson-Hilferty estimate of the Gamma quantile. Formed from the complementary inverse error
+//   function of whichever tail probability is the smaller, so that neither tail is subject to the
+//   cancellation of forming its probability from the other.
+default_type normal_quantile(const default_type p, const default_type q) {
   static const default_type sqrt2 = std::sqrt(default_type(2));
-  return p <= 0.5 ? -sqrt2 * MR::Math::erfcinv(2.0 * p) : sqrt2 * MR::Math::erfcinv(2.0 * (1.0 - p));
+  return p <= q ? -sqrt2 * MR::Math::erfcinv(2.0 * p) : sqrt2 * MR::Math::erfcinv(2.0 * q);
 }
 
 // log( x^alpha e^-x / Gamma(alpha) ): the prefactor shared by the series, the continued fraction
@@ -154,6 +155,79 @@ default_type gamma_q_continued_fraction(const default_type alpha, const default_
   return std::exp(log_gamma_density(alpha, x)) * h;
 }
 
+// The quantile of Gamma(alpha, 1) at lower-tail probability p and upper-tail probability q, where
+//   p + q == 1 and 0 < p, q < 1. Both are passed so that whichever is the smaller is available at
+//   full relative precision, and the iteration is formulated in terms of that one.
+default_type gamma_quantile(const default_type alpha, const default_type p, const default_type q) {
+  const bool upper_tail = q < p;
+
+  // Initial estimate.
+  // - alpha >= 1: Wilson-Hilferty, which is the statement that (X/alpha)^(1/3) is approximately
+  //     normal with mean 1 - 2/(9 alpha) and variance 2/(9 alpha). It is asymptotically exact as
+  //     alpha grows.
+  // - alpha < 1: the density is unbounded at the origin and the cube-root approximation fails.
+  //     In the lower tail, the leading term of P(alpha, x) = x^alpha / Gamma(alpha+1) + O(x^(alpha+1))
+  //     is inverted; in the upper tail, the leading term of Q(alpha, x) ~ x^(alpha-1) e^-x / Gamma(alpha)
+  //     with the power of x neglected. Each is exact only in its own limit and merely a starting
+  //     point elsewhere.
+  default_type x = 0.0;
+  if (alpha >= 1.0) {
+    const default_type z = normal_quantile(p, q);
+    const default_type factor = 1.0 - 2.0 / (9.0 * alpha) + z * std::sqrt(2.0 / (9.0 * alpha));
+    x = factor > 0.0 ? alpha * factor * factor * factor : 0.0;
+  }
+  if (!(x > 0.0) && upper_tail)
+    x = -std::log(q) - log_gamma(alpha);
+  if (!(x > 0.0))
+    x = std::exp((std::log(p) + log_gamma(alpha + 1.0)) / alpha);
+  if (!std::isfinite(x) || !(x > 0.0))
+    x = alpha;
+
+  // Bracketed Newton iteration on the logarithm of the tail probability: log P(alpha, x) - log p in
+  //   the lower half of the distribution, and log q - log Q(alpha, x) in the upper half, where P is
+  //   close to one and only Q is accurate. Both residuals increase with x.
+  //
+  // WHY THE LOGARITHM. Deep in either tail the probability varies exponentially with x, and Newton
+  //   (or Halley) on the probability itself then advances by about one Mills ratio per step from
+  //   the far side: of order unity, and so thousands of steps for a quantile at a tail probability
+  //   of 1e-200 and a shape in the thousands. The logarithm of the tail probability is close to
+  //   linear there, and Newton on it converges quadratically in the tails and in the bulk alike.
+  //   The bracket is maintained purely as a guarantee, catching the case where a step from a poor
+  //   start would leave the region in which the local model is valid, and substituting a bisection
+  //   (or a doubling, while the upper bound is still unknown) for it.
+  const default_type log_target = std::log(upper_tail ? q : p);
+  default_type lower = 0.0;
+  default_type upper = std::numeric_limits<default_type>::infinity();
+  for (int iteration = 0; iteration != 200; ++iteration) {
+    const default_type tail = upper_tail ? gamma_q(alpha, x) : gamma_p(alpha, x);
+    const default_type error = upper_tail ? log_target - std::log(tail) : std::log(tail) - log_target;
+    if (error > 0.0)
+      upper = x;
+    else
+      lower = x;
+    // The density of Gamma(alpha, 1), P'(x) = -Q'(x), divided by the tail probability, is the
+    //   derivative of the residual.
+    const default_type density = std::exp(log_gamma_density(alpha, x)) / x;
+    const default_type next = x - error * tail / density;
+    // A proposed step of less than one unit in the last place is the iteration having converged
+    //   as far as the representation allows, and must be recognised as such BEFORE the bracket is
+    //   consulted: the current iterate has just become one of the bracket's own endpoints, so an
+    //   unmoved "next" would otherwise be read as having escaped the bracket and be replaced by a
+    //   bisection (or, with no upper bound yet established, by a doubling that discards a
+    //   converged answer outright).
+    if (std::isfinite(next) && next == x)
+      break;
+    const default_type bracketed = (!std::isfinite(next) || next <= lower || next >= upper)
+                                       ? (std::isfinite(upper) ? 0.5 * (lower + upper) : 2.0 * x)
+                                       : next;
+    const default_type change = std::abs(bracketed - x);
+    x = bracketed;
+    if (change <= 1.0e-15 * x)
+      break;
+  }
+  return x;
+}
+
 } // namespace
 
 default_type digamma(const default_type x_in) {
@@ -234,6 +308,15 @@ default_type gamma_p(const default_type alpha, const default_type x) {
   return x < alpha + 1.0 ? gamma_p_series(alpha, x) : 1.0 - gamma_q_continued_fraction(alpha, x);
 }
 
+default_type gamma_q(const default_type alpha, const default_type x) {
+  assert(alpha > 0.0);
+  if (!(alpha > 0.0))
+    return std::numeric_limits<default_type>::quiet_NaN();
+  if (!(x > 0.0))
+    return 1.0;
+  return x < alpha + 1.0 ? 1.0 - gamma_p_series(alpha, x) : gamma_q_continued_fraction(alpha, x);
+}
+
 default_type gamma_p_inv(const default_type alpha, const default_type p) {
   assert(alpha > 0.0);
   assert(p >= 0.0 && p <= 1.0);
@@ -243,67 +326,19 @@ default_type gamma_p_inv(const default_type alpha, const default_type p) {
     return 0.0;
   if (p == 1.0)
     return std::numeric_limits<default_type>::infinity();
+  return gamma_quantile(alpha, p, 1.0 - p);
+}
 
-  // Initial estimate.
-  // - alpha >= 1: Wilson-Hilferty, which is the statement that (X/alpha)^(1/3) is approximately
-  //     normal with mean 1 - 2/(9 alpha) and variance 2/(9 alpha). It is asymptotically exact as
-  //     alpha grows.
-  // - alpha < 1: the density is unbounded at the origin and the cube-root approximation fails;
-  //     the leading term of P(alpha, x) = x^alpha / Gamma(alpha+1) + O(x^(alpha+1)) is inverted
-  //     instead, which is exact in the limit of small x and merely a starting point elsewhere.
-  default_type x = 0.0;
-  if (alpha >= 1.0) {
-    const default_type z = normal_quantile(p);
-    const default_type factor = 1.0 - 2.0 / (9.0 * alpha) + z * std::sqrt(2.0 / (9.0 * alpha));
-    x = factor > 0.0 ? alpha * factor * factor * factor : 0.0;
-  }
-  if (!(x > 0.0))
-    x = std::exp((std::log(p) + log_gamma(alpha + 1.0)) / alpha);
-  if (!std::isfinite(x) || !(x > 0.0))
-    x = alpha;
-
-  // Bracketed Halley iteration on P(alpha, x) - p. Halley converges cubically and reaches machine
-  //   precision from either start within a handful of steps; the bracket is maintained purely as a
-  //   guarantee, catching the case where a step from a poor start would leave the region in which
-  //   the local cubic model is valid, and substituting a bisection (or a doubling, while the upper
-  //   bound is still unknown) for it.
-  default_type lower = 0.0;
-  default_type upper = std::numeric_limits<default_type>::infinity();
-  for (int iteration = 0; iteration != 200; ++iteration) {
-    const default_type error = gamma_p(alpha, x) - p;
-    if (error > 0.0)
-      upper = x;
-    else
-      lower = x;
-    // The density of Gamma(alpha, 1), which is P'(x) and is what turns the error into a step.
-    const default_type density = std::exp(log_gamma_density(alpha, x)) / x;
-    default_type next;
-    if (density > 0.0 && std::isfinite(density)) {
-      const default_type newton_step = error / density;
-      // P''/P' = (alpha-1)/x - 1: the second-order term that distinguishes Halley from Newton.
-      const default_type curvature = (alpha - 1.0) / x - 1.0;
-      const default_type denominator = 1.0 - 0.5 * newton_step * curvature;
-      const default_type step = denominator != 0.0 ? newton_step / denominator : newton_step;
-      next = x - step;
-    } else {
-      next = std::numeric_limits<default_type>::quiet_NaN();
-    }
-    // A proposed step of less than one unit in the last place is the iteration having converged
-    //   as far as the representation allows, and must be recognised as such BEFORE the bracket is
-    //   consulted: the current iterate has just become one of the bracket's own endpoints, so an
-    //   unmoved "next" would otherwise be read as having escaped the bracket and be replaced by a
-    //   bisection (or, with no upper bound yet established, by a doubling that discards a
-    //   converged answer outright).
-    if (std::isfinite(next) && next == x)
-      break;
-    if (!std::isfinite(next) || next <= lower || next >= upper)
-      next = std::isfinite(upper) ? 0.5 * (lower + upper) : 2.0 * x;
-    const default_type change = std::abs(next - x);
-    x = next;
-    if (change <= 1.0e-15 * x)
-      break;
-  }
-  return x;
+default_type gamma_q_inv(const default_type alpha, const default_type q) {
+  assert(alpha > 0.0);
+  assert(q >= 0.0 && q <= 1.0);
+  if (!(alpha > 0.0) || !(q >= 0.0) || !(q <= 1.0))
+    return std::numeric_limits<default_type>::quiet_NaN();
+  if (q == 0.0)
+    return std::numeric_limits<default_type>::infinity();
+  if (q == 1.0)
+    return 0.0;
+  return gamma_quantile(alpha, 1.0 - q, q);
 }
 
 } // namespace MR::Math

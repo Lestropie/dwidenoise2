@@ -91,6 +91,8 @@ using MR::Denoise::Precondition::NoiseModel::SliceEstimate;
 using MR::Math::digamma;
 using MR::Math::gamma_p;
 using MR::Math::gamma_p_inv;
+using MR::Math::gamma_q;
+using MR::Math::gamma_q_inv;
 using MR::Math::inverse_digamma;
 using MR::Math::trigamma;
 using MR::Math::NonCentralChi::normalised_mean;
@@ -305,6 +307,52 @@ void test_special_functions(std::FILE *out) {
                worst,
                worst_alpha,
                worst_p);
+
+  // Q(alpha, x): complementary to P, and accurate RELATIVE to its own value deep in the upper tail,
+  //   where 1 - P(alpha, x) has no significant digits left.
+  for (const double alpha : {0.5, 1.0, 4.0, 60.0, 3000.0}) {
+    for (double x = 0.01 * alpha; x < 3.0 * alpha + 10.0; x *= 1.2)
+      check_near(gamma_p(alpha, x) + gamma_q(alpha, x), 1.0, 1.0e-14, "P(alpha, x) + Q(alpha, x) = 1");
+  }
+  check(gamma_q(3.0, 0.0) == 1.0, "Q(alpha, 0) = 1");
+  for (const double x : {40.0, 200.0, 700.0})
+    check_relative(gamma_q(1.0, x), std::exp(-x), 1.0e-13, "Q(1, x) = exp(-x)");
+  for (const double x : {10.0, 30.0})
+    check_relative(gamma_q(0.5, x), std::erfc(std::sqrt(x)), 1.0e-12, "Q(1/2, x) = erfc(sqrt x)");
+
+  // The upper-tail quantile, assessed relative to the tail probability itself; this includes tail
+  //   probabilities far below the resolution of 1 - q, which gamma_p_inv() could not even be asked for.
+  worst = 0.0;
+  worst_alpha = 0.0;
+  double worst_q = 0.0;
+  for (int i = 0; i != 41; ++i) {
+    const double alpha = std::exp(log_alpha_min + (log_alpha_max - log_alpha_min) * double(i) / 40.0);
+    for (double exponent = -200.0; exponent <= -0.31; exponent += exponent < -10.0 ? 10.0 : 0.25) {
+      const double q = std::pow(10.0, exponent);
+      const double error = std::fabs(gamma_q(alpha, gamma_q_inv(alpha, q)) - q) / q;
+      if (error > worst) {
+        worst = error;
+        worst_alpha = alpha;
+        worst_q = q;
+      }
+    }
+  }
+  check(worst < 1.0e-10, "Q(alpha, Q^{-1}(alpha, q)) = q to 1e-10 relative");
+  std::fprintf(out,
+               "Gamma upper quantile round trip: worst |Q(alpha, Q^-1(alpha, q)) - q| / q = %.3g"
+               " (at alpha = %.4g, q = %.3g)\n",
+               worst,
+               worst_alpha,
+               worst_q);
+  // (Shapes below one are omitted only because their quantile at these probabilities underflows.)
+  for (const double alpha : {1.5, 4.0, 300.0, 5000.0}) {
+    for (const double p : {1.0e-30, 1.0e-100, 1.0e-200})
+      check_relative(gamma_p(alpha, gamma_p_inv(alpha, p)), p, 1.0e-10, "P(alpha, P^{-1}(alpha, p)) = p deep in the lower tail");
+  }
+  for (const double alpha : {0.7, 3.0, 250.0}) {
+    for (const double q : {0.3, 0.025, 1.0e-4})
+      check_relative(gamma_q_inv(alpha, q), gamma_p_inv(alpha, 1.0 - q), 1.0e-12, "Q^{-1}(alpha, q) = P^{-1}(alpha, 1 - q)");
+  }
 }
 
 // ---------------------------------------------------------------------------
