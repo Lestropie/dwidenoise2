@@ -28,7 +28,7 @@
 #include "algo/threaded_loop.h"
 #include "exception.h"
 #include "image.h"
-#include "math/gamma_functions.h"
+#include "math/gamma.h"
 #include "metadata/bids.h"
 #include "mrtrix.h"
 

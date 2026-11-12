@@ -34,7 +34,7 @@ COPY cpp/core/denoise /src/mrtrix3/cpp/core/denoise
 # General-purpose maths (MR::Math) destined for MRtrix3 core: copied file by file into the
 #   existing upstream cpp/core/math/ directory, so that nothing upstream is replaced; names
 #   must not collide with upstream files.
-COPY cpp/core/math/gamma_functions.h cpp/core/math/gamma_functions.cpp /src/mrtrix3/cpp/core/math/
+COPY cpp/core/math/gamma.h cpp/core/math/gamma.cpp /src/mrtrix3/cpp/core/math/
 COPY cpp/core/math/noncentral_chi.h cpp/core/math/noncentral_chi.cpp /src/mrtrix3/cpp/core/math/
 # Place the per-command noise estimation schedules alongside the other MRtrix3 shared data
 #   files (share/mrtrix3/<command>/), so the MRtrix3 cmake build copies them into the build

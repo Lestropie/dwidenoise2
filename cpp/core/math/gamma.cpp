@@ -15,7 +15,7 @@
  * governing permissions and limitations under the License.
  */
 
-#include "math/gamma_functions.h"
+#include "math/gamma.h"
 
 #include <cassert>
 #include <cmath>

@@ -17,7 +17,7 @@
 
 // Validation of the estimation of the magnitude noise model's degrees of freedom from background
 // voxels (denoise/precondition/noise_model/background.{h,cpp} and its supporting special functions
-// in math/gamma_functions.{h,cpp}), following St-Jean et al. (2020).
+// in math/gamma.{h,cpp}), following St-Jean et al. (2020).
 //
 // Fitting the degrees of freedom to the residual of a filtered PCA reconstruction was found not to
 // work at ordinary signal ranks. The estimator tested here sees raw magnitudes instead, with no PCA,
@@ -73,7 +73,7 @@
 #include "denoise/precondition/noise_model/background.h"
 #include "header.h"
 #include "image.h"
-#include "math/gamma_functions.h"
+#include "math/gamma.h"
 #include "math/noncentral_chi.h"
 #include "ncchi_sampler.h"
 
