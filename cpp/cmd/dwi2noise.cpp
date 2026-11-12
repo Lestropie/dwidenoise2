@@ -29,6 +29,7 @@
 #include "denoise/mask.h"
 #include "denoise/metadata.h"
 #include "denoise/partition.h"
+#include "denoise/precondition/noise_model/background.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "denoise/precondition/preconditioner.h"
 #include "denoise/schedule.h"
@@ -191,6 +192,12 @@ void usage() {
     "via variance-stabilizing transformation and optimal singular-value manipulation. "
     "NeuroImage, 2020, 215, 116852"
 
+  + "* If estimating the degrees of freedom of the magnitude noise distribution from the data "
+    "(-noise_dof_method): "
+    "St-Jean, S.; De Luca, A.; Tax, C.M.W.; Viergever, M.A.; Leemans, A. "
+    "Automated characterization of noise distributions in diffusion MRI data. "
+    "Medical Image Analysis, 2020, 65, 101758, doi: 10.1016/j.media.2020.101758"
+
   + "* If using -estimator mrm2023 (the default): "
     "Olesen, J.L.; Ianus, A.; Ostergaard, L.; Shemesh, N.; Jespersen, S.N. "
     "Tensor denoising of multidimensional MRI data. "
@@ -277,13 +284,23 @@ void run(Header &dwi,
   Image<bool> mask = generate_mask(input);
   Image<float> vst_image(user_vst_image);
 
-  // Noise model governing the variance-stabilising transform, configured from
-  //   the -noise_channels / -noise_dof and -vst_method options (Gaussian for complex data). Where
-  //   magnitude data receive a non-linear transform and neither channel-count option was provided,
-  //   the effective receive-channel count is instead inferred from the header key-values.
-  std::shared_ptr<NoiseModel::Base> noise_model = make_noise_model(is_complex<T>::value, dwi);
+  // Noise model governing the variance-stabilising transform, configured from the -noise_channels /
+  //   -noise_dof, -vst_method and -noise_dof_method options (Gaussian for complex data).
+  // Where -noise_dof_method selects an estimator, the degrees of freedom are estimated here, from a
+  //   single pass over the input that precedes everything else: the voxels of each slice that carry
+  //   no signal are identified and the noise distribution is fitted to them (St-Jean et al. 2020).
+  //   That pass is excluded at compile time for complex data rather than merely skipped, the
+  //   estimator being defined on magnitudes; complex data carry two degrees of freedom per sample by
+  //   construction in any case.
+  // Where magnitude data receive a non-linear transform and no value was either provided or
+  //   estimated, the effective receive-channel count is instead inferred from the header key-values.
+  const NoiseModelOptions noise_options = noise_model_options(is_complex<T>::value, dwi);
+  NoiseModel::BackgroundResult background;
+  if constexpr (!is_complex<T>::value)
+    background = estimate_background_dof(input, noise_options);
+  NoiseModel::Set noise_models = make_noise_model(noise_options, dwi, background);
 
-  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_model, grad);
+  Preconditioner<T> preconditioner(input, demodulation, demean, user_vst_image, noise_models, grad);
   // Cold adaptive-phase-correction solves within the noise-estimation iterations below are
   //   bootstraps: the final iteration re-estimates at native resolution the phase of every volume
   //   it uses, so they may be solved on a 2x-downsampled grid. Cleared before that final iteration

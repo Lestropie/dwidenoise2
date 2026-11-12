@@ -83,7 +83,7 @@ public:
                  const Demodulation &demodulation,
                  const demean_type demean,
                  Image<float> &vst_noise,
-                 std::shared_ptr<NoiseModel::Base> noise_model,
+                 NoiseModel::Set noise_models,
                  const Eigen::MatrixXd &grad);
   Preconditioner(Preconditioner &) = default;
   // Refresh the preconditioning parameters together, each iteration of the noise-estimation
@@ -213,9 +213,13 @@ private:
   // For serialisation of >4D images
   ssize_t num_volume_groups;
   Image<uint32_t> serialise_image;
-  // Noise distribution governing the variance-stabilising transform (VST);
-  //   scalar configuration shared by forward stabilisation and inverse mapping.
-  std::shared_ptr<NoiseModel::Base> noise_model;
+  // Noise distribution governing the variance-stabilising transform (VST); the configuration
+  //   shared by forward stabilisation and inverse mapping. A set rather than a single model because
+  //   the degrees of freedom may be estimated per slice (-noise_dof_scope slice); a scalar model is
+  //   a set of one, and NoiseModel::Set::at() then ignores the position it is given.
+  //   Holding it here, in the one object that applies both the forward transform and its inverse,
+  //   is what guarantees that a voxel is inverted through the same model that stabilised it.
+  NoiseModel::Set noise_models;
   // First step: Phase demodulation
   Image<cfloat> phase_image;
   // Adaptive phase correction (Pizzolato APC): each update_parameters() call re-estimates

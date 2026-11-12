@@ -129,7 +129,12 @@ OptionGroup export_options(const option_scope_t scope) {
              " (it is exact for -aggregator exclusive only);"
              " and, as for -trace_output, it treats the PCA basis as fixed rather than as having been"
              " estimated from the same data, which understates the true degrees of freedom by a factor"
-             " of roughly 1 + (num_volumes - rank) / num_patch_voxels")
+             " of roughly 1 + (num_volumes - rank) / num_patch_voxels."
+             " Note that this quantity is unrelated to the degrees of freedom of the magnitude noise"
+             " distribution, which are twice the effective receive-channel count and are set by"
+             " -noise_dof / -noise_channels / -noise_dof_method and reported by -noise_dof_out;"
+             " the collision of everyday terminology is unfortunate, but the two have nothing to do"
+             " with one another")
       + Argument("image").type_image_out()
     + Option("rankpermm_out",
              "Export the per-voxel signal-rank density (signal rank per mm of kernel radius) that was"

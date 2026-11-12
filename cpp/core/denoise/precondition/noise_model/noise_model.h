@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <memory>
 #include <string>
 #include <vector>
@@ -94,5 +95,66 @@ default_type clamp_dof(const default_type dof);
 std::shared_ptr<Base> make(const distribution_t distribution, //
                            const default_type dof,            //
                            const vst_method_t vst_method);    //
+
+// The noise model, or models, governing the variance-stabilising transform across one image.
+//
+// WHY A SET RATHER THAN A MODEL. Under parallel imaging the effective channel count is not a
+//   property of the coil alone but of the reconstruction, and it varies over space (Aja-Fernandez
+//   et al. 2011); estimating it from the data therefore yields one value per slice, not one value.
+//   Whether those values are reduced to their median or retained is the user's choice
+//   (-noise_dof_scope), and this class is what allows both to be expressed without the rest of the
+//   software needing to know which was chosen: a scalar model is a set of one, and at() ignores its
+//   argument.
+//
+// Kernels span slices, and that is fine: the point of the transform is that each sample is rendered
+//   approximately unit-variance by ITS OWN model, and the inverse selects the same model at the
+//   same voxel. What must not happen is a mismatch between the forward and the inverse, and holding
+//   the set in the one object that applies both is what prevents it.
+class Set {
+public:
+  Set() = default;
+  // One model for the whole image.
+  explicit Set(std::shared_ptr<Base> model);
+  // One model per slice along "slice_axis"; entries may be, and ordinarily are, shared between
+  //   slices whose degrees of freedom quantise to the same value.
+  Set(std::vector<std::shared_ptr<Base>> models, const size_t slice_axis);
+
+  bool valid() const { return !models.empty(); }
+  bool slicewise() const { return models.size() > 1; }
+  size_t slice_axis() const { return axis; }
+  // Transforms actually constructed, which is what the quantisation of a slice-wise set bounds.
+  size_t num_distinct_models() const;
+
+  // The model governing a given slice. The argument is ignored where the set holds one model, so a
+  //   caller that has the voxel position in hand can pass it unconditionally and need not know
+  //   whether the set is slice-wise.
+  const Base &at(const ssize_t slice) const {
+    assert(!models.empty());
+    return *models[models.size() == 1 ? 0 : size_t(slice)];
+  }
+
+  // Whether the transform is linear (see Base::is_linear). Every model of a set is built from the
+  //   same distribution family and the same -vst_method, so the property belongs to the set.
+  bool is_linear() const;
+  std::string description() const;
+
+private:
+  std::vector<std::shared_ptr<Base>> models;
+  size_t axis{2};
+};
+
+// Build a slice-wise set from one degrees-of-freedom value per slice.
+//
+// The values are QUANTISED to a grid before the transforms are built, because constructing a
+//   NonCentralChi is a one-time Poisson-mixture quadrature whose cost is quadratic in the
+//   tabulation extent, and one per slice for sixty to ninety slices is a real startup cost. The
+//   default step of 0.25 degrees of freedom (0.125 effective channels) is far below the estimator's
+//   own slice-to-slice scatter, and the transform's sensitivity to the degrees of freedom at that
+//   resolution is negligible; slices whose values fall in the same cell therefore share one model.
+//   Each value is clamped to the admissible range before quantisation.
+Set make_slicewise(const std::vector<default_type> &dof_per_slice, //
+                   const size_t slice_axis,                        //
+                   const vst_method_t vst_method,                  //
+                   const default_type quantum = 0.25);             //
 
 } // namespace MR::Denoise::Precondition::NoiseModel
