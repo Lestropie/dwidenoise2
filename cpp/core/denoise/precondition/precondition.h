@@ -18,11 +18,13 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "app.h"
 #include "denoise/denoise.h"
+#include "denoise/precondition/noise_model/background.h"
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "header.h"
 
@@ -76,24 +78,72 @@ enum class debias_anchor_t { SAMPLE, GROUP_MEAN };
 
 App::OptionGroup precondition_options(const option_scope_t scope);
 
-// Construct the noise model governing the variance-stabilising transform
-//   from the -noise_channels / -noise_dof and -vst_method command-line options.
-// For complex (or phase-demodulated) data, pass complex == true to obtain the
-//   Gaussian model; a channel count is then refused (it cannot apply).
-// For magnitude data, the degrees of freedom select a Rician (dof == 2) or non-central chi (any
+// Everything the command line says about the magnitude noise model, parsed and cross-validated in
+//   one place.
+//
+// It is resolved BEFORE the input image is read, because one of the things it decides is whether a
+//   pass over that image is made at all: estimating the degrees of freedom from the data costs a
+//   read of them, and there is no point paying for it to produce a number that the requested
+//   transform would ignore or that an explicit -noise_dof would override. Separating the parsing
+//   from the construction of the model is what makes that possible; make_noise_model() then
+//   receives both this and whatever the estimation produced.
+class NoiseModelOptions {
+public:
+  // The degrees of freedom the user imposed, and the name of the option through which they did so
+  //   ("noise_channels" or "noise_dof"), for messages that quote it back. A channel count is
+  //   doubled at the point of parsing, so everything below deals only in degrees of freedom.
+  std::optional<default_type> user_dof;
+  std::string user_option;
+  // Whether the input data are complex, for which the demodulated noise is Gaussian and the
+  //   magnitude noise model does not apply. Recorded here, having been established once by the
+  //   calling command, so that make_noise_model() need not be told a second time.
+  bool complex{false};
+  NoiseModel::vst_method_t vst_method{NoiseModel::vst_method_t::FOI};
+  // Estimation of the degrees of freedom from the voxels of the data that contain noise alone:
+  //   which estimator (NONE where no such pass is to be performed, whether because none was asked
+  //   for or because something else makes it pointless), the scope over which its result is
+  //   applied, and the image axis that separates slices.
+  NoiseModel::background_method_t background_method{NoiseModel::background_method_t::NONE};
+  NoiseModel::background_scope_t background_scope{NoiseModel::background_scope_t::GLOBAL};
+  size_t background_slice_axis{2};
+};
+
+// Parse and cross-validate the options above, refusing combinations that cannot be honoured
+//   coherently and warning about those that are merely redundant.
+// "complex" reports whether the input data are complex, for which the noise is Gaussian and every
+//   magnitude-specific option is meaningless; "H" is the header of the input image as opened by the
+//   calling command, consulted only for the slice encoding direction.
+NoiseModelOptions noise_model_options(const bool complex, const Header &H);
+
+// Estimate the degrees of freedom of the magnitude noise distribution from the voxels of the input
+//   that contain noise alone (St-Jean et al. 2020; see noise_model/background.h), and write the
+//   diagnostics requested via -noise_dof_out / -noise_voxels_out.
+// Returns an unpopulated result where no estimation was requested, and one carrying the reason
+//   where it was requested but could not be completed; in both cases the caller falls through to
+//   the next route by which the degrees of freedom may be obtained.
+// Declared for the real-valued image types only: complex data have two degrees of freedom per
+//   sample by construction, so the calling command excludes this pass at compile time.
+template <class ImageType>
+NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const NoiseModelOptions &options);
+
+// Construct the noise model(s) governing the variance-stabilising transform.
+// For complex (or phase-demodulated) data the Gaussian model is returned, as a set of one.
+// For magnitude data the degrees of freedom select a Rician (dof == 2) or non-central chi (any
 //   other value) model, built with the requested -vst_method strategy. The degrees of freedom are
 //   real-valued and are twice the EFFECTIVE receive-channel count, which is not a coil element
-//   count; -noise_dof supplies them directly and -noise_channels supplies half of them (the two
-//   are mutually exclusive, and a channel count is doubled at the point of parsing so that
-//   everything below this function deals only in degrees of freedom).
-//   Where the user provided neither, they are inferred from the key-values of "H" (see
-//   NoiseModel::resolve_noise_dof), falling back to the Rician default where the metadata do not
-//   permit an inference.
-//   "H" is the header of the input image as opened by the calling command, whose
-//   key-values are those of DICOM provenance; it is interrogated only on the code
-//   path where the channel count has an effect, so no message is emitted about a
-//   quantity that the selected transform does not use.
-std::shared_ptr<NoiseModel::Base> make_noise_model(const bool complex, const Header &H);
+//   count. They are resolved in order of precedence from -noise_dof / -noise_channels, then
+//   "background" (the estimate made from the data themselves), then the key-values of "H" (see
+//   NoiseModel::resolve_noise_dof), falling back to the Rician default where none of those permits
+//   a value to be established.
+//   Where -noise_dof_scope slice is in effect and the estimation produced per-slice values, the
+//   result holds one model per slice; otherwise it holds one.
+//   "H" is the header of the input image as opened by the calling command, whose key-values are
+//   those of DICOM provenance; it is interrogated only on the code path where the degrees of
+//   freedom have an effect, so no message is emitted about a quantity that the selected transform
+//   does not use.
+NoiseModel::Set make_noise_model(const NoiseModelOptions &options,
+                                 const Header &H,
+                                 const NoiseModel::BackgroundResult &background);
 
 class Demodulation {
 public:

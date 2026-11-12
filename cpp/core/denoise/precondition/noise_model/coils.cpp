@@ -391,15 +391,67 @@ bool same_value(const default_type a, const default_type b) {
 }
 } // namespace
 
-default_type
-resolve_noise_dof(const Header &H, const std::optional<default_type> &user_value, const std::string &user_option) {
+namespace {
+// A note on slice leakage where the header reports enough multiband acceleration for it to matter.
+//   The paper's Figs. 7A/7B measure both the noise level and the effective channel count rising at
+//   MB = 3 purely from aliased signal folding into what should be background, so an estimate made
+//   there is an over-estimate by a mechanism this software cannot correct for.
+std::string multiband_caveat(const Header &H) {
+  const std::optional<default_type> multiband = metadata_float(H.keyval(), "MultibandAccelerationFactor");
+  if (!multiband.has_value() || multiband.value() < 3.0)
+    return std::string();
+  return " Note that the image header reports a multiband acceleration factor of " + str(multiband.value(), 4) +
+         "; simultaneous-multi-slice acquisition aliases signal from the other excited slices into"
+         " what should be background, which inflates both the noise level and the degrees of freedom"
+         " estimated there, so this value should be read as an upper bound.";
+}
+} // namespace
+
+default_type resolve_noise_dof(const Header &H,
+                               const std::optional<default_type> &user_value,
+                               const std::string &user_option,
+                               const std::optional<default_type> &data_value,
+                               const std::string &data_evidence) {
   const CoilInference inference = infer_noise_dof(H);
 
-  // An explicit instruction outranks an inference drawn from metadata: the header describes the
-  //   data as reconstructed, which need not be the data as they now stand (channels may have been
-  //   recombined, or the series assembled from more than one acquisition), and the user may know
-  //   an effective channel count that no metadata report. The inference is nonetheless performed,
-  //   so that a disagreement can be surfaced rather than passing unnoticed.
+  // Where the data were fitted AND the metadata permitted an inference, the two are reported
+  //   together with their discrepancy, whichever of them is used and whether or not the user
+  //   overrode both. This is the mechanism by which the built-in table of receive coils is expected
+  //   to acquire entries: it turns every run on a known coil into a candidate measurement of that
+  //   coil's effective channel count, which is the thing the table has been short of since it was
+  //   written. It is reported at CONSOLE rather than INFO for that reason -- a user who never asks
+  //   for verbose output is exactly the user whose data would otherwise never be compared.
+  if (data_value.has_value() && inference.dof.has_value()) {
+    const default_type estimated = clamp_dof(data_value.value());
+    const default_type inferred = clamp_dof(inference.dof.value());
+    if (same_value(estimated, inferred)) {
+      CONSOLE("The " + dof_and_channels(estimated) + " estimated from the background voxels of these data (" +
+              data_evidence + ") agree with what the image header metadata indicate (" + inference.evidence + ")");
+    } else {
+      const std::string basis =
+          inference.hypothesised
+              ? "the value the metadata support is itself only a hypothesis (the number of element clusters"
+                " reported as active), so a disagreement with it is expected rather than surprising"
+          : same_value(inferred, 2.0)
+              ? "the metadata state that the coil combination was phase-sensitive, which is a statement about"
+                " the reconstruction rather than a measurement; where the data say otherwise it is worth"
+                " establishing which describes the image series at hand"
+              : "the value the metadata support was measured on a different acquisition, and the effective"
+                " channel count belongs to the coil together with the scanner configuration and the"
+                " reconstruction rather than to the coil alone";
+      CONSOLE("The " + dof_and_channels(estimated) + " estimated from the background voxels of these data (" +
+              data_evidence + ") differ from the " + dof_and_channels(inferred) +
+              " that the image header metadata indicate (" + inference.evidence + "), a discrepancy of " +
+              str(100.0 * (estimated / inferred - default_type(1)), 3) + "%; " + basis);
+    }
+  }
+
+  // An explicit instruction outranks both an inference drawn from metadata and a fit to the data:
+  //   the header describes the data as reconstructed, which need not be the data as they now stand
+  //   (channels may have been recombined, or the series assembled from more than one acquisition),
+  //   and the user may know an effective channel count that neither the metadata nor the background
+  //   of these particular data report. Both of the others are nonetheless computed where they can
+  //   be, so that a disagreement can be surfaced rather than passing unnoticed.
   if (user_value.has_value()) {
     // Clamped before it is reported, so that every message downstream quotes the value that will
     //   actually be used. A request below the bound is not refused outright -- it is a plausible
@@ -436,6 +488,50 @@ resolve_noise_dof(const Header &H, const std::optional<default_type> &user_value
            dof_and_channels(inference.dof.value()) + " inferred from the image header metadata (" + inference.evidence +
            "); proceeding with the value specified on the command line");
     }
+    // The data estimate is reported against the user's value on the same terms. It is the stronger
+    //   of the two contradictions -- it is a measurement of these data rather than a claim about the
+    //   hardware -- so a material disagreement is a warning whatever its direction.
+    if (data_value.has_value()) {
+      const default_type estimated = clamp_dof(data_value.value());
+      if (same_value(estimated, applied)) {
+        INFO("The " + dof_and_channels(applied) + " specified via -" + user_option +
+             " agrees with the value estimated from the background voxels of these data (" + data_evidence + ")");
+      } else {
+        WARN("The " + dof_and_channels(applied) + " specified via -" + user_option + " differs from the " +
+             dof_and_channels(estimated) + " estimated from the background voxels of these data (" + data_evidence +
+             "); proceeding with the value specified on the command line." + multiband_caveat(H));
+      }
+    }
+    return applied;
+  }
+
+  // The fit to the data outranks the header inference: it is a measurement of the image series at
+  //   hand rather than a claim about the hardware that produced it, and the inference is in most
+  //   cases either unavailable altogether or a hypothesis about how a receive array behaves.
+  if (data_value.has_value()) {
+    const default_type requested = data_value.value();
+    const default_type applied = clamp_dof(requested);
+    if (!same_value(applied, requested)) {
+      // Not a failure. Fewer than one degree of freedom cannot arise from summing squares of
+      //   Gaussian variates, but an estimate close to one -- or nominally below it -- is exactly
+      //   what a partial-Fourier homodyne reconstruction produces, and is where St-Jean et al.
+      //   found their GE data to lie (0.45 to 0.49 effective channels). The clamp is reported for
+      //   what it implies rather than merely as an adjustment.
+      WARN("The background voxels of these data give " + dof_and_channels(requested) +
+           ", which is fewer than the magnitude noise model admits: one degree of freedom is the"
+           " half-Gaussian, a single real Gaussian component, and no sum of squares of Gaussian"
+           " variates can yield fewer. A value at or below that bound indicates that the image"
+           " intensities are the real part of a phase-corrected reconstruction rather than a"
+           " magnitude -- partial-Fourier homodyne reconstruction being the usual cause -- which is"
+           " a real and reported behaviour of some scanners. Proceeding with " +
+           dof_and_channels(applied) + ", the half-Gaussian limit");
+    }
+    CONSOLE("Applying " + dof_and_channels(applied) +
+            " estimated from the voxels of these data that contain noise alone (" + data_evidence +
+            "); note that under k-space parallel imaging the effective channel count depends on the local"
+            " signal, so a value estimated in the background is an upper bound on the value that applies"
+            " within the head." +
+            multiband_caveat(H));
     return applied;
   }
 
