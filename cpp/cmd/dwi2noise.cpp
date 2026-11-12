@@ -108,7 +108,9 @@ void usage() {
     " These estimates are then used as input to subsequent iterations"
     " to apply a variance-stabilising transform prior to PCA,"
     " deriving a new noise map at a higher spatial resolution."
-    " The noise map estimated at the final iteration is additionally smoothed prior to export."
+    " The noise map estimated at the final iteration is additionally smoothed prior to export"
+    " (in the default schedule, with a Gaussian of 10mm full width at half maximum;"
+    " the width is set per iteration by the schedule's \"smooth_noise\" column)."
 
   + demodulation_description
 
@@ -347,7 +349,7 @@ void run(Header &dwi,
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
                                              noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
-                                             iterations[iteration].smooth_noiseout);
+                                             iterations[iteration].smooth_noiseout_fwhm);
 
     // Per-partition signal-rank density: rank_input is summed over the iteration's num_partitions
     //   partitions, while the next iteration's rank-based kernel is sized from the smallest
@@ -408,11 +410,11 @@ void run(Header &dwi,
   //   internally to its penultimate map, so the two-phase route (dwi2noise, then
   //   dwidenoise2 -noise_in -schedule apriori) denoises with the same map a single dwidenoise2 run
   //   would. pad=NONE keeps the result on the (unpadded) output grid.
-  if (iterations.back().smooth_noiseout == noise_smooth_type::SMOOTH) {
+  if (iterations.back().smooth_noiseout_fwhm > 0.0) {
     Image<float> smoothed = Denoise::condition_noise_map(final_exports.noise_out,
                                                          noise_impute_type::NAN_TO_ZERO,
                                                          noise_pad_type::NONE,
-                                                         noise_smooth_type::SMOOTH);
+                                                         iterations.back().smooth_noiseout_fwhm);
     ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, smoothed);
   }
 
@@ -539,7 +541,7 @@ void run() {
     // Single pass, no prior rank map available: size by a (rank-naive) aspect ratio (n ~ 2m).
     config.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
     config.kernel.param = 2.0;
-    config.smooth_noiseout = noise_smooth_type::NONE;
+    config.smooth_noiseout_fwhm = 0.0;
     config.temporal_subsample = 1.0;
     config.update_noise = true;
     iterations.push_back(config);

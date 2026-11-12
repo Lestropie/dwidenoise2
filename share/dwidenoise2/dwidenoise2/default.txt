@@ -92,19 +92,24 @@
 #                          non-final iteration. Default: true for non-final rows;
 #                          for the final row, false (carry the prior estimate
 #                          through the reconstruction).
-#  - smooth_noise        : whether to smooth the estimated noise map before it is
-#                          passed to the next iteration ("true" or "false").
-#                          Default: false.
-#                          May be true only when update_noise is true in the same
+#  - smooth_noise        : full width at half maximum, in mm, of the isotropic Gaussian
+#                          with which the estimated noise map is smoothed before it is
+#                          passed to the next iteration; 0.0 does not smooth it at all.
+#                          Default: 0.0.
+#                          The width is specified in millimetres, not voxels, so that it
+#                          describes the spatial scale over which the noise level is
+#                          taken to vary rather than a property of the (per-iteration)
+#                          sub-sampled grid on which the map happens to be estimated.
+#                          May be non-zero only when update_noise is true in the same
 #                          iteration (an iteration that does not (re)estimate the
 #                          noise level has no freshly estimated map to smooth).
-#                          Must be false on the final (reconstruction) row: that row's
+#                          Must be 0.0 on the final (reconstruction) row: that row's
 #                          noise map is the one applied to the data (and exported via
 #                          -noise_out), so smoothing it would make the exported / applied
 #                          map deviate from the map the PCA actually used.
 #
 spatial_subsample   kernel        update_noise   smooth_noise
-8                   aspect=2.0    true           false
-4                   rmse=0.02     true           false
-2                   rmse=0.02     true           true
-2                   rank          false          false
+8                   aspect=2.0    true           0.0
+4                   rmse=0.02     true           0.0
+2                   rmse=0.02     true           10.0
+2                   rank          false          0.0

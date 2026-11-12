@@ -66,18 +66,34 @@ std::string strip_comment(const std::string &line) {
   return hash == std::string::npos ? line : line.substr(0, hash);
 }
 
-// "smooth_noise" is a boolean: "true" smooths the iteration's noise map estimate before it is
-//   passed to the next iteration, "false" leaves it unsmoothed. Parsed via MR::to<bool>(), which
-//   also accepts "yes"/"no" and 0/1; a column-specific message is raised on anything else.
-noise_smooth_type parse_smooth_noise(const std::string &value, const size_t lineno) {
-  bool smooth = false;
-  try {
-    smooth = to<bool>(value);
-  } catch (Exception &) {
+// "smooth_noise" is the full width at half maximum, in millimetres, of the isotropic Gaussian with
+//   which the iteration's noise map estimate is smoothed before it is passed to the next iteration;
+//   zero bypasses the smoothing for that iteration. Specifying a width in millimetres rather than a
+//   bare on/off switch makes the extent of the smoothing a property of the anatomy, independent of
+//   the grid on which the map is estimated -- which for a multi-resolution schedule differs from
+//   one iteration to the next.
+// The boolean spellings this column previously accepted are rejected explicitly rather than left to
+//   fail as unparseable numbers: a schedule written against the old interface deserves a message
+//   naming the replacement rather than one that merely calls "true" a bad number.
+default_type parse_smooth_noise(const std::string &value, const size_t lineno) {
+  const std::string lower = lowercase(value);
+  if (lower == "true" || lower == "false" || lower == "yes" || lower == "no")
     throw Exception("Schedule file line " + str(lineno) + ": "
-                    "value for column \"smooth_noise\" must be \"true\" or \"false\" (got \"" + value + "\")");
+                    "column \"smooth_noise\" is no longer a boolean (got \"" + value + "\"); "
+                    "it now takes the full width at half maximum, in mm, of the Gaussian with which "
+                    "the iteration's noise level map is smoothed, and 0.0 to not smooth it at all");
+  default_type fwhm = 0.0;
+  size_t consumed = 0;
+  try {
+    fwhm = std::stod(value, &consumed);
+  } catch (std::exception &) {
+    consumed = 0;
   }
-  return smooth ? noise_smooth_type::SMOOTH : noise_smooth_type::NONE;
+  if (value.empty() || consumed != value.size() || !std::isfinite(fwhm) || fwhm < 0.0)
+    throw Exception("Schedule file line " + str(lineno) + ": "
+                    "value for column \"smooth_noise\" must be a non-negative smoothing FWHM in mm, "
+                    "or 0.0 for no smoothing (got \"" + value + "\")");
+  return fwhm;
 }
 
 // The "kernel" column selects the per-iteration kernel shape and size. Every attribute of the
@@ -431,7 +447,7 @@ parse(const std::string &path, const std::string &command, const bool rank_densi
     // Default kernel (when the "kernel" column is omitted): rank-naive aspect ratio n ~ 2m.
     iteration.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
     iteration.kernel.param = 2.0;
-    iteration.smooth_noiseout = noise_smooth_type::NONE;
+    iteration.smooth_noiseout_fwhm = 0.0;
     for (size_t column = 0; column != header.size(); ++column) {
       const std::string &key = header[column];
       const std::string &value = tokens[column];
@@ -454,7 +470,7 @@ parse(const std::string &path, const std::string &command, const bool rank_densi
                           "the \"rank\" and \"rank_imposed\" kernels size the dwidenoise2 reconstruction "
                           "patch from a signal rank and are used only by dwidenoise2");
       } else if (key == "smooth_noise")
-        iteration.smooth_noiseout = parse_smooth_noise(value, lineno);
+        iteration.smooth_noiseout_fwhm = parse_smooth_noise(value, lineno);
       else if (key == "temporal_subsample")
         iteration.temporal_subsample = parse_temporal_subsample(value, lineno);
       else if (key == "update_noise")
@@ -474,13 +490,12 @@ parse(const std::string &path, const std::string &command, const bool rank_densi
                       "\"none\" to disable one of them on this row)");
     // Smoothing the iteration's noise map estimate is only meaningful when that iteration
     //   (re)estimates the noise level; a row that explicitly disables estimation cannot also
-    //   request smoothing. (The complementary case in which update_noise is left to its
-    //   per-command default is enforced by each command once that default is resolved.)
-    if (iteration.smooth_noiseout == noise_smooth_type::SMOOTH &&
-        iteration.update_noise.has_value() && !iteration.update_noise.value())
+    //   request a non-zero smoothing width. (The complementary case in which update_noise is left
+    //   to its per-command default is enforced by each command once that default is resolved.)
+    if (iteration.smooth_noiseout_fwhm > 0.0 && iteration.update_noise.has_value() && !iteration.update_noise.value())
       throw Exception("Schedule file \"" + path + "\" line " + str(lineno) + ": "
-                      "column \"smooth_noise\" may be true only when \"update_noise\" is also true "
-                      "in the same iteration");
+                      "column \"smooth_noise\" may be non-zero only when \"update_noise\" is also "
+                      "true in the same iteration");
     result.push_back(iteration);
   }
 
@@ -520,9 +535,9 @@ parse(const std::string &path, const std::string &command, const bool rank_densi
   //   -noise_out exports. Smoothing it would make the exported / applied map deviate from the map the
   //   PCA actually used, so it is rejected here. (dwi2noise, by contrast, *does* smooth its final row
   //   when requested: that row produces the command's exported estimate, not a reconstruction.)
-  if (command == "dwidenoise2" && result.back().smooth_noiseout == noise_smooth_type::SMOOTH)
+  if (command == "dwidenoise2" && result.back().smooth_noiseout_fwhm > 0.0)
     throw Exception("Schedule file \"" + path + "\": the final (reconstruction) row of a dwidenoise2 "
-                    "schedule must not set smooth_noise true; smoothing the reconstruction noise map "
+                    "schedule must set smooth_noise to 0.0; smoothing the reconstruction noise map "
                     "would make the exported map deviate from the one actually applied to the data");
 
   return result;

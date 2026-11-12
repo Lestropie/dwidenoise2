@@ -67,15 +67,22 @@
 #                            kernel_multiplier column.) The "rank" and "rank_imposed" kernels are for
 #                            dwidenoise2 reconstruction only and are not used by dwi2noise; they are
 #                            rejected outright in a dwi2noise schedule, on any row.
-#  - smooth_noise        : whether to smooth the estimated noise map before it is
-#                          passed to the next iteration ("true" or "false").
-#                          Default: false.
+#  - smooth_noise        : full width at half maximum, in mm, of the isotropic Gaussian
+#                          with which the estimated noise map is smoothed before it is
+#                          passed to the next iteration; 0.0 does not smooth it at all.
+#                          On the final row (which produces this command's output map)
+#                          the smoothing is instead applied to that output map itself.
+#                          Default: 0.0.
+#                          The width is specified in millimetres, not voxels, so that it
+#                          describes the spatial scale over which the noise level is
+#                          taken to vary rather than a property of the (per-iteration)
+#                          sub-sampled grid on which the map happens to be estimated.
 #
 # Note: dwi2noise (re)estimates the noise level in every iteration (its final
 #   iteration produces the output map), so the "update_noise" column accepted by
 #   dwidenoise2 is not permitted here and will be rejected if present.
 #
 spatial_subsample   kernel        smooth_noise
-8,8,8               aspect=2.0    false
-4,4,4               rmse=0.02     false
-2,2,2               rmse=0.02     true
+8,8,8               aspect=2.0    0.0
+4,4,4               rmse=0.02     0.0
+2,2,2               rmse=0.02     10.0
