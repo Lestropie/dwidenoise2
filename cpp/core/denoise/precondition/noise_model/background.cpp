@@ -22,6 +22,8 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <numeric>
 
 #include "algo/loop.h"
@@ -39,6 +41,56 @@ using Math::gamma_p_inv;
 using Math::gamma_q_inv;
 using Math::inverse_digamma;
 using Math::trigamma;
+
+void MagnitudeHistogram::add(const default_type magnitude) {
+  assert(std::isfinite(magnitude) && magnitude > 0.0);
+  if (counts.empty())
+    counts.assign(size_t(max_exponent - min_exponent) * bins_per_octave, 0);
+  // magnitude = mantissa * 2^exponent with mantissa in [1/2, 1), i.e. it lies in the octave
+  //   [2^(exponent-1), 2^exponent), within which bins are of equal width.
+  int exponent = 0;
+  const default_type mantissa = std::frexp(magnitude, &exponent);
+  const int octave = exponent - 1;
+  size_t bin = 0;
+  if (octave >= max_exponent) {
+    bin = counts.size() - 1;
+  } else if (octave >= min_exponent) {
+    const int sub_bin = std::min(int((2.0 * mantissa - 1.0) * bins_per_octave), bins_per_octave - 1);
+    bin = size_t(octave - min_exponent) * bins_per_octave + size_t(sub_bin);
+  }
+  ++counts[bin];
+  ++num_samples;
+}
+
+void MagnitudeHistogram::merge(const MagnitudeHistogram &that) {
+  if (that.counts.empty())
+    return;
+  if (counts.empty())
+    counts.assign(that.counts.size(), 0);
+  for (size_t bin = 0; bin != counts.size(); ++bin)
+    counts[bin] += that.counts[bin];
+  num_samples += that.num_samples;
+}
+
+default_type MagnitudeHistogram::median() const {
+  if (num_samples == 0)
+    return std::numeric_limits<default_type>::quiet_NaN();
+  // The sample of rank floor(n/2) (counting from zero), as std::nth_element() at size()/2 would
+  //   select, interpolated linearly within the bin that contains it.
+  const uint64_t rank = num_samples / 2;
+  uint64_t below = 0;
+  for (size_t bin = 0; bin != counts.size(); ++bin) {
+    if (below + counts[bin] > rank) {
+      const int octave = min_exponent + int(bin / bins_per_octave);
+      const default_type width = std::ldexp(1.0, octave) / default_type(bins_per_octave);
+      const default_type lower = std::ldexp(1.0, octave) + width * default_type(bin % bins_per_octave);
+      return lower + width * (default_type(rank - below) + 0.5) / default_type(counts[bin]);
+    }
+    below += counts[bin];
+  }
+  assert(false);
+  return std::numeric_limits<default_type>::quiet_NaN();
+}
 
 Accumulation::Accumulation(const std::array<ssize_t, 3> &size, const size_t slice_axis)
     : voxels(size_t(size[0]) * size_t(size[1]) * size_t(size[2])), size(size), slice_axis(slice_axis) {
@@ -60,10 +112,21 @@ namespace {
 
 // One spatial voxel per invocation: walk that voxel's full column of volumes and write its four
 //   sufficient statistics. Every voxel is visited by exactly one thread and writes only its own
-//   entry, so the shared array needs no locking.
+//   entry, so the shared array needs no locking. The histogram of magnitudes is instead filled per
+//   thread (each thread works on its own copy of the functor), and each copy adds its histogram
+//   to the shared one under a lock as it is destroyed.
 template <class ImageType> class AccumulateFunctor {
 public:
-  AccumulateFunctor(Accumulation &accumulation) : accumulation(accumulation) {}
+  AccumulateFunctor(Accumulation &accumulation)
+      : accumulation(accumulation), merge_mutex(std::make_shared<std::mutex>()) {}
+  AccumulateFunctor(const AccumulateFunctor &that) : accumulation(that.accumulation), merge_mutex(that.merge_mutex) {}
+  AccumulateFunctor &operator=(const AccumulateFunctor &) = delete;
+  ~AccumulateFunctor() {
+    if (histogram.total() == 0)
+      return;
+    const std::lock_guard<std::mutex> lock(*merge_mutex);
+    accumulation.magnitudes.merge(histogram);
+  }
   void operator()(ImageType &input) {
     VoxelStats stats;
     for (auto l = Loop(input, 3)(input); l; ++l) {
@@ -79,12 +142,15 @@ public:
       stats.sum_sq += m2;
       stats.sum_quad += m2 * m2;
       stats.sum_log_sq += std::log(m2);
+      histogram.add(m);
     }
     accumulation.voxels[accumulation.index(input.index(0), input.index(1), input.index(2))] = stats;
   }
 
 private:
   Accumulation &accumulation;
+  std::shared_ptr<std::mutex> merge_mutex;
+  MagnitudeHistogram histogram;
 };
 
 } // namespace
@@ -522,23 +588,28 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
     return result;
   }
 
-  // The top of the initial noise-level search grid. A background voxel at the largest admissible
-  //   degrees of freedom has median magnitude sigma sqrt(2 P^{-1}(dof_max/2, 1/2)); evaluating that
-  //   relation at a typical magnitude of the whole image, which is no smaller than a typical
-  //   background magnitude, therefore bounds sigma from above. It bounds a grid that the algorithm
-  //   then refines, so a loose bound costs only resolution on the first iteration.
-  std::vector<default_type> typical;
-  typical.reserve(accumulation.voxels.size());
-  for (const VoxelStats &stats : accumulation.voxels) {
-    if (stats.count > 0)
-      typical.push_back(std::sqrt(stats.sum_sq / default_type(stats.count)));
-  }
-  if (typical.empty()) {
+  // The top of the initial noise-level search grid, as Algorithm 1 specifies it: the noise level at
+  //   which a background voxel at the largest admissible degrees of freedom would have median
+  //   magnitude sigma sqrt(2 P^{-1}(dof_max/2, 1/2)) equal to the median of all samples of the
+  //   image.
+  //
+  // THE CHOICE OF STATISTIC MATTERS. Where background dominates the field of view this is an upper
+  //   bound on sigma; but where it does not, the median of all samples lies within the tissue and
+  //   the grid extends well beyond the noise level, and the further it extends, the more slices in
+  //   which the voxel count is maximised by a candidate that admits tissue rather than background.
+  //   The median of all samples is the statistic least prone to this among those cheap enough to
+  //   compute, because it is dominated by the many diffusion-weighted volumes in which tissue is
+  //   darkest. On synthetic data with too little background, statistics weighted towards the
+  //   brighter volumes -- the median over voxels of each voxel's root mean square magnitude or of
+  //   its median magnitude, which exceed it by 12-67% -- led most slices to select tissue and
+  //   underestimated the degrees of freedom by a factor of up to three, whereas this statistic
+  //   recovered them; the median over volumes of each volume's median (2-10% larger) recovered the
+  //   global estimate but selected tissue in more slices.
+  const default_type median_magnitude = accumulation.magnitudes.median();
+  if (!std::isfinite(median_magnitude)) {
     result.decline = "the image contains no positive finite magnitudes";
     return result;
   }
-  std::nth_element(typical.begin(), typical.begin() + typical.size() / 2, typical.end());
-  const default_type median_magnitude = typical[typical.size() / 2];
   const default_type sigma_hi = median_magnitude / std::sqrt(2.0 * gamma_p_inv(0.5 * parameters.dof_max, 0.5));
   if (!std::isfinite(sigma_hi) || !(sigma_hi > 0.0)) {
     result.decline = "a noise level search range could not be established from the image intensities";

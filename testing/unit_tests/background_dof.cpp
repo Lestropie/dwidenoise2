@@ -86,6 +86,7 @@ using MR::Denoise::Precondition::NoiseModel::Estimate;
 using MR::Denoise::Precondition::NoiseModel::estimate_background;
 using MR::Denoise::Precondition::NoiseModel::estimate_caveats;
 using MR::Denoise::Precondition::NoiseModel::estimate_from_sums;
+using MR::Denoise::Precondition::NoiseModel::MagnitudeHistogram;
 using MR::Denoise::Precondition::NoiseModel::SampleSums;
 using MR::Denoise::Precondition::NoiseModel::SliceEstimate;
 using MR::Math::digamma;
@@ -528,6 +529,37 @@ void test_scale_equivariance(std::FILE *out) {
     check(std::fabs(small.bias_sigma - large.bias_sigma) <= 1.0e-9,
           std::string(name) + ": the noise level scales exactly with the data");
   }
+}
+
+// The median read from the histogram of magnitudes, against the exact median of the same samples,
+//   across scales spanning many octaves and including magnitudes beyond the histogram's range.
+void test_magnitude_histogram(std::FILE *out) {
+  std::mt19937_64 rng(20261112);
+  double worst = 0.0;
+  for (const double scale : {1.0e-6, 1.0, 37.0, 4.0e4}) {
+    for (const double spread : {0.05, 1.0, 8.0}) {
+      std::lognormal_distribution<double> distribution(std::log(scale), spread);
+      for (const size_t n : {size_t(1), size_t(2), size_t(1001), size_t(100000)}) {
+        MagnitudeHistogram first, second;
+        std::vector<double> samples(n);
+        for (size_t i = 0; i != n; ++i) {
+          samples[i] = distribution(rng);
+          (i % 3 == 0 ? first : second).add(samples[i]);
+        }
+        first.merge(second);
+        check(first.total() == n, "the histogram counts every sample added to it, across a merge");
+        std::nth_element(samples.begin(), samples.begin() + n / 2, samples.end());
+        const double exact = samples[n / 2];
+        if (exact < std::ldexp(1.0, MagnitudeHistogram::min_exponent) ||
+            exact >= std::ldexp(1.0, MagnitudeHistogram::max_exponent))
+          continue;
+        worst = std::max(worst, std::fabs(first.median() / exact - 1.0));
+      }
+    }
+  }
+  check(worst <= 1.0 / MagnitudeHistogram::bins_per_octave, "the histogram median is within one bin of the exact median");
+  check(!std::isfinite(MagnitudeHistogram().median()), "an empty histogram has no median");
+  std::fprintf(out, "Histogram median: worst relative deviation from the exact median %.3g\n", worst);
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,6 +1050,7 @@ int main(int argc, char **argv) {
   test_special_functions(out);
   test_estimators(out, tsv, evidence);
   test_scale_equivariance(out);
+  test_magnitude_histogram(out);
   test_algorithm(out, tsv);
   test_caveats(out);
 

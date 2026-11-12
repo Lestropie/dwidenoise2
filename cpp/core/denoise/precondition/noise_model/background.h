@@ -142,9 +142,9 @@ public:
 //   so that m^4 can neither overflow nor lose precision. Accumulating in double precision instead
 //   makes that unnecessary -- m^4 would have to exceed 1e300 to overflow, and the relative
 //   precision of a floating-point sum does not depend on its scale -- and it saves the extra pass
-//   over the 4D data that computing the median beforehand would require. The one place a typical
-//   magnitude is genuinely needed, namely the top of the initial noise-level search grid, is
-//   instead derived from these accumulators (see estimate_background()).
+//   over the 4D data that computing the median beforehand would require. The one place the median
+//   is genuinely needed, namely the top of the initial noise-level search grid, is instead read
+//   from a histogram filled during the same pass (see MagnitudeHistogram).
 // Linear index of a spatial voxel within Accumulation::voxels and BackgroundResult::selected: the
 //   first axis varies fastest. A free function so that a consumer of the exported mask can address
 //   it without constructing an Accumulation, which would allocate the whole statistics array (forty
@@ -155,6 +155,30 @@ inline size_t voxel_index(const std::array<ssize_t, 3> &size, //
                           const ssize_t i2) {                 //
   return size_t((i2 * size[1] + i1) * size[0] + i0);
 }
+
+// Histogram of the logarithm of every usable magnitude in the 4D image, from which the median of
+//   all samples is obtained without retaining the samples themselves: an exact median would need
+//   every voxel-volume magnitude held in memory at once for std::nth_element(), as much memory
+//   again as the image. Bins are 1/256 of an octave wide, so the median is located to within 0.3%
+//   (and linear interpolation within its bin typically does considerably better), which is far
+//   finer than the purpose it serves requires. Magnitudes outside [2^-64, 2^64] are counted in the
+//   end bins. Each thread fills its own histogram, and these are summed.
+class MagnitudeHistogram {
+public:
+  static constexpr int min_exponent = -64;
+  static constexpr int max_exponent = 64;
+  static constexpr int bins_per_octave = 256;
+  // The magnitude must be finite and strictly positive.
+  void add(const default_type magnitude);
+  void merge(const MagnitudeHistogram &that);
+  uint64_t total() const { return num_samples; }
+  // The median of the samples added; NaN if there are none.
+  default_type median() const;
+
+private:
+  std::vector<uint64_t> counts;
+  uint64_t num_samples{0};
+};
 
 class Accumulation {
 public:
@@ -173,6 +197,8 @@ public:
   //   excluded can be recovered. Zero where unknown (an Accumulation not filled by
   //   accumulate_background()), in which case nothing that depends on it is reported.
   uint32_t num_volumes{0};
+  // Every usable magnitude of the image, for its median.
+  MagnitudeHistogram magnitudes;
 };
 
 // Accumulate the statistics above from a magnitude image, in one pass. Explicitly instantiated for
