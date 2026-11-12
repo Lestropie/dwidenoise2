@@ -20,11 +20,22 @@
 #include <memory>
 #include <string>
 
+#include "app.h"
 #include "denoise/denoise.h"
 #include "header.h"
 #include "image.h"
 
 namespace MR::Denoise {
+
+// DESCRIPTION paragraph distinguishing the two signal/noise boundary maps (-lamplus, -lammax_noise),
+//   to which the help text of those two options defers.
+extern const char *const noise_boundary_description;
+
+// The command-line options governing the contents of class Exports:
+//   the additional images and files that may be exported regarding PCA behaviour,
+//   and those for debugging the sliding window kernels.
+App::OptionGroup export_options(const option_scope_t scope);
+App::OptionGroup kernel_debug_options(const option_scope_t scope);
 
 class Exports {
 public:
