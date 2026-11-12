@@ -31,4 +31,4 @@
 # selected aggregator.
 #
 spatial_subsample   kernel       update_noise   smooth_noise
-1                   rank_imposed   true           false
+1                   rank_imposed   true           0.0

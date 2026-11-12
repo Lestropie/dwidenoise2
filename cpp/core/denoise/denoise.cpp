@@ -236,8 +236,9 @@ private:
 Image<float> condition_noise_map(Image<float> &in,
                                  const noise_impute_type nan_to_zero,
                                  const noise_pad_type pad,
-                                 const noise_smooth_type smooth,
+                                 const default_type smooth_fwhm,
                                  const Header *coverage) {
+  assert(smooth_fwhm >= 0.0);
   Header H(in);
   // Margin required either side for cubic interpolation to be well-posed.
   constexpr ssize_t interp_margin = 2;
@@ -280,8 +281,13 @@ Image<float> condition_noise_map(Image<float> &in,
   }
   Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
   ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, nan_to_zero, pad, pad_lo), out);
-  if (smooth == noise_smooth_type::SMOOTH) {
+  if (smooth_fwhm > 0.0) {
+    // Filter::Smooth is parameterised by the standard deviation of the Gaussian in millimetres,
+    //   one value per spatial axis; the schedule specifies the FWHM of a spatially isotropic
+    //   Gaussian, so the same converted width is imposed on all three axes irrespective of the
+    //   (possibly anisotropic) voxel size of the grid on which the map was estimated.
     Filter::Smooth smooth_filter(out);
+    smooth_filter.set_stdev(smooth_fwhm / (2.0 * std::sqrt(2.0 * std::log(2.0))));
     smooth_filter(out);
   }
   return out;
@@ -333,7 +339,7 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
   }
   // Pad out to cover the DWI field of view: the map is interpolated at patch centres drawn from
   //   the DWI grid, so it need not share that grid but must be sampleable across all of it.
-  return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, noise_smooth_type::NONE, &H_spatial);
+  return condition_noise_map(in, noise_impute_type::NONE, noise_pad_type::PAD, 0.0, &H_spatial);
 }
 
 Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_dist, const ssize_t num_partitions) {
@@ -367,8 +373,7 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
   }
   // As for the noise level map: cover the DWI field of view so interpolation is well-posed at
   //   every patch position, rather than requiring the supplied map to be grid-conformant.
-  return condition_noise_map(
-      in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, noise_smooth_type::NONE, &H_spatial);
+  return condition_noise_map(in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, 0.0, &H_spatial);
 }
 
 void NoiseMapVSTRescaleFunctor::operator()(Image<float> &map) {

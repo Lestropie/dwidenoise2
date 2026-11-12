@@ -35,4 +35,4 @@
 # spatial sub-sampling, is engaged automatically instead.
 #
 spatial_subsample   temporal_subsample   kernel        update_noise   smooth_noise
-2                   1                    aspect=2.0    true           false
+2                   1                    aspect=2.0    true           0.0
