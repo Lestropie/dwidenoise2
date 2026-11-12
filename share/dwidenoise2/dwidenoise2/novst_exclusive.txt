@@ -35,4 +35,4 @@
 # "spatial_subsample 1", in place of the command's default sub-sampling factor used by "novst".
 #
 spatial_subsample   temporal_subsample   kernel        update_noise   smooth_noise
-1                   1                    aspect=2.0    true           false
+1                   1                    aspect=2.0    true           0.0

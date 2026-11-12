@@ -31,4 +31,4 @@
 # level in every iteration by definition (its output is that estimate).
 #
 spatial_subsample   temporal_subsample   kernel        smooth_noise
-2                   1                    aspect=2.0    false
+2                   1                    aspect=2.0    10.0
