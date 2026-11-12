@@ -1068,27 +1068,27 @@ void run() {
     //   kernel, which reads r from -fixed_rank).
     iterations = Schedule::load_bundled("dwidenoise2", "fixedrank", rank_density_supplied);
   } else if (vst_none) {
-    const ssize_t f = (aggregator == aggregator_type::EXCLUSIVE) ? ssize_t(1) : default_spatial_subsample_ratio;
-    // The bundled "default" schedule is deliberately NOT loaded here. Because the user did not
-    //   choose the schedule that is used instead -- and because it is not any of the bundled
-    //   files, so cannot be inspected -- state its content explicitly rather than merely
-    //   announcing that a single pass is performed.
+    // The bundled "default" schedule is deliberately NOT loaded here. Since the user did not choose
+    //   the schedule that is used in its place, name the one that is, so that it can be inspected
+    //   (and copied as the starting point for a bespoke one) rather than merely announcing that a
+    //   single pass is performed.
+    //   Two such schedules are bundled, differing only in spatial sub-sampling: -aggregator
+    //   exclusive requires the final (here, only) row to have none.
+    const bool exclusive = aggregator == aggregator_type::EXCLUSIVE;
+    const std::string schedule_name = exclusive ? "novst_exclusive" : "novst";
     WARN("-vst_method none: no variance-stabilising transform is applied, so iteratively refining "
          "the noise level estimate cannot influence subsequent iterations and would be wasted "
-         "computation. The bundled \"default\" schedule is therefore NOT used; a single pass is "
-         "performed instead, equivalent to the one-row schedule \"spatial_subsample " +
-         str(f) +
-         "  temporal_subsample 1.0  update_noise true  smooth_noise false  kernel aspect=2.0\". "
-         "Use -schedule to choose a different (single-row) schedule explicitly");
-    Iterative::Iteration config;
-    config.spatial_subsample_ratios = {f, f, f};
-    // Single pass (no prior rank map): aspect ratio n ~ 2m.
-    config.kernel.type = Kernel::kernel_spec_type::ASPECT_RATIO;
-    config.kernel.param = 2.0;
-    config.smooth_noiseout = noise_smooth_type::NONE;
-    config.temporal_subsample = 1.0;
-    config.update_noise = true; // a single-pass schedule must estimate the noise level
-    iterations.push_back(config);
+         "computation. The bundled \"default\" schedule is therefore NOT used; the bundled "
+         "single-row \"" + schedule_name + "\" schedule is used instead. Use -schedule to choose a "
+         "different (single-row) schedule explicitly");
+    INFO("-vst_method none: selected bundled schedule \"" + schedule_name + "\" " +
+         (exclusive ? "(no spatial sub-sampling) as -aggregator exclusive requires the final iteration "
+                      "to reconstruct at every voxel"
+                    : "(default spatial sub-sampling) as the requested aggregator "
+                      "permits a sub-sampled reconstruction grid") +
+         "; the alternative bundled schedule \"" + (exclusive ? "novst" : "novst_exclusive") +
+         "\" applies to the other choice of aggregation");
+    iterations = Schedule::load_bundled("dwidenoise2", schedule_name, rank_density_supplied);
   } else {
     iterations = Schedule::load_default("dwidenoise2", rank_density_supplied);
     Schedule::warn_if_default_schedule_slow(Denoise::num_volumes(dwi));
