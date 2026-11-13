@@ -805,7 +805,7 @@ SliceEstimate estimate_slice(std::vector<Group> &groups,
   //   reported.
   const auto conclude = [&result, &parameters]() {
     result.decline = test_gamma_consistency(result, parameters);
-    result.estimated = result.decline.empty();
+    result.outcome = result.decline.empty() ? slice_outcome_t::ESTIMATED : slice_outcome_t::FAILED;
     return result;
   };
 
@@ -904,7 +904,7 @@ void mark_selected(const std::vector<Group> &groups,
                    const SliceEstimate &slice,
                    const BackgroundParameters &parameters,
                    std::vector<uint8_t> &selected) {
-  if (!slice.estimated)
+  if (!slice.estimated())
     return;
   for (const Group &group : groups) {
     const default_type alpha = default_type(group.count) * slice.dof / 2.0;
@@ -1144,7 +1144,12 @@ default_type BackgroundResult::dof_at_slice(const ssize_t slice) const {
   assert(estimated);
   if (slice < 0 || size_t(slice) >= slices.size())
     return dof;
-  return slices[slice].estimated ? slices[slice].dof : dof;
+  return slices[slice].estimated() ? slices[slice].dof : dof;
+}
+
+size_t BackgroundResult::count(const slice_outcome_t outcome) const {
+  return size_t(std::count_if(
+      slices.begin(), slices.end(), [outcome](const SliceEstimate &slice) { return slice.outcome == outcome; }));
 }
 
 BackgroundResult estimate_background(const Accumulation &accumulation,
@@ -1221,7 +1226,8 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
     SliceEstimate &estimate = result.slices[size_t(slice)];
     estimate.index = slice;
     if (indices.empty()) {
-      estimate.decline = "no voxel of this slice provided a usable magnitude in any volume";
+      estimate.outcome = slice_outcome_t::NO_SIGNAL;
+      estimate.decline = "the slice holds no data: every sample of every voxel is zero or non-finite";
       continue;
     }
 
@@ -1248,7 +1254,7 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
     std::vector<Group> groups;
     const bool censor = has_zeros && threshold > 0.0;
     estimate = attempt(censor, groups);
-    if (censor && !(estimate.estimated && zeros_consistent(estimate, threshold, parameters))) {
+    if (censor && !(estimate.estimated() && zeros_consistent(estimate, threshold, parameters))) {
       estimate = attempt(false, groups);
       estimate.zeros_excluded = true;
     } else if (has_zeros && !censor) {
@@ -1256,7 +1262,7 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
     }
     estimate.index = slice;
     estimate.censoring_threshold = threshold;
-    if (estimate.estimated) {
+    if (estimate.estimated()) {
       result.num_selected_total += estimate.num_selected;
       if (estimate.zeros_excluded)
         ++result.num_slices_zeros_excluded;
@@ -1285,15 +1291,18 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
   std::vector<default_type> dofs;
   std::vector<default_type> sigmas;
   for (const SliceEstimate &slice : result.slices) {
-    if (!slice.estimated)
+    if (!slice.estimated())
       continue;
     dofs.push_back(slice.dof);
     sigmas.push_back(slice.sigma);
   }
   if (dofs.size() < parameters.min_slices) {
-    result.decline = "only " + str(dofs.size()) + " of " + str(num_slices) +
-                     " slices yielded an estimate of the noise distribution (at least " +
-                     str(parameters.min_slices) + " are required)";
+    const size_t num_no_signal = result.count(slice_outcome_t::NO_SIGNAL);
+    result.decline =
+        "only " + str(dofs.size()) + " of " + str(num_slices) +
+        " slices yielded an estimate of the noise distribution (at least " + str(parameters.min_slices) +
+        " are required)" +
+        (num_no_signal > 0 ? "; " + str(num_no_signal) + " of the slices hold no data at all" : std::string());
     return result;
   }
   if (result.num_selected_total < parameters.min_voxels_total) {
@@ -1355,7 +1364,7 @@ std::vector<std::string> estimate_caveats(const BackgroundResult &result) {
 
   std::vector<default_type> samples;
   for (const SliceEstimate &slice : result.slices) {
-    if (slice.estimated)
+    if (slice.estimated())
       samples.push_back(default_type(slice.num_selected) * default_type(result.num_volumes));
   }
   default_type threshold = max_relative_dof_iqr;

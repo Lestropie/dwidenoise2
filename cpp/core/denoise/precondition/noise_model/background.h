@@ -102,8 +102,18 @@ enum class background_method_t { NONE, MOMENTS, ML };
 
 // Whether the per-slice estimates are reduced to one value for the whole image or retained.
 // - GLOBAL: their median (see BackgroundResult::dof).
-// - SLICE: each slice keeps its own, with the global median standing in for slices that declined.
+// - SLICE: each slice keeps its own; every slice holding data must yield one (see slice_outcome_t).
 enum class background_scope_t { GLOBAL, SLICE };
+
+// What one slice yielded.
+// - ESTIMATED: a converged estimate that passed every check.
+// - NO_SIGNAL: the slice holds no data at all -- every sample of every voxel is zero or non-finite,
+//     as in the zero-filled slices that padding or resampling of the field of view leaves. Nothing
+//     can be estimated there, but neither is anything lost: whatever the transform applied, the
+//     voxels of the slice are constant across volumes. A slice of pure noise is NOT of this kind; it
+//     is background throughout, and is fitted like any other.
+// - FAILED: the slice holds data, but no estimate could be obtained from them.
+enum class slice_outcome_t { ESTIMATED, NO_SIGNAL, FAILED };
 
 // Tuning constants of the algorithm. The first group follows the paper and its reference
 //   implementation; the second group is this implementation's guards against answering where the
@@ -306,7 +316,8 @@ Estimate estimate_from_sums(const SampleSums &sums, const background_method_t me
 class SliceEstimate {
 public:
   ssize_t index{0};
-  bool estimated{false};
+  slice_outcome_t outcome{slice_outcome_t::FAILED};
+  bool estimated() const { return outcome == slice_outcome_t::ESTIMATED; }
   default_type dof{0.0};
   default_type sigma{0.0};
   // Voxels accepted as background, and outer iterations taken. Both are reported even where the
@@ -335,7 +346,7 @@ public:
   //   was refused. Set whether the test passed or not, so that a declined slice reports by how much.
   default_type gamma_ratio{std::numeric_limits<default_type>::quiet_NaN()};
   default_type gamma_ratio_z{std::numeric_limits<default_type>::quiet_NaN()};
-  // Why this slice yielded no estimate; empty iff estimated.
+  // Why this slice yielded no estimate; empty iff estimated().
   std::string decline;
 };
 
@@ -386,8 +397,11 @@ public:
   std::vector<uint8_t> selected;
   std::array<ssize_t, 3> size{{0, 0, 0}};
   // The degrees of freedom to apply at a given slice: that slice's own estimate where it has one,
-  //   and the global median otherwise. Requires estimated == true.
+  //   and the global median otherwise (which slice-wise scope permits only for NO_SIGNAL slices).
+  //   Requires estimated == true.
   default_type dof_at_slice(const ssize_t slice) const;
+  // Number of slices with the given outcome.
+  size_t count(const slice_outcome_t outcome) const;
 };
 
 // Run the paper's Algorithm 1 over every slice of an accumulated image and reduce the result.

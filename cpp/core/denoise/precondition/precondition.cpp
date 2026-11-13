@@ -84,7 +84,7 @@ const char *const noise_channels_description =
     " (for example, 3.76 has been measured for a nominally 12-element head coil)."
     " It is the quantity that a fit of the noise distribution to the data estimates,"
     " as performed by -noise_dof_method (see below)."
-    " If neither option is given, and no such fit was requested or it did not succeed,"
+    " If neither option is given, and no such fit was requested,"
     " the count is inferred from the image header metadata where they permit it:"
     " the coil combination mode is read from \"CoilCombinationMethod\""
     " (or from a declaration of SENSE1 combination in the image comments,"
@@ -151,6 +151,10 @@ const char *const noise_dof_estimation_description =
     " 'none', the default, disables the estimation,"
     " leaving the degrees of freedom to be taken from -noise_channels / -noise_dof"
     " or inferred from the image header metadata as described above."
+    " Where an estimator is selected but the estimation does not succeed,"
+    " the command terminates with an error rather than falling back on the header metadata or the Rician default,"
+    " unless -noise_channels or -noise_dof is also given, in which case that value is used"
+    " and the failure to corroborate it is reported with a warning."
     " The estimation is applicable only to magnitude input data,"
     " and is performed only where a non-linear variance-stabilising transform (-vst_method foi, koay or mom)"
     " is to make use of its result.";
@@ -161,18 +165,27 @@ const char *const noise_dof_selection_description =
     " Estimation of the degrees of freedom from the data is performed independently for each slice,"
     " with slices separated along the axis indicated by the \"SliceEncodingDirection\" header key-value"
     " where present, and along the third spatial axis otherwise (this can be overridden using -noise_dof_axis)."
-    " A slice from which too few background voxels are identified yields no estimate;"
-    " the procedure declines altogether if too few slices yield an estimate,"
+    " A slice from which too few background voxels are identified,"
+    " or whose voxels selected fail the test of consistency with a single Gamma distribution (see below),"
+    " yields no estimate;"
+    " so too does a slice that holds no data at all (every sample zero or non-finite, as in the slices"
+    " that padding or resampling of the field of view leaves), which is distinguished from a failure."
+    " A slice that contains no tissue is not of this kind: it is background throughout, and is fitted as such."
+    " The procedure declines altogether if fewer than three slices yield an estimate,"
     " or if the majority of the field of view is identically zero in every volume."
     " Option -noise_dof_scope determines whether one value of the degrees of freedom is used"
     " for the whole image or one per slice;"
     " the estimation itself is performed per slice in either case."
     " By default (-noise_dof_scope global), the per-slice estimates are reduced to their median,"
     " which is robust to slices at the extremities of the field of view"
-    " and to those contaminated by wrap-around or slice leakage."
+    " and to those contaminated by wrap-around or slice leakage;"
+    " any slice holding data that yields no estimate is excluded from that median,"
+    " and the number of such slices is reported with a warning."
     " With -noise_dof_scope slice, the per-slice estimates are instead retained,"
-    " and a separate variance-stabilising transform is constructed for each slice,"
-    " with any slice that yielded no estimate of its own taking the global median."
+    " and a separate variance-stabilising transform is constructed for each slice;"
+    " every slice that holds data must then yield an estimate,"
+    " the command terminating with an error otherwise,"
+    " and only slices that hold no data at all take the global median."
     " Because parallel imaging makes the effective channel count vary over space,"
     " slice-wise estimates may be closer to the truth;"
     " they are however individually noisier, being fitted from the background voxels of one slice only."
@@ -330,7 +343,7 @@ namespace {
 std::string describe_estimate(const NoiseModelOptions &options, const NoiseModel::BackgroundResult &background) {
   size_t estimated = 0;
   for (const auto &slice : background.slices)
-    estimated += slice.estimated ? 1 : 0;
+    estimated += slice.estimated() ? 1 : 0;
   return std::string(options.background_method == NoiseModel::background_method_t::ML
                          ? "maximum likelihood fit"
                          : "method-of-moments fit") +
@@ -339,9 +352,10 @@ std::string describe_estimate(const NoiseModelOptions &options, const NoiseModel
          str(background.dof_iqr, 3) + " degrees of freedom";
 }
 
-// The per-slice table of -noise_dof_out. Slices that declined are written with the voxel count they
-//   did achieve and with empty estimate fields, so that the file distinguishes "estimated as this"
-//   from "could not estimate" rather than conflating the two into a blank row.
+// The per-slice table of -noise_dof_out. Slices that declined, or that hold no data, are written
+//   with the voxel count they did achieve, with empty estimate fields and with the reason as the
+//   comment, so that the file distinguishes "estimated as this" from "could not estimate" rather
+//   than conflating the two into a blank row.
 void write_dof_table(const std::string &path,
                      const NoiseModelOptions &options,
                      const NoiseModel::BackgroundResult &background) {
@@ -361,14 +375,14 @@ void write_dof_table(const std::string &path,
   out << "slice\tdof\tchannels\tsigma\tvoxels\titerations\tconverged\tgamma_ratio\tcomment\n";
   for (const auto &slice : background.slices) {
     out << slice.index << "\t";
-    if (slice.estimated)
+    if (slice.estimated())
       out << slice.dof << "\t" << 0.5 * slice.dof << "\t" << slice.sigma << "\t";
     else
       out << "\t\t\t";
-    out << slice.num_selected << "\t" << slice.num_iterations << "\t" << (slice.estimated ? 1 : 0) << "\t";
+    out << slice.num_selected << "\t" << slice.num_iterations << "\t" << (slice.estimated() ? 1 : 0) << "\t";
     if (std::isfinite(slice.gamma_ratio))
       out << slice.gamma_ratio;
-    out << "\t" << (slice.estimated ? std::string() : slice.decline) << "\n";
+    out << "\t" << (slice.estimated() ? std::string() : slice.decline) << "\n";
   }
   INFO("Exported per-slice noise distribution estimates to \"" + path + "\"");
 }
@@ -535,8 +549,10 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
       NoiseModel::accumulate_background(input, options.background_slice_axis);
   result = NoiseModel::estimate_background(accumulation, options.background_method);
 
+  // Braced throughout: INFO() and WARN() each expand to an unbraced if, to which an else following
+  //   them would otherwise bind.
   for (const auto &slice : result.slices) {
-    if (slice.estimated)
+    if (slice.estimated()) {
       INFO("Noise distribution at slice " + str(slice.index) + ": " + str(slice.dof, 4) + " degrees of freedom, " +
            "sigma " + str(slice.sigma, 4) + ", from " + str(slice.num_selected) + " voxels in " +
            str(slice.num_iterations) + " iterations, Gamma consistency ratio " + str(slice.gamma_ratio, 3) +
@@ -544,16 +560,72 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
             : slice.num_zero > 0 ? "; " + str(slice.num_zero) + " zero-valued samples treated as censored below " +
                                        str(slice.censoring_threshold, 4)
                                  : std::string()));
-    else
+    } else {
       INFO("No noise distribution estimate at slice " + str(slice.index) + ": " + slice.decline);
+    }
   }
-  if (!result)
-    WARN("Unable to estimate the noise distribution from the voxels of these data that contain noise alone: " +
-         result.decline +
-         ". The degrees of freedom will instead be taken from the image header metadata where they permit it, "
-         "and from the Rician default otherwise");
   for (const std::string &caveat : NoiseModel::estimate_caveats(result))
     WARN(caveat);
+
+  // Estimation from the data is opt-in, and while it awaits validation on a broader range of real
+  //   data every imperfection of it is made prominent. Where it was requested and did not succeed,
+  //   nothing falls back silently to the header metadata or to the Rician default: that is a choice
+  //   for the user to make, by omitting -noise_dof_method. The exception is a value imposed via
+  //   -noise_channels / -noise_dof, which is what would be used whatever the estimate, the estimate
+  //   then serving only to corroborate it.
+  const bool user_specified = options.user_dof.has_value();
+  const bool slicewise = options.background_scope == NoiseModel::background_scope_t::SLICE;
+  const size_t num_slices = result.slices.size();
+  const size_t num_failed = result.count(NoiseModel::slice_outcome_t::FAILED);
+  const size_t num_no_signal = result.count(NoiseModel::slice_outcome_t::NO_SIGNAL);
+  const std::string no_signal_phrase = num_no_signal > 0
+                                           ? str(num_no_signal) + " of " + str(num_slices) +
+                                                 " slices hold no data at all (every sample zero or non-finite)"
+                                           : std::string();
+  std::optional<Exception> failure;
+  if (!result) {
+    if (user_specified) {
+      WARN("Unable to estimate the noise distribution from the voxels of these data that contain noise alone: " +
+           result.decline + ". The value supplied via -" + options.user_option +
+           " is used, but cannot be corroborated against the data");
+    } else {
+      failure = Exception("Unable to estimate the noise distribution from the voxels of these data that contain "
+                          "noise alone, as requested via -noise_dof_method: " +
+                          result.decline +
+                          ". Per-slice outcomes are reported at -info, and -noise_dof_out / -noise_voxels_out"
+                          " export the per-slice estimates and the voxels selected. To proceed without"
+                          " estimation, supply -noise_channels or -noise_dof, or omit -noise_dof_method to have"
+                          " the degrees of freedom inferred from the image header metadata where they permit"
+                          " it and the Rician default assumed otherwise");
+    }
+  } else if (slicewise && num_failed > 0) {
+    // A slice-wise transform cannot be constructed for a slice whose distribution is not known, and
+    //   substituting the median there would apply a value that the slice-wise scope was requested in
+    //   order to avoid.
+    Exception e("Option -noise_dof_scope slice requires an estimate of the noise distribution from every slice"
+                " that holds data, but " +
+                str(num_failed) + " of " + str(num_slices) + " slices yielded none" +
+                (num_no_signal > 0 ? " (a further " + no_signal_phrase + ")" : std::string()) +
+                ". -noise_dof_scope global would apply the median over the " +
+                str(result.count(NoiseModel::slice_outcome_t::ESTIMATED)) +
+                " slices that did; -noise_dof_out and -noise_voxels_out export the per-slice estimates"
+                " and the voxels selected. The slices that yielded no estimate:");
+    for (const auto &slice : result.slices) {
+      if (slice.outcome == NoiseModel::slice_outcome_t::FAILED)
+        e.push_back("slice " + str(slice.index) + ": " + slice.decline);
+    }
+    failure = std::move(e);
+  } else if (num_failed > 0) {
+    WARN("Estimation of the noise distribution from the data yielded no estimate in " + str(num_failed) + " of " +
+         str(num_slices) + " slices" + (num_no_signal > 0 ? " (a further " + no_signal_phrase + ")" : std::string()) +
+         "; proceeding with the median over the " + str(result.count(NoiseModel::slice_outcome_t::ESTIMATED)) +
+         " slices that yielded one (per-slice reasons are reported at -info)");
+  } else if (num_no_signal > 0) {
+    INFO(no_signal_phrase + " and yield no estimate of the noise distribution" +
+         (slicewise ? "; their transform takes the global median, which has no effect on voxels that are "
+                      "constant across volumes"
+                    : "; the median is taken over the remaining slices"));
+  }
 
   // .as_text() rather than an implicit conversion: App::ParsedArgument asserts in debug builds when
   //   a filesystem-typed argument is converted to std::string.
@@ -563,6 +635,10 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
   opt = get_options("noise_voxels_out");
   if (!opt.empty())
     write_voxel_mask(opt[0][0].as_text(), input, result);
+  // Thrown only once the diagnostic exports are written, as they are what is needed to understand
+  //   the failure.
+  if (failure)
+    throw *failure;
   return result;
 }
 
@@ -616,20 +692,23 @@ NoiseModel::Set make_noise_model(const NoiseModelOptions &options,
                                     data_evidence,
                                     options.background_method != NoiseModel::background_method_t::NONE);
 
-  // Slice-wise scope, which only a successful estimate that the user has not overridden can supply.
+  // Slice-wise scope, which only a successful estimate that the user has not overridden can supply;
+  //   estimate_background_dof() has already refused one in which any slice holding data failed, so
+  //   the global median stands in only for slices that hold no data at all.
   if (options.background_scope == NoiseModel::background_scope_t::SLICE && background && !user_specified) {
     std::vector<default_type> dof_per_slice(background.slices.size());
     size_t num_fallback = 0;
     for (size_t slice = 0; slice != background.slices.size(); ++slice) {
+      assert(background.slices[slice].outcome != NoiseModel::slice_outcome_t::FAILED);
       dof_per_slice[slice] = background.dof_at_slice(ssize_t(slice));
-      num_fallback += background.slices[slice].estimated ? 0 : 1;
+      num_fallback += background.slices[slice].estimated() ? 0 : 1;
     }
     NoiseModel::Set models =
         NoiseModel::make_slicewise(dof_per_slice, background.slice_axis, options.vst_method);
     INFO("Built " + str(models.num_distinct_models()) + " distinct variance-stabilising transforms for " +
          str(dof_per_slice.size()) + " slices" +
-         (num_fallback > 0 ? "; " + str(num_fallback) + " slices yielded no estimate of their own and take the "
-                             "global median of " + str(dof, 4) + " degrees of freedom"
+         (num_fallback > 0 ? "; " + str(num_fallback) + " slices hold no data and take the global median of " +
+                                 str(dof, 4) + " degrees of freedom"
                            : ""));
     return models;
   }

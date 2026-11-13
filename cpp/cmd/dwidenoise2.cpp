@@ -573,7 +573,8 @@ void run(Header &dwi,
   //   estimator being defined on magnitudes; complex data carry two degrees of freedom per sample by
   //   construction in any case.
   // Where magnitude data receive a non-linear transform and no value was either provided or
-  //   estimated, the effective receive-channel count is instead inferred from the header key-values.
+  //   requested to be estimated, the effective receive-channel count is instead inferred from the
+  //   header key-values. A requested estimate that does not succeed is an error, not a fallback.
   const NoiseModelOptions noise_options = noise_model_options(is_complex<T>::value, dwi);
   NoiseModel::BackgroundResult background;
   if constexpr (!is_complex<T>::value)

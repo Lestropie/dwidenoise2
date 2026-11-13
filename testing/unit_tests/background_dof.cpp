@@ -66,6 +66,10 @@
 //    noise level differs between volumes. Each of the latter two is shown to give a wrong estimate
 //    with the test disabled.
 //
+// 7. SLICE OUTCOMES. A slice containing no tissue is background throughout and is fitted like any
+//    other, whereas one holding no data at all (every sample zero, as padding leaves) is classified
+//    as such rather than as a failure.
+//
 // Modes:
 //   (no arguments)     regression test; non-zero exit status on failure.
 //   --evidence         print the full tables, including the larger sample sizes.
@@ -100,6 +104,7 @@ using MR::Denoise::Precondition::NoiseModel::estimate_background;
 using MR::Denoise::Precondition::NoiseModel::estimate_caveats;
 using MR::Denoise::Precondition::NoiseModel::estimate_from_sums;
 using MR::Denoise::Precondition::NoiseModel::SampleSums;
+using MR::Denoise::Precondition::NoiseModel::slice_outcome_t;
 using MR::Denoise::Precondition::NoiseModel::SliceEstimate;
 using MR::Denoise::Precondition::NoiseModel::VoxelStats;
 using MR::Math::digamma;
@@ -782,9 +787,10 @@ void test_algorithm(std::FILE *out, std::FILE *tsv) {
       clean_ml = result;
     check_relative(result.dof, clean.dof, 0.05, std::string(name) + ": global degrees of freedom");
     for (const auto &slice : result.slices) {
-      check(slice.estimated,
-            std::string(name) + ": slice " + std::to_string(slice.index) + " yields an estimate (" + slice.decline + ")");
-      if (!slice.estimated)
+      check(slice.estimated(),
+            std::string(name) + ": slice " + std::to_string(slice.index) + " yields an estimate (" + slice.decline +
+                ")");
+      if (!slice.estimated())
         continue;
       check_relative(slice.dof, clean.dof, 0.05, std::string(name) + ": slice degrees of freedom");
       check_relative(slice.sigma,
@@ -908,8 +914,8 @@ void test_algorithm(std::FILE *out, std::FILE *tsv) {
     if (!result)
       continue;
     check_relative(result.dof, dof_true, 0.05, "resampled dof=" + std::to_string(dof_true) + ": dof unchanged");
-    check(!result.slices.empty() && result.slices[0].estimated, "resampled: the first slice yields an estimate");
-    if (!result.slices.empty() && result.slices[0].estimated) {
+    check(!result.slices.empty() && result.slices[0].estimated(), "resampled: the first slice yields an estimate");
+    if (!result.slices.empty() && result.slices[0].estimated()) {
       check_relative(result.slices[0].sigma,
                      slice_sigma(spec, 0) / std::sqrt(2.0),
                      0.05,
@@ -958,7 +964,7 @@ void test_algorithm(std::FILE *out, std::FILE *tsv) {
     check_relative(result.dof, spec.dof, 0.05, name + ": global degrees of freedom");
     check(counts.signal_selected == 0, name + ": no signal-bearing voxel is selected");
     for (const auto &slice : result.slices)
-      check(slice.estimated,
+      check(slice.estimated(),
             name + ": slice " + std::to_string(slice.index) + " yields an estimate (" + slice.decline + ")");
   }
 }
@@ -1030,7 +1036,7 @@ void test_caveats(std::FILE *out) {
     result.num_volumes = volumes;
     result.slices.resize(8);
     for (SliceEstimate &slice : result.slices) {
-      slice.estimated = true;
+      slice.outcome = slice_outcome_t::ESTIMATED;
       slice.dof = dof;
       slice.num_selected = voxels;
     }
@@ -1449,7 +1455,7 @@ void report_gamma(std::FILE *out, const std::string &name, const BackgroundResul
     std::fprintf(out, "dof=%.4f; ", result.dof);
   std::fprintf(out, "per-slice ratio:");
   for (const SliceEstimate &slice : result.slices)
-    std::fprintf(out, " %.3f%s", slice.gamma_ratio, slice.estimated ? "" : "x");
+    std::fprintf(out, " %.3f%s", slice.gamma_ratio, slice.estimated() ? "" : "x");
   std::fprintf(out, "\n");
 }
 
@@ -1488,7 +1494,7 @@ void test_gamma_consistency(std::FILE *out) {
       report_gamma(out, name, result);
       check(bool(result), name + ": an estimate is produced");
       for (const SliceEstimate &slice : result.slices) {
-        check(slice.estimated,
+        check(slice.estimated(),
               name + ": slice " + std::to_string(slice.index) + " yields an estimate (" + slice.decline + ")");
         check(std::isfinite(slice.gamma_ratio) && slice.gamma_ratio > 0.97,
               name + ": slice " + std::to_string(slice.index) + " is well clear of the floor");
@@ -1510,7 +1516,7 @@ void test_gamma_consistency(std::FILE *out) {
     report_gamma(out, name + " (untested)", ungated);
     size_t tissue_estimated = 0;
     for (ssize_t z = spec.first_overfilled; z != spec.nz; ++z) {
-      if (ungated.slices[size_t(z)].estimated && tissue_fraction(spec, ungated, z) > 0.5)
+      if (ungated.slices[size_t(z)].estimated() && tissue_fraction(spec, ungated, z) > 0.5)
         ++tissue_estimated;
     }
     check(tissue_estimated == size_t(spec.nz - spec.first_overfilled),
@@ -1522,10 +1528,11 @@ void test_gamma_consistency(std::FILE *out) {
     for (ssize_t z = 0; z != spec.nz; ++z) {
       const SliceEstimate &slice = result.slices[size_t(z)];
       if (z < spec.first_overfilled) {
-        check(slice.estimated, name + ": slice " + std::to_string(z) + ", which holds background, yields an estimate");
+        check(slice.estimated(),
+              name + ": slice " + std::to_string(z) + ", which holds background, yields an estimate");
         check(tissue_fraction(spec, result, z) == 0.0, name + ": no tissue is selected where background exists");
       } else {
-        check(!slice.estimated, name + ": overfilled slice " + std::to_string(z) + " declines");
+        check(!slice.estimated(), name + ": overfilled slice " + std::to_string(z) + " declines");
         check(slice.decline.find(gamma_phrase) != std::string::npos,
               name + ": overfilled slice " + std::to_string(z) + " declines by the Gamma consistency test (" +
                   slice.decline + ")");
@@ -1563,6 +1570,93 @@ void test_gamma_consistency(std::FILE *out) {
             name + ": slice " + std::to_string(slice.index) + " declines by the Gamma consistency test (" +
                 slice.decline + ")");
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Slice outcomes
+// ---------------------------------------------------------------------------
+
+// Slices of three kinds along the third axis: 'T' the clean phantom's ellipsoid in background, 'N'
+//   background alone, 'Z' identically zero in every volume.
+MR::Image<float> make_outcome_phantom(const std::string &kinds, const ssize_t n, const unsigned seed) {
+  PhantomSpec geometry;
+  geometry.nx = geometry.ny = n;
+  geometry.nz = ssize_t(kinds.size());
+  MR::Image<float> image = MR::Image<float>::scratch(phantom_header(geometry), "slice outcome phantom");
+  RNG rng(seed);
+  for (ssize_t z = 0; z != geometry.nz; ++z) {
+    image.index(2) = z;
+    const char kind = kinds[size_t(z)];
+    for (ssize_t y = 0; y != n; ++y) {
+      image.index(1) = y;
+      for (ssize_t x = 0; x != n; ++x) {
+        image.index(0) = x;
+        const bool signal = kind == 'T' && in_signal(geometry, x, y);
+        for (ssize_t volume = 0; volume != geometry.nvol; ++volume) {
+          image.index(3) = volume;
+          image.value() = kind == 'Z'
+                              ? 0.0F
+                              : float(sample_magnitude(signal ? geometry.snr : 0.0, geometry.dof, geometry.sigma, rng));
+        }
+      }
+    }
+  }
+  image.index(3) = 0;
+  return image;
+}
+
+void test_slice_outcomes(std::FILE *out) {
+  for (const background_method_t method : {background_method_t::ML, background_method_t::MOMENTS}) {
+    const std::string name = method == background_method_t::ML ? "outcomes (ml)" : "outcomes (moments)";
+    const std::string kinds = "ZNTTTTNZ";
+    MR::Image<float> image = make_outcome_phantom(kinds, 64, 313131u);
+    const BackgroundResult result = run_phantom(image, method);
+    std::fprintf(out, "%-26s", name.c_str());
+    for (const SliceEstimate &slice : result.slices)
+      std::fprintf(out,
+                   " %c:%s",
+                   kinds[size_t(slice.index)],
+                   slice.outcome == slice_outcome_t::ESTIMATED   ? "ok"
+                   : slice.outcome == slice_outcome_t::NO_SIGNAL ? "none"
+                                                                 : "fail");
+    std::fprintf(out, "\n");
+    check(bool(result), name + ": the image yields an estimate");
+    check(result.count(slice_outcome_t::NO_SIGNAL) == 2 && result.count(slice_outcome_t::FAILED) == 0 &&
+              result.count(slice_outcome_t::ESTIMATED) == 6,
+          name + ": two slices hold no data, and none fails");
+    for (const SliceEstimate &slice : result.slices) {
+      const char kind = kinds[size_t(slice.index)];
+      const std::string label = name + ": slice " + std::to_string(slice.index) + " (" + kind + ")";
+      if (kind == 'Z') {
+        check(slice.outcome == slice_outcome_t::NO_SIGNAL && !slice.estimated(), label + " holds no data");
+        continue;
+      }
+      check(slice.estimated(), label + " yields an estimate");
+      check_relative(slice.dof, 8.0, 0.05, label + " recovers the degrees of freedom");
+      // Background throughout: almost every voxel of the slice is selected, which no slice holding
+      //   the ellipsoid can achieve.
+      if (kind == 'N')
+        check(slice.num_selected > size_t(0.9 * 64 * 64), label + " selects the slice almost entirely");
+    }
+    check_relative(
+        result.dof_at_slice(0), result.dof, 1.0e-12, name + ": a slice holding no data takes the global median");
+  }
+
+  // Where too few slices hold data for an estimate, the decline says that the rest hold none, so
+  //   that it is not read as a failure of the estimator.
+  {
+    //   (The floor on the number of slices is raised rather than more slices zeroed, since a field
+    //   of view mostly zero is declined on that account before any slice is examined.)
+    BackgroundParameters parameters;
+    parameters.min_slices = 7;
+    MR::Image<float> image = make_outcome_phantom("ZNNNNNNZ", 64, 414141u);
+    const BackgroundResult result = run_phantom(image, background_method_t::ML, parameters);
+    check(!result, "outcomes: six slices holding data are too few for an estimate where seven are required");
+    check(result.count(slice_outcome_t::NO_SIGNAL) == 2 && result.count(slice_outcome_t::ESTIMATED) == 6,
+          "outcomes: two slices hold no data, and the other six yield an estimate");
+    check(result.decline.find("2 of the slices hold no data") != std::string::npos,
+          "outcomes: the decline reports the slices that hold no data");
   }
 }
 
@@ -1604,6 +1698,7 @@ int main(int argc, char **argv) {
   test_quantum_detection(out);
   test_zero_phantoms(out);
   test_gamma_consistency(out);
+  test_slice_outcomes(out);
 
   if (tsv != nullptr)
     std::fclose(tsv);

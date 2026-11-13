@@ -123,9 +123,11 @@ NoiseModelOptions noise_model_options(const bool complex, const Header &H);
 // Estimate the degrees of freedom of the magnitude noise distribution from the voxels of the input
 //   that contain noise alone (St-Jean et al. 2020; see noise_model/background.h), and write the
 //   diagnostics requested via -noise_dof_out / -noise_voxels_out.
-// Returns an unpopulated result where no estimation was requested, and one carrying the reason
-//   where it was requested but could not be completed; in both cases the caller falls through to
-//   the next route by which the degrees of freedom may be obtained.
+// Returns an unpopulated result where no estimation was requested. Where it was requested, throws
+//   (after writing those diagnostics) if no global estimate was obtained and the user supplied no
+//   value of their own, or if -noise_dof_scope slice is in effect and any slice holding data failed
+//   to yield an estimate; under global scope, failed slices are reported with a single warning. A
+//   declined result is returned only where the user's value is to be used regardless.
 // Declared for the real-valued image types only: complex data have two degrees of freedom per
 //   sample by construction, so the calling command excludes this pass at compile time.
 template <class ImageType>
@@ -139,9 +141,10 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
 //   count. They are resolved in order of precedence from -noise_dof / -noise_channels, then
 //   "background" (the estimate made from the data themselves), then the key-values of "H" (see
 //   NoiseModel::resolve_noise_dof), falling back to the Rician default where none of those permits
-//   a value to be established.
-//   Where -noise_dof_scope slice is in effect and the estimation produced per-slice values, the
-//   result holds one model per slice; otherwise it holds one.
+//   a value to be established. An estimate that was requested but did not succeed never reaches
+//   that fallback: estimate_background_dof() throws instead, unless the user supplied a value.
+//   Where -noise_dof_scope slice is in effect, the result holds one model per slice; otherwise it
+//   holds one.
 //   "H" is the header of the input image as opened by the calling command, whose key-values are
 //   those of DICOM provenance; it is interrogated only on the code path where the degrees of
 //   freedom have an effect, so no message is emitted about a quantity that the selected transform
