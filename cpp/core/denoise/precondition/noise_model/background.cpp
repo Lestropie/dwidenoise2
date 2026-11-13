@@ -743,10 +743,43 @@ bool has_converged(const default_type dof,
   return d_dof < eps * dof && d_sigma < eps * sigma;
 }
 
+// The test of a converged selection's consistency with a single Gamma distribution (see
+//   BackgroundParameters::gamma_ratio_floor). Sets SliceEstimate::gamma_ratio and gamma_ratio_z, and
+//   returns why the selection fails the test, or an empty string where it passes. Both estimators
+//   are evaluated on the same sums whichever of them the user chose, with the zeros censored where
+//   the sums carry them, so the test is of the model actually fitted.
+std::string test_gamma_consistency(SliceEstimate &slice, const BackgroundParameters &parameters) {
+  const Estimate moments = estimate_from_sums(slice.sums, background_method_t::MOMENTS);
+  const Estimate ml = estimate_from_sums(slice.sums, background_method_t::ML);
+  if (!moments || !ml) {
+    return "the consistency of the voxels selected with a single Gamma distribution could not be tested (" +
+           (moments ? ml.failure : moments.failure) + ")";
+  }
+  const default_type shape = 0.5 * ml.dof;
+  const default_type num_samples = default_type(slice.sums.count + slice.sums.num_zero);
+  const default_type variance =
+      std::max(0.0, 2.0 * (shape + 1.0) / shape - 1.0 / (shape * shape * (trigamma(shape) - 1.0 / shape)));
+  const default_type log_ratio = std::log(moments.dof / ml.dof);
+  slice.gamma_ratio = moments.dof / ml.dof;
+  slice.gamma_ratio_z = variance > 0.0 ? log_ratio / std::sqrt(variance / num_samples)
+                                       : -std::numeric_limits<default_type>::infinity();
+  if (slice.gamma_ratio < parameters.gamma_ratio_floor && slice.gamma_ratio_z < -parameters.gamma_ratio_z) {
+    return "the voxels selected are not consistent with a single Gamma distribution (the method-of-moments and"
+           " maximum-likelihood estimates of the degrees of freedom from them, " +
+           str(moments.dof, 4) + " and " + str(ml.dof, 4) + ", differ by a factor of " +
+           str(slice.gamma_ratio, 3) + ", " + str(-slice.gamma_ratio_z, 3) +
+           " standard errors); they are likely to contain tissue signal, or a noise level that differs between"
+           " volumes";
+  }
+  return std::string();
+}
+
 // Algorithm 1 for one slice: alternate between selecting the voxels whose summed statistic falls
 //   inside the central 1-p interval of the Gamma distribution implied by the current parameters,
 //   and re-estimating those parameters from the voxels selected. Zeros enter the fit as censored
-//   at threshold_sq where the groups include them.
+//   at threshold_sq where the groups include them. A selection on which the iteration has settled
+//   is then tested for consistency with the Gamma model; this is not done at every iteration,
+//   since the selections on the way there are legitimately poor fits.
 SliceEstimate estimate_slice(std::vector<Group> &groups,
                              const default_type initial_sigma,
                              const background_method_t method,
@@ -767,6 +800,14 @@ SliceEstimate estimate_slice(std::vector<Group> &groups,
   default_type previous_dof = std::numeric_limits<default_type>::quiet_NaN();
   default_type previous_sigma = std::numeric_limits<default_type>::quiet_NaN();
   std::vector<IterationState> history;
+
+  // Both ways of terminating successfully end here, with result already holding the selection
+  //   reported.
+  const auto conclude = [&result, &parameters]() {
+    result.decline = test_gamma_consistency(result, parameters);
+    result.estimated = result.decline.empty();
+    return result;
+  };
 
   for (ssize_t iteration = 0; iteration != parameters.max_iter; ++iteration) {
     result.num_iterations = iteration + 1;
@@ -814,10 +855,8 @@ SliceEstimate estimate_slice(std::vector<Group> &groups,
     candidates.resize(11);
     for (size_t i = 0; i != candidates.size(); ++i)
       candidates[i] = (0.95 + 0.01 * default_type(i)) * estimate.sigma;
-    if (iteration > 0 && has_converged(estimate.dof, estimate.sigma, previous_dof, previous_sigma, parameters.eps)) {
-      result.estimated = true;
-      return result;
-    }
+    if (iteration > 0 && has_converged(estimate.dof, estimate.sigma, previous_dof, previous_sigma, parameters.eps))
+      return conclude();
     previous_dof = estimate.dof;
     previous_sigma = estimate.sigma;
 
@@ -841,8 +880,7 @@ SliceEstimate estimate_slice(std::vector<Group> &groups,
         result.num_zero = preferred->num_zero;
         result.sums = preferred->sums;
       }
-      result.estimated = true;
-      return result;
+      return conclude();
     }
     IterationState state;
     state.ranges = best.ranges;

@@ -82,10 +82,14 @@ namespace MR::Denoise::Precondition::NoiseModel {
 //      couple of storage quanta of zero; nor does it follow a clip level that varies WITHIN a
 //      slice, where the zeros are tested against the lowest and are typically then excluded.
 //   6. A slice holding fewer than min_voxels_slice background voxels, but enough dark tissue to
-//      form a mode of that size, is initialised within the tissue and may converge there to a wrong
-//      estimate. Nothing tests the selection for consistency with the Gamma model, so such slices
-//      are not declined; they are flagged only where they make the per-slice estimates disagree
-//      (see estimate_caveats()).
+//      form a mode of that size, is initialised within the tissue and converges there. The
+//      selection of every converged slice is tested for consistency with a single Gamma
+//      distribution (see BackgroundParameters::gamma_ratio_floor), which declines most such slices;
+//      but low-signal tissue under a Rician (two degree of freedom) distribution can pass, as its
+//      shape is then close to the Gamma it is fitted with. Those that pass are flagged only where
+//      they make the per-slice estimates disagree (see estimate_caveats()). The test is equally
+//      blind to background whose magnitudes were averaged spatially with uniform weights, which
+//      remains Gamma-distributed but with inflated degrees of freedom.
 
 // Which of the two solutions of the same model is used to fit a selected set of background
 //   samples; see estimate_from_sums().
@@ -154,6 +158,35 @@ public:
   //   reconstruction) exceed the predicted rate by an order of magnitude or more.
   default_type zero_consistency_p{1.0e-6};
   default_type zero_excess_factor{2.0};
+  // Consistency of a converged slice's selection with a single Gamma distribution. Nothing in the
+  //   iteration otherwise tests this: the window follows the fit and the fit follows the window, so
+  //   it converges on whatever compact cluster the first window lands on, background or not. The
+  //   two estimators are fitted to the same selected samples, and the ratio of their degrees of
+  //   freedom, moments over maximum likelihood, is formed. For a Gamma sample both are consistent
+  //   and the ratio tends to one. A mixture pulls them apart, because the method of moments sees
+  //   the mixture's excess variance in E[t^2] while maximum likelihood sees it only through E[log t]:
+  //   for a mixture of noise levels whose log-variance has standard deviation s, the ratio is about
+  //   1 - s^2. Tissue whose signal varies between voxels and between volumes, and a noise level
+  //   that differs between volumes, are both such mixtures. The slice declines where the ratio lies
+  //   below gamma_ratio_floor AND more than gamma_ratio_z standard errors below one. The standard
+  //   error is that of the difference between an inefficient and an efficient estimator of the
+  //   same parameter, Var(log moments) - Var(log ML): with N = dof/2 and n samples, that is
+  //   [2 (N+1) / N - 1 / (N^2 (psi'(N) - 1/N))] / n. Neither condition suffices alone: at 1e5
+  //   samples the estimators' small-sample biases are themselves significant, and at 1e3 samples a
+  //   ratio of 0.95 is within sampling variation.
+  // Calibrated on synthetic phantoms only (K = 2 to 200 volumes, 1 to 16 degrees of freedom, 16^2 to
+  //   384^2 matrices, ghosting, scalp, in-plane and through-plane gradients of noise level, scarce
+  //   background). Over 1720 slices whose selection held no tissue, the lowest ratio was 0.947 and
+  //   the lowest standardised value -2.55, with no slice satisfying both conditions. The window
+  //   truncation biases the ratio upward, not downward, at few volumes (up to 1.10 at K = 2).
+  //   Over 102 slices whose selection was more than 5% tissue, both conditions held for 99, with
+  //   ratios of 0.70 to 0.94. Those missed are low-SNR tissue at two degrees of freedom (ratios 0.96
+  //   to 1.02). On the six resampled series of MRtrix3's script_test_data, the selections of all
+  //   but one series carried signal (their mean power in b = 0 volumes was 9 to 18 times that in
+  //   diffusion-weighted volumes), and those slices gave ratios of 0.20 to 0.82. Not calibrated
+  //   against raw multi-coil data, whose noise level may vary within a slice more than any phantom's.
+  default_type gamma_ratio_floor{0.95};
+  default_type gamma_ratio_z{3.5};
 };
 
 // Sufficient statistics of one spatial voxel, accumulated over the K volumes of the input.
@@ -295,6 +328,13 @@ public:
   //   or the censored fit declined. The estimate is then that of the positive samples alone, as the
   //   paper's reference implementation computes it everywhere.
   bool zeros_excluded{false};
+  // The test of the final selection's consistency with a single Gamma distribution (see
+  //   BackgroundParameters::gamma_ratio_floor): the ratio of the degrees of freedom fitted to it by
+  //   the method of moments to that fitted by maximum likelihood, and the logarithm of that ratio
+  //   in units of its standard error. NaN where the iteration did not converge, or where either fit
+  //   was refused. Set whether the test passed or not, so that a declined slice reports by how much.
+  default_type gamma_ratio{std::numeric_limits<default_type>::quiet_NaN()};
+  default_type gamma_ratio_z{std::numeric_limits<default_type>::quiet_NaN()};
   // Why this slice yielded no estimate; empty iff estimated.
   std::string decline;
 };
@@ -364,7 +404,11 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
 //   high (around two to three degrees of freedom whatever the truth), but it varies from slice to
 //   slice with the tissue selected, whereas genuine background gives per-slice estimates that agree
 //   to within about 2% even from few volumes. A genuinely spatially varying distribution may also
-//   produce a spread, which the message acknowledges.
+//   produce a spread, which the message acknowledges. Most slices whose selection lies within the
+//   head are declined by the test of consistency with a single Gamma distribution
+//   (BackgroundParameters::gamma_ratio_floor), and this caveat is what remains for those that pass
+//   it (low-signal tissue at around two degrees of freedom), and for disagreement between slices
+//   that each pass it.
 // - More than a small proportion of the samples of the selected voxels are zeros that were excluded
 //   from the fit (BackgroundResult::excluded_fraction) because they could not be explained as noise
 //   rounded or clipped below the censoring threshold. If they are nonetheless low magnitudes (clipped

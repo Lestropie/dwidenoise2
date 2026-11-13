@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
@@ -127,6 +128,17 @@ const char *const noise_dof_estimation_description =
     " This rejection discards not only voxels containing tissue signal,"
     " but equally those corrupted by ghosting, slice leakage or spikes,"
     " which is what makes the procedure automatic rather than dependent on a mask."
+    " The rejection cannot by itself establish that what remains is background:"
+    " the iteration converges on whatever compact cluster of voxels it begins at."
+    " Once it has converged in a slice, the voxels selected are therefore tested"
+    " for consistency with a single Gamma distribution,"
+    " by fitting both the method-of-moments and the maximum-likelihood solutions to them:"
+    " these agree for a Gamma sample, whereas for a mixture,"
+    " such as tissue whose signal varies between voxels and between volumes,"
+    " or a noise level that differs between volumes,"
+    " the method-of-moments estimate is the lower of the two."
+    " A slice whose ratio of the two estimates is below 0.95,"
+    " by more than 3.5 times the standard error of that ratio, yields no estimate."
     " In each slice the iteration is initialised at the lowest mode"
     " of the distribution of voxel-wise mean squared magnitudes on a logarithmic scale"
     " that comprises enough voxels to yield an estimate,"
@@ -172,7 +184,10 @@ const char *const noise_dof_selection_description =
     " giving the estimated degrees of freedom, the equivalent effective receive channel count,"
     " the estimated background noise level, the number of voxels identified as containing noise alone,"
     " the number of iterations of voxel rejection,"
-    " and whether a converged estimate was obtained (with the reason where it was not);"
+    " whether a converged estimate was obtained,"
+    " the ratio of the method-of-moments to the maximum-likelihood estimate of the degrees of freedom"
+    " from the voxels selected (see below),"
+    " and the reason where no estimate was obtained;"
     " comment lines preceding the table report the slice axis"
     " and the global median and interquartile range of the per-slice estimates."
     " -noise_voxels_out writes a mask of the voxels identified as containing noise alone,"
@@ -185,8 +200,14 @@ const char *const noise_dof_limitations_description =
     " Firstly, it requires that background voxels exist:"
     " data with no air in the field of view, or whose reconstruction has already masked the background,"
     " carry no information for this estimator, and the procedure declines rather than returning a value;"
-    " where there is only a little air, voxels within the head may be selected instead,"
+    " where there is only a little air, voxels within the head may be selected instead;"
+    " most such slices fail the test of consistency with a single Gamma distribution and yield no estimate,"
+    " but low-signal tissue under a Rician distribution can pass it,"
     " which typically yields too few degrees of freedom and per-slice estimates that disagree."
+    " Data whose magnitudes have been smoothed or resampled spatially,"
+    " as by distortion correction or registration,"
+    " can still appear Gamma-distributed, but with inflated degrees of freedom;"
+    " estimation should be performed on data prior to any such processing."
     " Secondly, under k-space parallel imaging (e.g. GRAPPA) the effective channel count depends on the local signal,"
     " such that a value estimated in the background is an upper bound on that which applies within the head."
     " Thirdly, simultaneous multi-slice acquisition aliases signal into what should be background,"
@@ -337,15 +358,17 @@ void write_dof_table(const std::string &path,
         << ", interquartile range " << background.dof_iqr << "\n";
   else
     out << "# no global estimate: " << background.decline << "\n";
-  out << "slice\tdof\tchannels\tsigma\tvoxels\titerations\tconverged\tcomment\n";
+  out << "slice\tdof\tchannels\tsigma\tvoxels\titerations\tconverged\tgamma_ratio\tcomment\n";
   for (const auto &slice : background.slices) {
     out << slice.index << "\t";
     if (slice.estimated)
       out << slice.dof << "\t" << 0.5 * slice.dof << "\t" << slice.sigma << "\t";
     else
       out << "\t\t\t";
-    out << slice.num_selected << "\t" << slice.num_iterations << "\t" << (slice.estimated ? 1 : 0) << "\t"
-        << (slice.estimated ? std::string() : slice.decline) << "\n";
+    out << slice.num_selected << "\t" << slice.num_iterations << "\t" << (slice.estimated ? 1 : 0) << "\t";
+    if (std::isfinite(slice.gamma_ratio))
+      out << slice.gamma_ratio;
+    out << "\t" << (slice.estimated ? std::string() : slice.decline) << "\n";
   }
   INFO("Exported per-slice noise distribution estimates to \"" + path + "\"");
 }
@@ -516,7 +539,7 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
     if (slice.estimated)
       INFO("Noise distribution at slice " + str(slice.index) + ": " + str(slice.dof, 4) + " degrees of freedom, " +
            "sigma " + str(slice.sigma, 4) + ", from " + str(slice.num_selected) + " voxels in " +
-           str(slice.num_iterations) + " iterations" +
+           str(slice.num_iterations) + " iterations, Gamma consistency ratio " + str(slice.gamma_ratio, 3) +
            (slice.zeros_excluded ? std::string("; zero-valued samples excluded")
             : slice.num_zero > 0 ? "; " + str(slice.num_zero) + " zero-valued samples treated as censored below " +
                                        str(slice.censoring_threshold, 4)

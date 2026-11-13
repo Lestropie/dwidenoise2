@@ -60,6 +60,12 @@
 //    that are not noise (scattered at random, or whole regions zero-filled in some volumes) are
 //    recognised as inconsistent with censoring and excluded instead, with the caveat raised.
 //
+// 6. CONSISTENCY WITH A SINGLE GAMMA DISTRIBUTION. Pure background passes the test of the converged
+//    selection at every number of volumes and degree of freedom; a slice in which the iteration has
+//    converged on tissue, for want of background, declines by it; and so does background whose
+//    noise level differs between volumes. Each of the latter two is shown to give a wrong estimate
+//    with the test disabled.
+//
 // Modes:
 //   (no arguments)     regression test; non-zero exit status on failure.
 //   --evidence         print the full tables, including the larger sample sizes.
@@ -688,9 +694,11 @@ MR::Image<float> make_resampled_phantom(const PhantomSpec &spec, const unsigned 
   return image;
 }
 
-BackgroundResult run_phantom(MR::Image<float> &image, const background_method_t method) {
+BackgroundResult run_phantom(MR::Image<float> &image,
+                             const background_method_t method,
+                             const BackgroundParameters &parameters = BackgroundParameters()) {
   const Accumulation accumulation = accumulate_background(image, 2);
-  return estimate_background(accumulation, method);
+  return estimate_background(accumulation, method, parameters);
 }
 
 void report(std::FILE *out, const std::string &name, const PhantomSpec &spec, const BackgroundResult &result) {
@@ -1329,6 +1337,235 @@ void test_zero_phantoms(std::FILE *out) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 6. Consistency of the selection with a single Gamma distribution
+// ---------------------------------------------------------------------------
+
+// The parameters with the consistency test disabled, against which each test below demonstrates
+//   the failure that the test is there to prevent.
+BackgroundParameters without_gamma_test() {
+  BackgroundParameters parameters;
+  parameters.gamma_ratio_floor = 0.0;
+  return parameters;
+}
+
+// A diffusion-weighted head that overfills the in-plane field of view in every slice from
+//   first_overfilled onwards, leaving no background there at all, and that occupies the middle of
+//   it in the slices before. The tissue model is that of an anisotropic diffusion tensor whose
+//   principal direction rotates over the slice, sampled on b = 1000 and 2000 shells with a b = 0
+//   volume every sixteen: with a b = 0 signal-to-noise ratio of twenty, the most strongly attenuated
+//   samples are near the noise floor. Their voxels then form the lowest mode of an overfilled slice,
+//   which is where the iteration begins and converges.
+class TissuePhantom {
+public:
+  ssize_t n{64};
+  ssize_t nz{8};
+  ssize_t nvol{64};
+  ssize_t first_overfilled{3};
+  double dof{8.0};
+  double sigma{10.0};
+};
+
+bool in_tissue(const TissuePhantom &spec, const ssize_t x, const ssize_t y, const ssize_t z) {
+  const double scale = z < spec.first_overfilled ? 1.0 : 2.0;
+  const double u = (double(x) - 0.5 * double(spec.n - 1)) / (0.5 * double(spec.n) * 0.7 * scale);
+  const double v = (double(y) - 0.5 * double(spec.n - 1)) / (0.5 * double(spec.n) * 0.8 * scale);
+  return u * u + v * v < 1.0;
+}
+
+MR::Image<float> make_tissue_phantom(const TissuePhantom &spec, const unsigned seed) {
+  PhantomSpec geometry;
+  geometry.nx = geometry.ny = spec.n;
+  geometry.nz = spec.nz;
+  geometry.nvol = spec.nvol;
+  MR::Image<float> image = MR::Image<float>::scratch(phantom_header(geometry), "tissue phantom");
+  RNG rng(seed);
+  std::normal_distribution<double> normal(0.0, 1.0);
+  std::vector<double> bvalue(size_t(spec.nvol), 0.0);
+  std::vector<std::array<double, 3>> direction(size_t(spec.nvol), {{0.0, 0.0, 0.0}});
+  for (ssize_t volume = 0; volume != spec.nvol; ++volume) {
+    if (volume % 16 == 0)
+      continue;
+    bvalue[size_t(volume)] = volume % 2 ? 1000.0 : 2000.0;
+    std::array<double, 3> g{{normal(rng), normal(rng), normal(rng)}};
+    const double norm = std::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+    for (double &component : g)
+      component /= norm;
+    direction[size_t(volume)] = g;
+  }
+  const double md = 0.8e-3;
+  const double anisotropy = 0.55;
+  const double l1 = md * (1.0 + 2.0 * anisotropy);
+  const double l2 = md * (1.0 - anisotropy);
+  for (ssize_t z = 0; z != spec.nz; ++z) {
+    image.index(2) = z;
+    for (ssize_t y = 0; y != spec.n; ++y) {
+      image.index(1) = y;
+      const double v = (double(y) - 0.5 * double(spec.n - 1)) / (0.5 * double(spec.n));
+      for (ssize_t x = 0; x != spec.n; ++x) {
+        image.index(0) = x;
+        const double u = (double(x) - 0.5 * double(spec.n - 1)) / (0.5 * double(spec.n));
+        const bool tissue = in_tissue(spec, x, y, z);
+        const double s0 = 20.0 * spec.sigma * (0.7 + 0.3 * std::cos(3.0 * u) * std::cos(2.5 * v));
+        const double theta = M_PI * (u + 0.5 * v);
+        const std::array<double, 3> e1{
+            {std::cos(theta) * std::sin(1.0), std::sin(theta) * std::sin(1.0), std::cos(1.0)}};
+        for (ssize_t volume = 0; volume != spec.nvol; ++volume) {
+          image.index(3) = volume;
+          double amplitude = 0.0;
+          if (tissue) {
+            const std::array<double, 3> &g = direction[size_t(volume)];
+            const double cosine = e1[0] * g[0] + e1[1] * g[1] + e1[2] * g[2];
+            amplitude = s0 * std::exp(-bvalue[size_t(volume)] * (l2 + (l1 - l2) * cosine * cosine));
+          }
+          image.value() = float(sample_magnitude(amplitude / spec.sigma, spec.dof, spec.sigma, rng));
+        }
+      }
+    }
+  }
+  image.index(3) = 0;
+  return image;
+}
+
+// Of the voxels selected in slice z, the proportion that are tissue.
+double tissue_fraction(const TissuePhantom &spec, const BackgroundResult &result, const ssize_t z) {
+  const Accumulation geometry({spec.n, spec.n, spec.nz}, 2);
+  size_t selected = 0;
+  size_t tissue = 0;
+  for (ssize_t y = 0; y != spec.n; ++y) {
+    for (ssize_t x = 0; x != spec.n; ++x) {
+      if (result.selected[geometry.index(x, y, z)] == 0)
+        continue;
+      ++selected;
+      tissue += in_tissue(spec, x, y, z) ? 1 : 0;
+    }
+  }
+  return selected == 0 ? 0.0 : double(tissue) / double(selected);
+}
+
+void report_gamma(std::FILE *out, const std::string &name, const BackgroundResult &result) {
+  std::fprintf(out, "%-26s %s", name.c_str(), result ? "" : "DECLINED; ");
+  if (result)
+    std::fprintf(out, "dof=%.4f; ", result.dof);
+  std::fprintf(out, "per-slice ratio:");
+  for (const SliceEstimate &slice : result.slices)
+    std::fprintf(out, " %.3f%s", slice.gamma_ratio, slice.estimated ? "" : "x");
+  std::fprintf(out, "\n");
+}
+
+void test_gamma_consistency(std::FILE *out) {
+  std::fprintf(out, "\n");
+  const std::string gamma_phrase = "single Gamma distribution";
+
+  // Pure background must pass at every number of volumes and every degree of freedom, both where
+  //   the window's truncation of the per-voxel sums distorts the selected samples most (two
+  //   volumes) and where the number of samples, and so the power of the test, is largest. No
+  //   slice may decline, and none may come near the floor.
+  class NullCase {
+  public:
+    ssize_t nvol;
+    double dof;
+    ssize_t nz;
+  };
+  for (const NullCase &null_case : {NullCase{2, 2.0, 8},
+                                    NullCase{2, 8.0, 8},
+                                    NullCase{4, 1.0, 8},
+                                    NullCase{4, 8.0, 8},
+                                    NullCase{20, 1.0, 8},
+                                    NullCase{20, 16.0, 8},
+                                    NullCase{200, 2.0, 4},
+                                    NullCase{200, 7.52, 4}}) {
+    PhantomSpec spec;
+    spec.nvol = null_case.nvol;
+    spec.dof = null_case.dof;
+    spec.nz = null_case.nz;
+    MR::Image<float> image = make_phantom(spec, 515151u);
+    for (const background_method_t method : {background_method_t::ML, background_method_t::MOMENTS}) {
+      const BackgroundResult result = run_phantom(image, method);
+      const std::string name = "Gamma null, K=" + std::to_string(null_case.nvol) +
+                               " dof=" + std::to_string(null_case.dof) +
+                               (method == background_method_t::ML ? " (ml)" : " (moments)");
+      report_gamma(out, name, result);
+      check(bool(result), name + ": an estimate is produced");
+      for (const SliceEstimate &slice : result.slices) {
+        check(slice.estimated,
+              name + ": slice " + std::to_string(slice.index) + " yields an estimate (" + slice.decline + ")");
+        check(std::isfinite(slice.gamma_ratio) && slice.gamma_ratio > 0.97,
+              name + ": slice " + std::to_string(slice.index) + " is well clear of the floor");
+      }
+    }
+  }
+
+  // Tissue selected for want of background. With the test, the overfilled slices decline for that
+  //   reason, and the estimate comes from the slices that do hold background. Without it, every
+  //   overfilled slice is estimated from tissue, at too few degrees of freedom, and the median
+  //   across slices goes with them.
+  for (const double dof : {8.0, 4.0}) {
+    TissuePhantom spec;
+    spec.dof = dof;
+    MR::Image<float> image = make_tissue_phantom(spec, 616161u);
+    const std::string name = "overfilled head, dof=" + std::to_string(dof);
+
+    const BackgroundResult ungated = run_phantom(image, background_method_t::ML, without_gamma_test());
+    report_gamma(out, name + " (untested)", ungated);
+    size_t tissue_estimated = 0;
+    for (ssize_t z = spec.first_overfilled; z != spec.nz; ++z) {
+      if (ungated.slices[size_t(z)].estimated && tissue_fraction(spec, ungated, z) > 0.5)
+        ++tissue_estimated;
+    }
+    check(tissue_estimated == size_t(spec.nz - spec.first_overfilled),
+          name + ", untested: every overfilled slice is estimated from tissue");
+    check(!ungated || std::fabs(ungated.dof / dof - 1.0) > 0.10, name + ", untested: the estimate is wrong");
+
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    report_gamma(out, name, result);
+    for (ssize_t z = 0; z != spec.nz; ++z) {
+      const SliceEstimate &slice = result.slices[size_t(z)];
+      if (z < spec.first_overfilled) {
+        check(slice.estimated, name + ": slice " + std::to_string(z) + ", which holds background, yields an estimate");
+        check(tissue_fraction(spec, result, z) == 0.0, name + ": no tissue is selected where background exists");
+      } else {
+        check(!slice.estimated, name + ": overfilled slice " + std::to_string(z) + " declines");
+        check(slice.decline.find(gamma_phrase) != std::string::npos,
+              name + ": overfilled slice " + std::to_string(z) + " declines by the Gamma consistency test (" +
+                  slice.decline + ")");
+      }
+    }
+    check(bool(result), name + ": an estimate is produced from the slices holding background");
+    if (result)
+      check_relative(result.dof, dof, 0.05, name + ": degrees of freedom");
+  }
+
+  // A noise level that differs between volumes, here doubled in two volumes of twenty. This is what
+  //   the preprocessed data of MRtrix3's script_test_data show: the voxels selected there carry many
+  //   times the mean power in b = 0 volumes as in diffusion-weighted ones, because they are not
+  //   noise alone. Every voxel is equally affected, so the per-voxel sums remain a compact cluster
+  //   that the iteration converges on happily; but the samples are a mixture of two Gamma
+  //   distributions of different scale, and no degrees of freedom fitted to them is that of either.
+  {
+    const PhantomSpec spec;
+    MR::Image<float> image = make_phantom(spec, 424242u);
+    for (auto l = MR::Loop(image)(image); l; ++l) {
+      if (image.index(3) % 10 == 0)
+        image.value() *= 2.0f;
+    }
+    const std::string name = "per-volume noise level";
+    const BackgroundResult ungated = run_phantom(image, background_method_t::ML, without_gamma_test());
+    report_gamma(out, name + " (untested)", ungated);
+    check(bool(ungated), name + ", untested: an estimate is produced");
+    if (ungated)
+      check(std::fabs(ungated.dof / spec.dof - 1.0) > 0.10, name + ", untested: the estimate is wrong");
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    report_gamma(out, name, result);
+    check(!result, name + ": no estimate is produced");
+    for (const SliceEstimate &slice : result.slices) {
+      check(slice.decline.find(gamma_phrase) != std::string::npos,
+            name + ": slice " + std::to_string(slice.index) + " declines by the Gamma consistency test (" +
+                slice.decline + ")");
+    }
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1366,6 +1603,7 @@ int main(int argc, char **argv) {
   test_censored_estimators(out);
   test_quantum_detection(out);
   test_zero_phantoms(out);
+  test_gamma_consistency(out);
 
   if (tsv != nullptr)
     std::fclose(tsv);
