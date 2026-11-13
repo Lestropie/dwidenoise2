@@ -51,8 +51,13 @@ template <class Generator> double sample_integer(const double a, const int chann
 //   equivalence is checked rather than assumed: see test_samplers() in background_dof.cpp.
 template <class Generator>
 double sample_fractional(const double a, const double dof, const double sigma, Generator &rng) {
-  std::poisson_distribution<int> poisson(0.5 * a * a);
-  const int j = poisson(rng);
+  // std::poisson_distribution requires a strictly positive mean; at a = 0 (background) J is
+  //   identically zero.
+  int j = 0;
+  if (a > 0.0) {
+    std::poisson_distribution<int> poisson(0.5 * a * a);
+    j = poisson(rng);
+  }
   // chi^2_k == Gamma(shape = k/2, scale = 2)
   std::gamma_distribution<double> gamma(0.5 * dof + double(j), 2.0);
   return sigma * std::sqrt(gamma(rng));

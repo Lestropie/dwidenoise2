@@ -49,6 +49,14 @@ namespace MR::Denoise::Precondition::NoiseModel {
 //   patches carrying no signal subspace, and the acceptance test below is a principled way of
 //   selecting exactly such samples.
 //
+// INITIALISATION, which departs from the paper. Algorithm 1 begins each slice by trying a grid of
+//   candidate noise levels from zero up to a ceiling derived from the median of the data, keeping
+//   whichever accepts the most voxels. Where background does not dominate a slice, that maximum lies
+//   within tissue; where it does, a ceiling derived from one global statistic can fall short of the
+//   background. Each slice is instead initialised at the lowest mode of its own histogram of
+//   voxel-wise mean squared magnitudes that holds enough voxels to be background (see
+//   estimate_background()).
+//
 // WHAT IT DOES NOT SOLVE, stated up front and repeated in the command-line help:
 //   1. It requires background voxels. Data with no air in the field of view, or whose background
 //      the reconstruction has already zeroed, carry no information for this estimator; the guards
@@ -66,6 +74,11 @@ namespace MR::Denoise::Precondition::NoiseModel {
 //      the variance-stabilising transform's scale. The sigma here is computed because the degrees
 //      of freedom cannot be estimated without it, is exported as a diagnostic, and is otherwise
 //      discarded.
+//   5. A slice holding fewer than min_voxels_slice background voxels, but enough dark tissue to
+//      form a mode of that size, is initialised within the tissue and may converge there to a wrong
+//      estimate. Nothing tests the selection for consistency with the Gamma model, so such slices
+//      are not declined; they are flagged only where they make the per-slice estimates disagree
+//      (see estimate_caveats()).
 
 // Which of the two solutions of the same model is used to fit a selected set of background
 //   samples; see estimate_from_sums().
@@ -93,22 +106,25 @@ public:
   //   rather than mask-dependent: it discards voxels containing tissue signal, and equally
   //   discards voxels corrupted by ghosting, slice leakage or spikes.
   default_type p{0.05};
-  // Number of candidate noise levels in the initial search grid (the paper's l).
-  ssize_t num_candidates{50};
-  // Bounds of the REJECTION WINDOW on the first outer iteration, not of the estimate: the interval
-  //   is then evaluated with its lower end at dof_min and its upper end at dof_max so as to span
-  //   the whole admissible range (the paper's Fig. 1C). An estimate outside these bounds is
-  //   perfectly admissible -- the paper's own GE result of 0.45 effective channels was obtained
-  //   with a lower bound of one.
+  // dof_min sets the width of the REJECTION WINDOW on the first outer iteration, which is the
+  //   central 1 - p interval of the broadest admissible background distribution, centred on the
+  //   lowest mode of the slice (see estimate_background()). dof_max bounds the plausibility ceiling
+  //   below. Neither bounds the estimate: an estimate outside them is perfectly admissible -- the
+  //   paper's own GE result of 0.45 effective channels was obtained with a lower bound of one.
   default_type dof_min{2.0};
   default_type dof_max{24.0};
+  // Family-wise probability that sampling fluctuation of the counts alone produces a local maximum
+  //   of a slice's histogram that is accepted as a mode (see estimate_background()).
+  default_type mode_significance{0.05};
   // Outer-iteration cap and the convergence tolerance on (dof, sigma), absolute or relative.
   ssize_t max_iter{100};
   default_type eps{1.0e-3};
   // Guards. A slice yielding fewer than min_voxels_slice background voxels yields no estimate:
   //   PIESNO's failure mode on the paper's GE data was identifying "about 10 noise only voxels",
-  //   and a floor makes that visible rather than silent. The image as a whole must furnish
-  //   min_voxels_total selected voxels across at least min_slices slices.
+  //   and a floor makes that visible rather than silent. The same floor is the least number of
+  //   voxels a mode of a slice's histogram must comprise to initialise the iteration there. The
+  //   image as a whole must furnish min_voxels_total selected voxels across at least min_slices
+  //   slices.
   size_t min_voxels_slice{100};
   size_t min_voxels_total{1000};
   size_t min_slices{3};
@@ -142,9 +158,9 @@ public:
 //   so that m^4 can neither overflow nor lose precision. Accumulating in double precision instead
 //   makes that unnecessary -- m^4 would have to exceed 1e300 to overflow, and the relative
 //   precision of a floating-point sum does not depend on its scale -- and it saves the extra pass
-//   over the 4D data that computing the median beforehand would require. The one place the median
-//   is genuinely needed, namely the top of the initial noise-level search grid, is instead read
-//   from a histogram filled during the same pass (see MagnitudeHistogram).
+//   over the 4D data that computing the median beforehand would require. (The paper also uses that
+//   median to bound its initial noise-level search; this implementation initialises differently,
+//   and needs no global statistic at all.)
 // Linear index of a spatial voxel within Accumulation::voxels and BackgroundResult::selected: the
 //   first axis varies fastest. A free function so that a consumer of the exported mask can address
 //   it without constructing an Accumulation, which would allocate the whole statistics array (forty
@@ -155,30 +171,6 @@ inline size_t voxel_index(const std::array<ssize_t, 3> &size, //
                           const ssize_t i2) {                 //
   return size_t((i2 * size[1] + i1) * size[0] + i0);
 }
-
-// Histogram of the logarithm of every usable magnitude in the 4D image, from which the median of
-//   all samples is obtained without retaining the samples themselves: an exact median would need
-//   every voxel-volume magnitude held in memory at once for std::nth_element(), as much memory
-//   again as the image. Bins are 1/256 of an octave wide, so the median is located to within 0.3%
-//   (and linear interpolation within its bin typically does considerably better), which is far
-//   finer than the purpose it serves requires. Magnitudes outside [2^-64, 2^64] are counted in the
-//   end bins. Each thread fills its own histogram, and these are summed.
-class MagnitudeHistogram {
-public:
-  static constexpr int min_exponent = -64;
-  static constexpr int max_exponent = 64;
-  static constexpr int bins_per_octave = 256;
-  // The magnitude must be finite and strictly positive.
-  void add(const default_type magnitude);
-  void merge(const MagnitudeHistogram &that);
-  uint64_t total() const { return num_samples; }
-  // The median of the samples added; NaN if there are none.
-  default_type median() const;
-
-private:
-  std::vector<uint64_t> counts;
-  uint64_t num_samples{0};
-};
 
 class Accumulation {
 public:
@@ -197,8 +189,6 @@ public:
   //   excluded can be recovered. Zero where unknown (an Accumulation not filled by
   //   accumulate_background()), in which case nothing that depends on it is reported.
   uint32_t num_volumes{0};
-  // Every usable magnitude of the image, for its median.
-  MagnitudeHistogram magnitudes;
 };
 
 // Accumulate the statistics above from a magnitude image, in one pass. Explicitly instantiated for

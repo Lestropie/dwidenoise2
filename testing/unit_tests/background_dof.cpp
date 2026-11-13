@@ -48,10 +48,11 @@
 //    check the paper's principal robustness claim (a ghost band and a spike are rejected, and the
 //    estimate is unmoved), the identifiable results it reports (a Rician truth recovers one
 //    effective channel, a half-Gaussian truth recovers a half), that degenerate inputs decline
-//    rather than answer, and the expectation that interpolation of the complex data before the
+//    rather than answer, the expectation that interpolation of the complex data before the
 //    magnitude is formed leaves the degrees of freedom unchanged while altering only the noise
 //    level (which, if it holds, makes this estimator valid on data for which Marchenko-Pastur
-//    estimation is not).
+//    estimation is not), and that neither scarce or abundant background nor in-plane matrices from
+//    24 x 24 to 256 x 256 disturb the per-slice initialisation.
 //
 // Modes:
 //   (no arguments)     regression test; non-zero exit status on failure.
@@ -86,7 +87,6 @@ using MR::Denoise::Precondition::NoiseModel::Estimate;
 using MR::Denoise::Precondition::NoiseModel::estimate_background;
 using MR::Denoise::Precondition::NoiseModel::estimate_caveats;
 using MR::Denoise::Precondition::NoiseModel::estimate_from_sums;
-using MR::Denoise::Precondition::NoiseModel::MagnitudeHistogram;
 using MR::Denoise::Precondition::NoiseModel::SampleSums;
 using MR::Denoise::Precondition::NoiseModel::SliceEstimate;
 using MR::Math::digamma;
@@ -531,37 +531,6 @@ void test_scale_equivariance(std::FILE *out) {
   }
 }
 
-// The median read from the histogram of magnitudes, against the exact median of the same samples,
-//   across scales spanning many octaves and including magnitudes beyond the histogram's range.
-void test_magnitude_histogram(std::FILE *out) {
-  std::mt19937_64 rng(20261112);
-  double worst = 0.0;
-  for (const double scale : {1.0e-6, 1.0, 37.0, 4.0e4}) {
-    for (const double spread : {0.05, 1.0, 8.0}) {
-      std::lognormal_distribution<double> distribution(std::log(scale), spread);
-      for (const size_t n : {size_t(1), size_t(2), size_t(1001), size_t(100000)}) {
-        MagnitudeHistogram first, second;
-        std::vector<double> samples(n);
-        for (size_t i = 0; i != n; ++i) {
-          samples[i] = distribution(rng);
-          (i % 3 == 0 ? first : second).add(samples[i]);
-        }
-        first.merge(second);
-        check(first.total() == n, "the histogram counts every sample added to it, across a merge");
-        std::nth_element(samples.begin(), samples.begin() + n / 2, samples.end());
-        const double exact = samples[n / 2];
-        if (exact < std::ldexp(1.0, MagnitudeHistogram::min_exponent) ||
-            exact >= std::ldexp(1.0, MagnitudeHistogram::max_exponent))
-          continue;
-        worst = std::max(worst, std::fabs(first.median() / exact - 1.0));
-      }
-    }
-  }
-  check(worst <= 1.0 / MagnitudeHistogram::bins_per_octave, "the histogram median is within one bin of the exact median");
-  check(!std::isfinite(MagnitudeHistogram().median()), "an empty histogram has no median");
-  std::fprintf(out, "Histogram median: worst relative deviation from the exact median %.3g\n", worst);
-}
-
 // ---------------------------------------------------------------------------
 // 4. Algorithm 1 end to end
 // ---------------------------------------------------------------------------
@@ -932,6 +901,51 @@ void test_algorithm(std::FILE *out, std::FILE *tsv) {
                      "resampled: the noise level is that of the interpolated data");
     }
   }
+
+  // (f) Independence of the proportion of each slice that is background, and of the number of voxels
+  //     per slice. Each slice is initialised at the lowest mode of a histogram whose binning follows
+  //     from the slice's own voxels; the proportions and in-plane matrices below span those at which
+  //     a single global intensity threshold either falls within the tissue (scarce background) or
+  //     below the background (abundant background), and at which a fixed binning would be too coarse
+  //     for the smallest slices or too noisy for the largest.
+  class GeometryCase {
+  public:
+    const char *name;
+    ssize_t matrix;
+    double semi_axis_x;
+    double semi_axis_y;
+  };
+  for (const GeometryCase &geometry : {GeometryCase{"scarce background, 64^2", 64, 0.55, 0.55},
+                                       GeometryCase{"abundant background, 64^2", 64, 0.10, 0.10},
+                                       GeometryCase{"coarse matrix, 24^2", 24, 0.45, 0.30},
+                                       GeometryCase{"fine matrix, 256^2", 256, 0.45, 0.30},
+                                       GeometryCase{"fine, scarce background", 256, 0.55, 0.55},
+                                       GeometryCase{"fine, abundant background", 256, 0.10, 0.10}}) {
+    PhantomSpec spec = clean;
+    spec.nx = spec.ny = geometry.matrix;
+    spec.semi_axis_x = geometry.semi_axis_x;
+    spec.semi_axis_y = geometry.semi_axis_y;
+    MR::Image<float> image = make_phantom(spec, 424242u);
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    const std::string name(geometry.name);
+    report(out, name, spec, result);
+    check(bool(result), name + ": an estimate is produced");
+    if (!result)
+      continue;
+    const MaskCounts counts = count_mask(spec, result);
+    std::fprintf(out,
+                 "%-26s   selected: signal %zu/%zu, background %zu/%zu\n",
+                 "",
+                 counts.signal_selected,
+                 counts.signal_total,
+                 counts.background_selected,
+                 counts.background_total);
+    check_relative(result.dof, spec.dof, 0.05, name + ": global degrees of freedom");
+    check(counts.signal_selected == 0, name + ": no signal-bearing voxel is selected");
+    for (const auto &slice : result.slices)
+      check(slice.estimated,
+            name + ": slice " + std::to_string(slice.index) + " yields an estimate (" + slice.decline + ")");
+  }
 }
 
 // Whether any of the caveats contains a phrase, which is how the two kinds are told apart.
@@ -1050,7 +1064,6 @@ int main(int argc, char **argv) {
   test_special_functions(out);
   test_estimators(out, tsv, evidence);
   test_scale_equivariance(out);
-  test_magnitude_histogram(out);
   test_algorithm(out, tsv);
   test_caveats(out);
 

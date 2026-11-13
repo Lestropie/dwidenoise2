@@ -22,14 +22,14 @@
 #include <cmath>
 #include <limits>
 #include <map>
-#include <memory>
-#include <mutex>
 #include <numeric>
 
+#include "algo/histogram.h"
 #include "algo/loop.h"
 #include "algo/threaded_loop.h"
 #include "exception.h"
 #include "image.h"
+#include "math/erfinv.h"
 #include "math/gamma.h"
 #include "metadata/bids.h"
 #include "mrtrix.h"
@@ -41,56 +41,6 @@ using Math::gamma_p_inv;
 using Math::gamma_q_inv;
 using Math::inverse_digamma;
 using Math::trigamma;
-
-void MagnitudeHistogram::add(const default_type magnitude) {
-  assert(std::isfinite(magnitude) && magnitude > 0.0);
-  if (counts.empty())
-    counts.assign(size_t(max_exponent - min_exponent) * bins_per_octave, 0);
-  // magnitude = mantissa * 2^exponent with mantissa in [1/2, 1), i.e. it lies in the octave
-  //   [2^(exponent-1), 2^exponent), within which bins are of equal width.
-  int exponent = 0;
-  const default_type mantissa = std::frexp(magnitude, &exponent);
-  const int octave = exponent - 1;
-  size_t bin = 0;
-  if (octave >= max_exponent) {
-    bin = counts.size() - 1;
-  } else if (octave >= min_exponent) {
-    const int sub_bin = std::min(int((2.0 * mantissa - 1.0) * bins_per_octave), bins_per_octave - 1);
-    bin = size_t(octave - min_exponent) * bins_per_octave + size_t(sub_bin);
-  }
-  ++counts[bin];
-  ++num_samples;
-}
-
-void MagnitudeHistogram::merge(const MagnitudeHistogram &that) {
-  if (that.counts.empty())
-    return;
-  if (counts.empty())
-    counts.assign(that.counts.size(), 0);
-  for (size_t bin = 0; bin != counts.size(); ++bin)
-    counts[bin] += that.counts[bin];
-  num_samples += that.num_samples;
-}
-
-default_type MagnitudeHistogram::median() const {
-  if (num_samples == 0)
-    return std::numeric_limits<default_type>::quiet_NaN();
-  // The sample of rank floor(n/2) (counting from zero), as std::nth_element() at size()/2 would
-  //   select, interpolated linearly within the bin that contains it.
-  const uint64_t rank = num_samples / 2;
-  uint64_t below = 0;
-  for (size_t bin = 0; bin != counts.size(); ++bin) {
-    if (below + counts[bin] > rank) {
-      const int octave = min_exponent + int(bin / bins_per_octave);
-      const default_type width = std::ldexp(1.0, octave) / default_type(bins_per_octave);
-      const default_type lower = std::ldexp(1.0, octave) + width * default_type(bin % bins_per_octave);
-      return lower + width * (default_type(rank - below) + 0.5) / default_type(counts[bin]);
-    }
-    below += counts[bin];
-  }
-  assert(false);
-  return std::numeric_limits<default_type>::quiet_NaN();
-}
 
 Accumulation::Accumulation(const std::array<ssize_t, 3> &size, const size_t slice_axis)
     : voxels(size_t(size[0]) * size_t(size[1]) * size_t(size[2])), size(size), slice_axis(slice_axis) {
@@ -112,21 +62,10 @@ namespace {
 
 // One spatial voxel per invocation: walk that voxel's full column of volumes and write its four
 //   sufficient statistics. Every voxel is visited by exactly one thread and writes only its own
-//   entry, so the shared array needs no locking. The histogram of magnitudes is instead filled per
-//   thread (each thread works on its own copy of the functor), and each copy adds its histogram
-//   to the shared one under a lock as it is destroyed.
+//   entry, so the shared array needs no locking.
 template <class ImageType> class AccumulateFunctor {
 public:
-  AccumulateFunctor(Accumulation &accumulation)
-      : accumulation(accumulation), merge_mutex(std::make_shared<std::mutex>()) {}
-  AccumulateFunctor(const AccumulateFunctor &that) : accumulation(that.accumulation), merge_mutex(that.merge_mutex) {}
-  AccumulateFunctor &operator=(const AccumulateFunctor &) = delete;
-  ~AccumulateFunctor() {
-    if (histogram.total() == 0)
-      return;
-    const std::lock_guard<std::mutex> lock(*merge_mutex);
-    accumulation.magnitudes.merge(histogram);
-  }
+  AccumulateFunctor(Accumulation &accumulation) : accumulation(accumulation) {}
   void operator()(ImageType &input) {
     VoxelStats stats;
     for (auto l = Loop(input, 3)(input); l; ++l) {
@@ -142,15 +81,12 @@ public:
       stats.sum_sq += m2;
       stats.sum_quad += m2 * m2;
       stats.sum_log_sq += std::log(m2);
-      histogram.add(m);
     }
     accumulation.voxels[accumulation.index(input.index(0), input.index(1), input.index(2))] = stats;
   }
 
 private:
   Accumulation &accumulation;
-  std::shared_ptr<std::mutex> merge_mutex;
-  MagnitudeHistogram histogram;
 };
 
 } // namespace
@@ -432,21 +368,19 @@ bool has_converged(const default_type dof,
 //   inside the central 1-p interval of the Gamma distribution implied by the current parameters,
 //   and re-estimating those parameters from the voxels selected.
 SliceEstimate estimate_slice(std::vector<Group> &groups,
-                             const std::vector<default_type> &initial_candidates,
+                             const default_type initial_sigma,
                              const background_method_t method,
                              const BackgroundParameters &parameters) {
   SliceEstimate result;
-  if (groups.empty()) {
-    result.decline = "no voxel of this slice provided a usable magnitude in any volume";
-    return result;
-  }
+  assert(!groups.empty());
 
-  // On the first outer iteration the acceptance interval is deliberately broad, spanning the whole
-  //   admissible range: its lower end is evaluated at dof_min and its upper end at dof_max (the
-  //   paper's Fig. 1C). Thereafter both ends are evaluated at the current estimate.
+  // On the first outer iteration the acceptance interval is that of the broadest admissible
+  //   background distribution, both of its ends being evaluated at dof_min, with the noise level
+  //   that centres it on the slice's lowest mode (see estimate_background()). Thereafter both ends
+  //   are evaluated at the current estimate.
   default_type dof_lo = parameters.dof_min;
-  default_type dof_hi = parameters.dof_max;
-  std::vector<default_type> candidates(initial_candidates);
+  default_type dof_hi = parameters.dof_min;
+  std::vector<default_type> candidates(1, initial_sigma);
   std::vector<default_type> lambda_lo(groups.size());
   std::vector<default_type> lambda_hi(groups.size());
   default_type previous_dof = std::numeric_limits<default_type>::quiet_NaN();
@@ -554,6 +488,156 @@ void mark_selected(const std::vector<Group> &groups,
   }
 }
 
+// The lowest mode of a slice's distribution of voxel-wise mean squared magnitudes, as the natural
+//   logarithm of that mean square, or NaN with the reason where there is none.
+class SliceMode {
+public:
+  default_type log_mean_square{std::numeric_limits<default_type>::quiet_NaN()};
+  std::string failure;
+};
+
+// WHY A MODE, AND WHY THE LOWEST. Background voxels are the darkest voxels of a slice that occur in
+//   number: whatever the proportions of tissue and air, they form a cluster at the bottom of the
+//   distribution of voxel-wise mean squared magnitude, beneath every tissue. The lowest mode that
+//   holds at least min_voxels_slice voxels -- the number below which the slice would decline anyway
+//   -- therefore identifies it without any threshold set from intensities, and in particular without
+//   any global statistic, which can lie within the tissue where background is scarce or below the
+//   background where it is abundant.
+//
+// WHY ON A LOGARITHMIC SCALE. For a background voxel whose K samples have per-sample mean square
+//   sigma^2 dof, the voxel-wise mean square is a Gamma variate whose relative spread depends on K
+//   and dof but not on sigma, so on a logarithmic scale the background cluster has the same width
+//   at every noise level and every slice. And if X ~ Gamma(alpha, theta), the density of log X is
+//   proportional to exp(alpha y - e^y / theta), which is maximal where e^y = alpha theta, the mean of
+//   X: the mode on this scale locates the cluster's mean exactly, not approximately.
+//
+// THE HISTOGRAM is MRtrix3's, with its bin width set by the Freedman-Diaconis rule (twice the
+//   interquartile range times the cube root of the reciprocal of the number of voxels), which is
+//   the width minimising the integrated squared error of the density estimate. Both the number of
+//   voxels in the slice, set by the spatial resolution, and the spread of the slice's intensities,
+//   set by the proportions of tissue and air, therefore determine the binning, and neither is
+//   embedded as a constant.
+//
+// WHICH LOCAL MAXIMA ARE MODES. A histogram of finite counts has local maxima that are sampling
+//   fluctuation, and at fine bin widths many of them. Each is tested against the higher of the two
+//   minima flanking it, the difference of two Poisson counts having variance equal to their sum; the
+//   least significant maximum that fails is merged into its neighbour (removed together with that
+//   minimum), and the test is repeated until every maximum that remains passes. The critical value
+//   is corrected for the number of local maxima initially present, so that the probability of any
+//   fluctuation being accepted is mode_significance whatever the number of bins. Without that
+//   correction, the far tail of the background cluster in a finely-sampled slice (beyond three
+//   standard deviations of 147 456 voxels at 384 x 384, still more than min_voxels_slice voxels)
+//   offers a fluctuation that passes the test somewhere. A mode's voxels are those of the bins
+//   between the minima that flank it.
+SliceMode lowest_mode(std::vector<default_type> &log_mean_squares, const BackgroundParameters &parameters) {
+  SliceMode result;
+  const size_t n = log_mean_squares.size();
+  if (n < parameters.min_voxels_slice) {
+    result.failure = "the slice holds only " + str(n) + " voxels with usable magnitudes";
+    return result;
+  }
+
+  // Histogram::Calibrator divides by the interquartile range unguarded, and with a range far
+  //   exceeding it would allocate more bins than there are voxels. Both conditions are checked here,
+  //   with the quantile indices it uses, the lower quartile it reads being no greater than the one
+  //   computed here.
+  {
+    const size_t upper_index = size_t(std::round(0.75 * default_type(n)));
+    const size_t lower_index = size_t(std::round(0.25 * default_type(n)));
+    std::nth_element(log_mean_squares.begin(), log_mean_squares.begin() + upper_index, log_mean_squares.end());
+    const default_type upper = log_mean_squares[upper_index];
+    std::nth_element(log_mean_squares.begin(), log_mean_squares.begin() + lower_index, log_mean_squares.end());
+    const default_type lower = log_mean_squares[lower_index];
+    const auto extremes = std::minmax_element(log_mean_squares.begin(), log_mean_squares.end());
+    const default_type range = *extremes.second - *extremes.first;
+    if (!(upper > lower) || !(range <= 2.0 * (upper - lower) * std::pow(default_type(n), 2.0 / 3.0))) {
+      result.failure = "the voxel intensities of the slice are too uniform to form a histogram";
+      return result;
+    }
+  }
+
+  Algo::Histogram::Calibrator calibrator;
+  for (const default_type value : log_mean_squares)
+    calibrator(value);
+  calibrator.finalize(1, false);
+  if (calibrator.get_num_bins() == 0) {
+    result.failure = "the voxel intensities of the slice are too few to form a histogram";
+    return result;
+  }
+  Algo::Histogram::Data histogram(calibrator);
+  for (const default_type value : log_mean_squares)
+    histogram(value);
+  const ssize_t num_bins = ssize_t(histogram.size());
+
+  // The alternating sequence of minima and maxima of the counts. Runs of equal counts are treated as
+  //   one bin, and the sequence is bounded at either end by a virtual minimum of count zero, so that a
+  //   maximum at the edge of the histogram is tested against the absence of voxels beyond it.
+  class Extremum {
+  public:
+    ssize_t first;
+    ssize_t last;
+    size_t count;
+  };
+  std::vector<Extremum> runs;
+  for (ssize_t bin = 0; bin != num_bins; ++bin) {
+    if (!runs.empty() && runs.back().count == histogram[size_t(bin)])
+      runs.back().last = bin;
+    else
+      runs.push_back({bin, bin, histogram[size_t(bin)]});
+  }
+  std::vector<Extremum> extrema(1, {-1, -1, 0});
+  for (size_t r = 0; r != runs.size(); ++r) {
+    const size_t left = r == 0 ? 0 : runs[r - 1].count;
+    const size_t right = r + 1 == runs.size() ? 0 : runs[r + 1].count;
+    if ((runs[r].count > left && runs[r].count > right) || (runs[r].count < left && runs[r].count < right))
+      extrema.push_back(runs[r]);
+  }
+  extrema.push_back({num_bins, num_bins, 0});
+  // Maxima occupy the odd positions, minima the even ones.
+  assert(extrema.size() % 2 == 1);
+
+  const size_t num_maxima = extrema.size() / 2;
+  const default_type alpha = parameters.mode_significance / default_type(num_maxima);
+  const default_type critical = std::sqrt(2.0) * Math::erfcinv(2.0 * alpha);
+  while (extrema.size() > 3) {
+    size_t weakest = 0;
+    default_type weakest_score = std::numeric_limits<default_type>::infinity();
+    for (size_t k = 1; k < extrema.size(); k += 2) {
+      const default_type peak = default_type(extrema[k].count);
+      const default_type saddle = default_type(std::max(extrema[k - 1].count, extrema[k + 1].count));
+      const default_type score = (peak - saddle) / std::sqrt(peak + saddle);
+      if (score < weakest_score) {
+        weakest_score = score;
+        weakest = k;
+      }
+    }
+    if (weakest_score > critical)
+      break;
+    // Remove the maximum together with the higher of its flanking minima, joining it to the
+    //   neighbour on that side.
+    const size_t saddle = extrema[weakest - 1].count >= extrema[weakest + 1].count ? weakest - 1 : weakest + 1;
+    extrema.erase(extrema.begin() + ssize_t(std::min(weakest, saddle)),
+                  extrema.begin() + ssize_t(std::max(weakest, saddle)) + 1);
+  }
+
+  std::vector<size_t> cumulative(size_t(num_bins) + 1, 0);
+  for (ssize_t bin = 0; bin != num_bins; ++bin)
+    cumulative[size_t(bin) + 1] = cumulative[size_t(bin)] + histogram[size_t(bin)];
+  for (size_t k = 1; k < extrema.size(); k += 2) {
+    const ssize_t first = extrema[k - 1].last + 1;
+    const ssize_t last = extrema[k + 1].first - 1;
+    const size_t voxels = cumulative[size_t(last) + 1] - cumulative[size_t(first)];
+    if (voxels >= parameters.min_voxels_slice) {
+      const default_type position = 0.5 * default_type(extrema[k].first + extrema[k].last) + 0.5;
+      result.log_mean_square = calibrator.get_min() + position * calibrator.get_bin_width();
+      return result;
+    }
+  }
+  result.failure = "no mode of the distribution of voxel intensities in the slice comprises at least " +
+                   str(parameters.min_voxels_slice) + " voxels, so too few can be identified as containing noise alone";
+  return result;
+}
+
 } // namespace
 
 default_type BackgroundResult::dof_at_slice(const ssize_t slice) const {
@@ -587,37 +671,6 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
                      " there are no background voxels from which to estimate the noise distribution";
     return result;
   }
-
-  // The top of the initial noise-level search grid, as Algorithm 1 specifies it: the noise level at
-  //   which a background voxel at the largest admissible degrees of freedom would have median
-  //   magnitude sigma sqrt(2 P^{-1}(dof_max/2, 1/2)) equal to the median of all samples of the
-  //   image.
-  //
-  // THE CHOICE OF STATISTIC MATTERS. Where background dominates the field of view this is an upper
-  //   bound on sigma; but where it does not, the median of all samples lies within the tissue and
-  //   the grid extends well beyond the noise level, and the further it extends, the more slices in
-  //   which the voxel count is maximised by a candidate that admits tissue rather than background.
-  //   The median of all samples is the statistic least prone to this among those cheap enough to
-  //   compute, because it is dominated by the many diffusion-weighted volumes in which tissue is
-  //   darkest. On synthetic data with too little background, statistics weighted towards the
-  //   brighter volumes -- the median over voxels of each voxel's root mean square magnitude or of
-  //   its median magnitude, which exceed it by 12-67% -- led most slices to select tissue and
-  //   underestimated the degrees of freedom by a factor of up to three, whereas this statistic
-  //   recovered them; the median over volumes of each volume's median (2-10% larger) recovered the
-  //   global estimate but selected tissue in more slices.
-  const default_type median_magnitude = accumulation.magnitudes.median();
-  if (!std::isfinite(median_magnitude)) {
-    result.decline = "the image contains no positive finite magnitudes";
-    return result;
-  }
-  const default_type sigma_hi = median_magnitude / std::sqrt(2.0 * gamma_p_inv(0.5 * parameters.dof_max, 0.5));
-  if (!std::isfinite(sigma_hi) || !(sigma_hi > 0.0)) {
-    result.decline = "a noise level search range could not be established from the image intensities";
-    return result;
-  }
-  std::vector<default_type> initial_candidates(parameters.num_candidates);
-  for (ssize_t i = 0; i != parameters.num_candidates; ++i)
-    initial_candidates[i] = default_type(i + 1) * sigma_hi / default_type(parameters.num_candidates);
 
   const size_t slice_axis = accumulation.slice_axis;
   const std::array<size_t, 2> plane_axes = slice_axis == 0   ? std::array<size_t, 2>{{1, 2}}
@@ -656,7 +709,25 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
       group.sort_and_accumulate(accumulation.voxels);
 
     SliceEstimate &estimate = result.slices[size_t(slice)];
-    estimate = estimate_slice(groups, initial_candidates, method, parameters);
+    estimate.index = slice;
+    if (groups.empty()) {
+      estimate.decline = "no voxel of this slice provided a usable magnitude in any volume";
+      continue;
+    }
+    std::vector<default_type> log_mean_squares;
+    for (const Group &group : groups) {
+      for (const size_t index : group.voxels)
+        log_mean_squares.push_back(std::log(accumulation.voxels[index].sum_sq / default_type(group.count)));
+    }
+    const SliceMode mode = lowest_mode(log_mean_squares, parameters);
+    if (!std::isfinite(mode.log_mean_square)) {
+      estimate.decline = mode.failure;
+      continue;
+    }
+    // A background voxel's per-sample mean square is sigma^2 dof; the noise level at which the
+    //   first window, evaluated at dof_min, has its mean at the mode is therefore:
+    const default_type initial_sigma = std::sqrt(std::exp(mode.log_mean_square) / parameters.dof_min);
+    estimate = estimate_slice(groups, initial_sigma, method, parameters);
     estimate.index = slice;
     if (estimate.estimated) {
       result.num_selected_total += estimate.num_selected;
