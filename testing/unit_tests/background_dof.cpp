@@ -54,6 +54,12 @@
 //    estimation is not), and that neither scarce or abundant background nor in-plane matrices from
 //    24 x 24 to 256 x 256 disturb the per-slice initialisation.
 //
+// 5. ZERO-VALUED SAMPLES. Zeros produced by integer rounding or by clipping are treated as samples
+//    censored below a threshold, and the censored fits recover the truth where excluding the zeros
+//    overestimates it; the storage quantum from which the threshold is set is detected; and zeros
+//    that are not noise (scattered at random, or whole regions zero-filled in some volumes) are
+//    recognised as inconsistent with censoring and excluded instead, with the caveat raised.
+//
 // Modes:
 //   (no arguments)     regression test; non-zero exit status on failure.
 //   --evidence         print the full tables, including the larger sample sizes.
@@ -89,6 +95,7 @@ using MR::Denoise::Precondition::NoiseModel::estimate_caveats;
 using MR::Denoise::Precondition::NoiseModel::estimate_from_sums;
 using MR::Denoise::Precondition::NoiseModel::SampleSums;
 using MR::Denoise::Precondition::NoiseModel::SliceEstimate;
+using MR::Denoise::Precondition::NoiseModel::VoxelStats;
 using MR::Math::digamma;
 using MR::Math::gamma_p;
 using MR::Math::gamma_p_inv;
@@ -976,29 +983,30 @@ void test_caveats(std::FILE *out) {
     std::fprintf(out, "%-26s excluded=%.4f caveats=%zu\n", "caveats: clean", result.excluded_fraction, caveats.size());
   }
 
-  // Rician background clipped below one noise level, as a reconstruction that discards low
-  //   magnitudes would: 39% of background samples become zero, the estimate is inflated, and the
-  //   zero-sample caveat is what reports it.
+  // Zeros that are not noise, scattered at random through 1% of the samples: they are excluded
+  //   from the fit, and the zero-sample caveat reports it (see test_zero_phantoms() for the
+  //   estimate itself).
   {
     PhantomSpec spec = clean;
-    spec.dof = 2.0;
     MR::Image<float> image = make_phantom(spec, 424242u);
+    RNG rng(4242u);
+    std::uniform_real_distribution<double> uniform(0.0, 1.0);
     for (auto l = MR::Loop(image)(image); l; ++l) {
-      if (image.value() < float(slice_sigma(spec, image.index(2))))
+      if (uniform(rng) < 0.01)
         image.value() = 0.0f;
     }
     const BackgroundResult result = run_phantom(image, background_method_t::ML);
-    check(bool(result), "caveats (clipped): an estimate is produced");
+    check(bool(result), "caveats (zeroed): an estimate is produced");
     const std::vector<std::string> caveats = estimate_caveats(result);
     std::fprintf(out,
                  "%-26s dof=%.4f excluded=%.4f caveats=%zu\n",
-                 "caveats: clipped",
+                 "caveats: zeroed",
                  result.dof,
                  result.excluded_fraction,
                  caveats.size());
-    check(result.excluded_fraction > 0.3, "caveats (clipped): the zeroed samples are counted");
-    check(has_caveat(caveats, zero_phrase), "caveats (clipped): the zero-sample caveat is raised");
-    check(!has_caveat(caveats, spread_phrase), "caveats (clipped): the spread caveat is not raised");
+    check(result.excluded_fraction > 0.005, "caveats (zeroed): the excluded zeros are counted");
+    check(has_caveat(caveats, zero_phrase), "caveats (zeroed): the zero-sample caveat is raised");
+    check(!has_caveat(caveats, spread_phrase), "caveats (zeroed): the spread caveat is not raised");
   }
 
   // The spread caveat, on constructed results, so that its threshold is tested directly: per-slice
@@ -1030,6 +1038,295 @@ void test_caveats(std::FILE *out) {
   declined.estimated = false;
   declined.excluded_fraction = 0.5;
   check(estimate_caveats(declined).empty(), "caveats: nothing is raised about a declined estimate");
+}
+
+// ---------------------------------------------------------------------------
+// 5. Zero-valued samples
+// ---------------------------------------------------------------------------
+
+// How the zeros of a set of samples arise.
+enum class zeros_t { ROUNDED, CLIPPED, ROUNDED_PLUS_EXTRA };
+
+// Sums of a large sample from one background distribution, with zeros produced as named. For
+//   ROUNDED and ROUNDED_PLUS_EXTRA the magnitudes are rounded to integers and the censoring
+//   threshold is half the quantum; for CLIPPED, magnitudes below "level" are set to zero and the
+//   threshold is that level. ROUNDED_PLUS_EXTRA additionally zeroes a proportion "level" of samples
+//   at random. Also returns the sums with the zeros excluded, as was formerly done.
+std::pair<SampleSums, SampleSums> zero_sums(const zeros_t mode,
+                                            const double dof,
+                                            const double sigma,
+                                            const double level,
+                                            const int num_samples,
+                                            const unsigned seed) {
+  RNG rng(seed);
+  std::uniform_real_distribution<double> uniform(0.0, 1.0);
+  SampleSums sums;
+  sums.threshold_sq = mode == zeros_t::CLIPPED ? level * level : 0.25;
+  for (int sample = 0; sample != num_samples; ++sample) {
+    double m = sample_magnitude(0.0, dof, sigma, rng);
+    if (mode == zeros_t::CLIPPED) {
+      if (m < level)
+        m = 0.0;
+    } else {
+      m = std::round(m);
+      if (mode == zeros_t::ROUNDED_PLUS_EXTRA && uniform(rng) < level)
+        m = 0.0;
+    }
+    if (m == 0.0) {
+      ++sums.num_zero;
+      continue;
+    }
+    const double m2 = m * m;
+    ++sums.count;
+    sums.sum_sq += m2;
+    sums.sum_quad += m2 * m2;
+    sums.sum_log_sq += std::log(m2);
+  }
+  SampleSums excluded = sums;
+  excluded.num_zero = 0;
+  return {sums, excluded};
+}
+
+// The censored fits on large samples, at parameter values where excluding the zeros is badly
+//   biased: a half-Gaussian background (dof 1, as reported for GE data) stored as integers leaves 4%
+//   of samples zero even at a noise level of ten quanta, and exclusion overestimates its degrees of
+//   freedom by about 20%. Tolerances are 2% for maximum likelihood (whose residual error at a noise
+//   level of a few quanta is the rounding of the non-zero magnitudes, which censoring the zeros
+//   does not address) and 3% for the method of moments.
+void test_censored_estimators(std::FILE *out) {
+  class Case {
+  public:
+    const char *name;
+    zeros_t mode;
+    double dof;
+    double sigma;
+    double level;
+  };
+  const std::vector<Case> cases{{"rounded", zeros_t::ROUNDED, 1.0, 10.0, 0.0},
+                                {"rounded", zeros_t::ROUNDED, 1.0, 5.0, 0.0},
+                                {"rounded", zeros_t::ROUNDED, 2.0, 2.0, 0.0},
+                                {"clipped", zeros_t::CLIPPED, 2.0, 10.0, 5.0},
+                                {"clipped", zeros_t::CLIPPED, 2.0, 10.0, 10.0}};
+  std::fprintf(out,
+               "\n%-9s %-5s %-6s %-6s %8s %9s %9s %9s %9s\n",
+               "zeros",
+               "dof",
+               "sigma",
+               "level",
+               "zero%",
+               "excluded",
+               "ml",
+               "moments",
+               "sigma(ml)");
+  unsigned seed = 31337u;
+  for (const Case &c : cases) {
+    const auto sums = zero_sums(c.mode, c.dof, c.sigma, c.level, 400000, seed++);
+    const Estimate excluded = estimate_from_sums(sums.second, background_method_t::ML);
+    const Estimate ml = estimate_from_sums(sums.first, background_method_t::ML);
+    const Estimate moments = estimate_from_sums(sums.first, background_method_t::MOMENTS);
+    const double zero_fraction = double(sums.first.num_zero) / double(sums.first.num_zero + sums.first.count);
+    std::fprintf(out,
+                 "%-9s %-5g %-6g %-6g %8.2f %9.4f %9.4f %9.4f %9.4f\n",
+                 c.name,
+                 c.dof,
+                 c.sigma,
+                 c.level,
+                 100.0 * zero_fraction,
+                 excluded.dof,
+                 ml.dof,
+                 moments.dof,
+                 ml.sigma);
+    const std::string label = std::string("censored (") + c.name + ", dof " + std::to_string(c.dof) + ", sigma " +
+                              std::to_string(c.sigma) + ", level " + std::to_string(c.level) + ")";
+    check(bool(ml) && bool(moments), label + ": both censored fits succeed");
+    check_relative(ml.dof, c.dof, 0.02, label + ": maximum likelihood recovers the degrees of freedom");
+    check_relative(ml.sigma, c.sigma, 0.02, label + ": maximum likelihood recovers the noise level");
+    check_relative(moments.dof, c.dof, 0.03, label + ": the method of moments recovers the degrees of freedom");
+    check(excluded.dof > 1.05 * c.dof, label + ": excluding the zeros overestimates (the bias being corrected)");
+  }
+
+  // Censoring at threshold T is the same model at every scale: multiplying every magnitude and the
+  //   threshold by a common factor leaves the degrees of freedom unchanged.
+  {
+    const auto sums = zero_sums(zeros_t::CLIPPED, 2.0, 10.0, 5.0, 20000, 99u);
+    SampleSums scaled = sums.first;
+    const double factor = 1.0e3;
+    scaled.sum_sq *= factor * factor;
+    scaled.sum_quad *= factor * factor * factor * factor;
+    scaled.sum_log_sq += double(scaled.count) * std::log(factor * factor);
+    scaled.threshold_sq *= factor * factor;
+    for (const background_method_t method : {background_method_t::ML, background_method_t::MOMENTS}) {
+      const Estimate original = estimate_from_sums(sums.first, method);
+      const Estimate rescaled = estimate_from_sums(scaled, method);
+      check_relative(rescaled.dof, original.dof, 1.0e-6, "censored: the degrees of freedom are scale-invariant");
+      check_relative(rescaled.sigma, factor * original.sigma, 1.0e-6, "censored: the noise level scales with the data");
+    }
+  }
+
+  // Without zeros, the threshold is never consulted: the fit is that of the positive samples.
+  {
+    const auto sums = zero_sums(zeros_t::CLIPPED, 8.0, 10.0, 0.0, 5000, 7u);
+    SampleSums with_threshold = sums.first;
+    with_threshold.threshold_sq = 123.0;
+    for (const background_method_t method : {background_method_t::ML, background_method_t::MOMENTS}) {
+      const Estimate a = estimate_from_sums(sums.first, method);
+      const Estimate b = estimate_from_sums(with_threshold, method);
+      check(a.dof == b.dof && a.sigma == b.sigma, "censored: a threshold without zeros changes nothing");
+    }
+  }
+
+  // Zeros without a threshold are refused rather than fitted.
+  {
+    SampleSums sums = zero_sums(zeros_t::ROUNDED, 1.0, 5.0, 0.0, 5000, 8u).first;
+    sums.threshold_sq = 0.0;
+    check(!estimate_from_sums(sums, background_method_t::ML), "censored: zeros without a threshold are refused");
+  }
+}
+
+// Detection of the storage quantum from the smallest distinct magnitudes, and the threshold derived
+//   from it: integer data, integers scaled by a non-integral factor, and continuous data.
+void test_quantum_detection(std::FILE *out) {
+  PhantomSpec spec;
+  spec.dof = 2.0;
+  spec.sigma = 3.0;
+  spec.sigma_ratio = 1.0;
+  for (const double scale : {1.0, 0.37, 0.0}) {
+    MR::Image<float> image = make_phantom(spec, 777u);
+    if (scale > 0.0) {
+      for (auto l = MR::Loop(image)(image); l; ++l)
+        image.value() = float(scale * std::round(double(image.value())));
+    }
+    const Accumulation accumulation = accumulate_background(image, 2);
+    std::fprintf(out, "quantum detection: scale %-5g detected %.8g\n", scale, accumulation.quantum);
+    if (scale > 0.0) {
+      check_relative(
+          accumulation.quantum, scale, 1.0e-6, "quantum: detected for integers scaled by " + std::to_string(scale));
+      check_relative(
+          accumulation.censoring_threshold(scale), 0.5 * scale, 1.0e-6, "quantum: threshold is half the quantum");
+    } else {
+      check(accumulation.quantum == 0.0, "quantum: none is detected in continuous data");
+      check(accumulation.censoring_threshold(4.0) == 4.0,
+            "quantum: threshold of continuous data is the smallest magnitude");
+    }
+    // Rounding at a noise level of three quanta leaves zeros, which must be counted per voxel.
+    size_t zeros = 0;
+    for (const VoxelStats &stats : accumulation.voxels)
+      zeros += stats.num_zero;
+    check((scale > 0.0) == (zeros > 0), "quantum: zeros are counted where, and only where, rounding produced them");
+  }
+}
+
+// Algorithm 1 end to end on phantoms whose zeros are, and are not, censored noise.
+void test_zero_phantoms(std::FILE *out) {
+  std::fprintf(out, "\n");
+  const auto report_zeros = [out](const char *name, const BackgroundResult &result) {
+    std::fprintf(out,
+                 "%-26s dof=%.4f censored=%.4f excluded=%.4f slices_excluding_zeros=%zu caveats=%zu\n",
+                 name,
+                 result.dof,
+                 result.censored_fraction,
+                 result.excluded_fraction,
+                 result.num_slices_zeros_excluded,
+                 estimate_caveats(result).size());
+  };
+  const auto round_image = [](MR::Image<float> &image) {
+    for (auto l = MR::Loop(image)(image); l; ++l)
+      image.value() = std::round(image.value());
+  };
+
+  // Half-Gaussian background stored as integers at a noise level of 5 to 10 quanta: 4% to 8% of
+  //   background samples round to zero. Every slice censors them, and the truth is recovered.
+  for (const background_method_t method : {background_method_t::ML, background_method_t::MOMENTS}) {
+    PhantomSpec spec;
+    spec.dof = 1.0;
+    spec.sigma = 5.0;
+    MR::Image<float> image = make_phantom(spec, 515151u);
+    round_image(image);
+    const BackgroundResult result = run_phantom(image, method);
+    const std::string name =
+        std::string("rounded half-Gaussian (") + (method == background_method_t::ML ? "ml" : "moments") + ")";
+    report_zeros(name.c_str(), result);
+    check(bool(result), name + ": an estimate is produced");
+    check_relative(result.dof, spec.dof, 0.05, name + ": degrees of freedom");
+    check(result.num_slices_zeros_excluded == 0, name + ": the rounding zeros are censored in every slice");
+    check(result.censored_fraction > 0.02, name + ": the censored zeros are counted");
+    check(estimate_caveats(result).empty(), name + ": no caveat is raised");
+  }
+
+  // Rician background clipped below one noise level, as a reconstruction that discards low
+  //   magnitudes would: 39% of background samples become zero, and the clip level rises across the
+  //   slices with the noise level. Formerly excluded, the zeros inflated the estimate by half.
+  {
+    PhantomSpec spec;
+    spec.dof = 2.0;
+    MR::Image<float> image = make_phantom(spec, 424242u);
+    for (auto l = MR::Loop(image)(image); l; ++l) {
+      if (image.value() < float(slice_sigma(spec, image.index(2))))
+        image.value() = 0.0f;
+    }
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    report_zeros("clipped Rician", result);
+    check(bool(result), "clipped: an estimate is produced");
+    check_relative(result.dof, spec.dof, 0.05, "clipped: degrees of freedom");
+    check(result.num_slices_zeros_excluded == 0, "clipped: the clipped zeros are censored in every slice");
+    check(result.censored_fraction > 0.3, "clipped: the censored zeros are counted");
+    check(estimate_caveats(result).empty(), "clipped: no caveat is raised");
+  }
+
+  // Integer data with no rounding zeros to speak of, plus zeros that are not noise: 0.5% and 2% of
+  //   samples zeroed at random, and an edge slab of the background zeroed in half the volumes (as
+  //   resampling at the edge of the field of view can do). Censoring these would drive the degrees
+  //   of freedom far down. Scattered zeros are recognised by the consistency check, and excluded
+  //   in every slice. The slab's voxels, whose summed squared magnitude is halved, are mostly
+  //   rejected by the acceptance test itself, so their zeros seldom reach a fit; where they do, the
+  //   consistency check excludes them, unless they are too few to contradict censoring, in which
+  //   case they are too few to matter.
+  for (const double fraction : {0.005, 0.02, -1.0}) {
+    PhantomSpec spec;
+    MR::Image<float> image = make_phantom(spec, 616161u);
+    round_image(image);
+    RNG rng(6161u);
+    std::uniform_real_distribution<double> uniform(0.0, 1.0);
+    for (auto l = MR::Loop(image)(image); l; ++l) {
+      const bool zero = fraction > 0.0 ? uniform(rng) < fraction : image.index(0) < 6 && image.index(3) % 2 == 0;
+      if (zero)
+        image.value() = 0.0f;
+    }
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    const std::string name =
+        fraction > 0.0 ? "random zeros " + std::to_string(fraction) : std::string("zeroed edge slab");
+    report_zeros(name.c_str(), result);
+    check(bool(result), name + ": an estimate is produced");
+    check_relative(result.dof, spec.dof, 0.05, name + ": degrees of freedom");
+    if (fraction > 0.0)
+      check(result.num_slices_zeros_excluded == size_t(spec.nz), name + ": the zeros are excluded in every slice");
+    check(result.censored_fraction < 1.0e-3, name + ": no more than a negligible number of zeros is censored");
+  }
+
+  // A real-valued reconstruction whose negative values are clipped to zero: half of all background
+  //   samples are zero, and the positive half is distributed as the magnitude is. The threshold of
+  //   such floating-point data is minute, so the censored fit can explain any proportion of zeros by
+  //   driving the degrees of freedom towards zero, and is consistent with its own prediction of the
+  //   zero count; the consistency check must therefore predict that count from the positive
+  //   samples alone, which it does, and the zeros are excluded.
+  {
+    PhantomSpec spec;
+    spec.dof = 2.0;
+    MR::Image<float> image = make_phantom(spec, 717171u);
+    RNG rng(7171u);
+    std::bernoulli_distribution negative(0.5);
+    for (auto l = MR::Loop(image)(image); l; ++l) {
+      if (negative(rng))
+        image.value() = 0.0f;
+    }
+    const BackgroundResult result = run_phantom(image, background_method_t::ML);
+    report_zeros("real part, clipped", result);
+    check(bool(result), "real part clipped: an estimate is produced");
+    check_relative(result.dof, spec.dof, 0.05, "real part clipped: degrees of freedom");
+    check(result.num_slices_zeros_excluded == size_t(spec.nz),
+          "real part clipped: the zeros are excluded in every slice");
+    check(result.censored_fraction == 0.0, "real part clipped: no zero is censored");
+  }
 }
 
 } // namespace
@@ -1066,6 +1363,9 @@ int main(int argc, char **argv) {
   test_scale_equivariance(out);
   test_algorithm(out, tsv);
   test_caveats(out);
+  test_censored_estimators(out);
+  test_quantum_detection(out);
+  test_zero_phantoms(out);
 
   if (tsv != nullptr)
     std::fclose(tsv);

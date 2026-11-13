@@ -192,11 +192,23 @@ const char *const noise_dof_limitations_description =
     " Thirdly, simultaneous multi-slice acquisition aliases signal into what should be background,"
     " which inflates the estimate."
     " It nonetheless remains a large improvement on assuming a Rician distribution."
-    " Separately, zero-valued samples are excluded from the fit,"
-    " so magnitudes that were clipped or rounded to zero"
-    " (as integer storage of data with a low noise level can do)"
-    " truncate the distribution and inflate the estimate;"
-    " a warning is issued where more than 1% of the samples fitted are zero."
+    " Separately, zero-valued samples receive particular treatment."
+    " A voxel that is zero in every volume is disregarded."
+    " Otherwise, a zero is taken to be a noise magnitude that was too small to be represented,"
+    " whether rounded to zero by integer storage of data with a low noise level"
+    " or clipped to zero by the reconstruction,"
+    " and enters the fit as a sample known only to lie below a threshold:"
+    " half the storage quantum (detected from the data) below the smallest positive magnitude of the slice."
+    " Simply excluding such zeros instead would truncate the distribution and inflate the estimate,"
+    " by around 20% for a half-Gaussian background stored as integers at a noise level of ten quanta."
+    " Zeros that are not noise,"
+    " such as regions filled with zeros by reconstruction or resampling,"
+    " or negative values clipped from a real-valued reconstruction,"
+    " would conversely deflate the estimate if treated in this way;"
+    " in each slice, the number of zeros is therefore compared against that predicted"
+    " from a fit to the positive magnitudes alone,"
+    " and where there are far more than predicted, the zeros of that slice are instead excluded from the fit,"
+    " with a warning issued where more than 1% of the samples of the voxels selected were excluded."
     " Note also that while the procedure necessarily estimates a background noise level"
     " alongside the degrees of freedom,"
     " that value is not used as the noise level in any subsequent computation:"
@@ -504,7 +516,11 @@ NoiseModel::BackgroundResult estimate_background_dof(ImageType &input, const Noi
     if (slice.estimated)
       INFO("Noise distribution at slice " + str(slice.index) + ": " + str(slice.dof, 4) + " degrees of freedom, " +
            "sigma " + str(slice.sigma, 4) + ", from " + str(slice.num_selected) + " voxels in " +
-           str(slice.num_iterations) + " iterations");
+           str(slice.num_iterations) + " iterations" +
+           (slice.zeros_excluded ? std::string("; zero-valued samples excluded")
+            : slice.num_zero > 0 ? "; " + str(slice.num_zero) + " zero-valued samples treated as censored below " +
+                                       str(slice.censoring_threshold, 4)
+                                 : std::string()));
     else
       INFO("No noise distribution estimate at slice " + str(slice.index) + ": " + slice.decline);
   }

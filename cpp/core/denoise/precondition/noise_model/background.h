@@ -19,6 +19,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -74,7 +75,13 @@ namespace MR::Denoise::Precondition::NoiseModel {
 //      the variance-stabilising transform's scale. The sigma here is computed because the degrees
 //      of freedom cannot be estimated without it, is exported as a diagnostic, and is otherwise
 //      discarded.
-//   5. A slice holding fewer than min_voxels_slice background voxels, but enough dark tissue to
+//   5. Zero-valued samples are treated as censored below a threshold where their number is
+//      consistent with that (see estimate_background()), which corrects the overestimate that
+//      excluding zeros produced from integer-rounded or clipped data. It cannot correct rounding
+//      bias in the samples that are not zero, which remains where the noise level is within a
+//      couple of storage quanta of zero; nor does it follow a clip level that varies WITHIN a
+//      slice, where the zeros are tested against the lowest and are typically then excluded.
+//   6. A slice holding fewer than min_voxels_slice background voxels, but enough dark tissue to
 //      form a mode of that size, is initialised within the tissue and may converge there to a wrong
 //      estimate. Nothing tests the selection for consistency with the Gamma model, so such slices
 //      are not declined; they are flagged only where they make the per-slice estimates disagree
@@ -135,17 +142,36 @@ public:
   //   estimator declines outright. A reconstruction that has masked the background leaves nothing
   //   to estimate from, and what remains adjacent to the mask boundary is not background either.
   default_type max_zeroed_fraction{0.5};
+  // Consistency test of zero-valued samples with censoring (see estimate_background()). The zeros
+  //   among a slice's selected samples are judged NOT to be censored noise where a one-sided test
+  //   rejects, at significance zero_consistency_p, the hypothesis that they occur at no more than
+  //   zero_excess_factor times the rate predicted by a fit to the positive samples alone. The factor is a tolerance for
+  //   the model of censoring being itself approximate: integer rounding also displaces the
+  //   magnitudes that do not round to zero, so the observed zero rate departs from the fitted one
+  //   by a few percent even where the zeros are genuinely rounded noise, and with 1e5 samples per
+  //   slice any departure at all is statistically significant. Zeros that are not noise (regions
+  //   zero-filled by reconstruction or resampling, or negative values clipped from a real-valued
+  //   reconstruction) exceed the predicted rate by an order of magnitude or more.
+  default_type zero_consistency_p{1.0e-6};
+  default_type zero_excess_factor{2.0};
 };
 
 // Sufficient statistics of one spatial voxel, accumulated over the K volumes of the input.
-//   These four numbers are sufficient for BOTH estimators and for the acceptance test, which is
-//   what makes the algorithm cheap: the 4D data are read exactly once and everything thereafter
+//   These numbers are sufficient for BOTH estimators and for the acceptance test, which is what
+//   makes the algorithm cheap: the 4D data are read exactly once and everything thereafter
 //   operates on a 3D array.
 class VoxelStats {
 public:
-  // Volumes at which the magnitude was finite and strictly positive. Zero and non-finite samples
-  //   are excluded rather than counted, since log(m^2) is what the likelihood is written in.
+  // Volumes at which the magnitude was finite and strictly positive; the three sums run over
+  //   these alone, log(m^2) being what the likelihood is written in.
   uint32_t count{0};
+  // Volumes at which the magnitude was exactly zero. These are not discarded: a stored zero states
+  //   that the magnitude lay below the censoring threshold (see Accumulation::censoring_threshold()),
+  //   and enters the fit as such. Non-finite samples are neither counted here nor in count.
+  uint32_t num_zero{0};
+  // The smallest positive magnitude, from which the censoring threshold of the voxel's slice is
+  //   determined. Single precision suffices, and keeps the structure at forty bytes.
+  float min_positive{std::numeric_limits<float>::infinity()};
   default_type sum_sq{0.0};     // sum_k m^2
   default_type sum_quad{0.0};   // sum_k m^4
   default_type sum_log_sq{0.0}; // sum_k log(m^2)
@@ -189,21 +215,39 @@ public:
   //   excluded can be recovered. Zero where unknown (an Accumulation not filled by
   //   accumulate_background()), in which case nothing that depends on it is reported.
   uint32_t num_volumes{0};
+  // The storage quantum: the constant of which every magnitude is an integer multiple, where the
+  //   data are evidently so (integer storage, with or without intensity scaling), and zero otherwise.
+  //   Detected from the smallest distinct magnitudes of the image (see accumulate_background()).
+  default_type quantum{0.0};
+  // The magnitude below which a stored zero is taken to have lain, given the smallest positive
+  //   magnitude m_min among the samples concerned: tau = m_min - quantum/2. For integer data whose
+  //   zeros arise from rounding, this is half the quantum; for floating-point data clipped at a
+  //   level t, it is (the sample estimate of) t; for both together, t - quantum/2. Zero where it
+  //   cannot be determined, in which case zeros cannot be censored and are excluded.
+  //   It is evaluated per slice (see estimate_background()), so that a clip level that differs
+  //   between slices -- one set relative to a noise level that does, for instance -- is followed.
+  default_type censoring_threshold(const default_type min_positive) const;
 };
 
-// Accumulate the statistics above from a magnitude image, in one pass. Explicitly instantiated for
+// Accumulate the statistics above from a magnitude image, in one pass, together with the
+//   smallest positive magnitude and the storage quantum. Explicitly instantiated for
 //   the real-valued image types the commands process; complex data have two degrees of freedom per
 //   sample by construction and are never passed here.
 template <class ImageType> Accumulation accumulate_background(ImageType &input, const size_t slice_axis);
 
 // The sums over a SELECTED SET of samples, from which either estimator is evaluated. "count" is
-//   the number of samples (voxel-volume pairs), not of voxels.
+//   the number of exactly observed (positive) samples, voxel-volume pairs rather than voxels, over
+//   which the three sums run. "num_zero" is the number of samples observed only to lie below the
+//   censoring threshold, whose square is "threshold_sq"; where it is zero the fit is precisely that
+//   of the exactly observed samples, and threshold_sq is not consulted.
 class SampleSums {
 public:
   size_t count{0};
   default_type sum_sq{0.0};
   default_type sum_quad{0.0};
   default_type sum_log_sq{0.0};
+  size_t num_zero{0};
+  default_type threshold_sq{0.0};
 };
 
 // One fit of the Gamma model to a selected set.
@@ -217,7 +261,8 @@ public:
   std::string failure;
 };
 
-// Fit (sigma, dof) to a selected set of background samples by one of the two methods.
+// Fit (sigma, dof) to a selected set of background samples by one of the two methods, treating
+//   any zero-valued samples as censored at the threshold the sums carry.
 //   Exposed rather than kept internal to the algorithm because it is the piece whose statistical
 //   behaviour has to be characterised on its own (bias and scatter against a known truth), and
 //   because it is the cheapest possible cross-check of one method against the other once the sums
@@ -235,6 +280,21 @@ public:
   //   slice declined, since "how many voxels did it find" is the first question a failure raises.
   size_t num_selected{0};
   ssize_t num_iterations{0};
+  // The censoring threshold of this slice (see Accumulation::censoring_threshold()); zero where the
+  //   slice holds no zeros, or none could be determined.
+  default_type censoring_threshold{0.0};
+  // Samples (voxel-volume pairs) of the final selection: all of them, and the zeros among them,
+  //   which are censored samples unless zeros_excluded is set.
+  size_t num_samples{0};
+  size_t num_zero{0};
+  // The sums of the final selection, from which the consistency of the zeros with censoring is
+  //   judged.
+  SampleSums sums;
+  // Whether zeros were present in the slice but excluded from its fit: either their number was
+  //   inconsistent with their being censored noise, or no censoring threshold could be determined,
+  //   or the censored fit declined. The estimate is then that of the positive samples alone, as the
+  //   paper's reference implementation computes it everywhere.
+  bool zeros_excluded{false};
   // Why this slice yielded no estimate; empty iff estimated.
   std::string decline;
 };
@@ -264,11 +324,16 @@ public:
   size_t num_selected_total{0};
   default_type zeroed_fraction{0.0};
   // Of all samples (voxel-volume pairs) of the voxels selected as background, the proportion that
-  //   were zero or non-finite and therefore excluded from the fit. Not a decline criterion but a
-  //   diagnostic (see estimate_caveats()): background magnitudes are continuous and essentially never
-  //   exactly zero, so zeros among them are low magnitudes that were clipped or rounded away, and
-  //   excluding them truncates the distribution being fitted.
+  //   were excluded from the fit: non-finite samples, and zeros in slices where they were not
+  //   treated as censored (SliceEstimate::zeros_excluded). Not a decline criterion but a diagnostic
+  //   (see estimate_caveats()).
   default_type excluded_fraction{0.0};
+  // Of the same samples, the proportion that were zero and entered the fit as censored.
+  default_type censored_fraction{0.0};
+  // As Accumulation::quantum.
+  default_type quantum{0.0};
+  // Number of slices whose zeros were excluded rather than censored (SliceEstimate::zeros_excluded).
+  size_t num_slices_zeros_excluded{0};
   // As Accumulation::num_volumes.
   uint32_t num_volumes{0};
   // Why no global estimate was produced; empty iff estimated.
@@ -300,9 +365,11 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
 //   slice with the tissue selected, whereas genuine background gives per-slice estimates that agree
 //   to within about 2% even from few volumes. A genuinely spatially varying distribution may also
 //   produce a spread, which the message acknowledges.
-// - More than a small proportion of the samples fitted are zero (BackgroundResult::excluded_fraction),
-//   meaning that the low tail of the distribution has been clipped or rounded away; the degrees of
-//   freedom are then overestimated.
+// - More than a small proportion of the samples of the selected voxels are zeros that were excluded
+//   from the fit (BackgroundResult::excluded_fraction) because they could not be explained as noise
+//   rounded or clipped below the censoring threshold. If they are nonetheless low magnitudes (clipped
+//   at a level that varies across the image, say), the low tail of the distribution is missing from
+//   the fit and the degrees of freedom are overestimated.
 // Empty for a result that did not produce an estimate.
 std::vector<std::string> estimate_caveats(const BackgroundResult &result);
 
