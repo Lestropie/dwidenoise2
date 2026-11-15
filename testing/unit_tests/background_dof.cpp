@@ -91,7 +91,10 @@
 #include "header.h"
 #include "image.h"
 #include "math/gamma.h"
+#include "math/math.h"
+#include "math/median.h"
 #include "math/noncentral_chi.h"
+#include "math/welford.h"
 #include "ncchi_sampler.h"
 
 using MR::Denoise::Precondition::NoiseModel::accumulate_background;
@@ -160,37 +163,6 @@ void check_difference(const double value, const double target, const double scal
   check_near(value, target, 1.0e-12 * std::fabs(target) + 1.0e-14 * std::fabs(scale), message);
 }
 
-double median_of(std::vector<double> values) {
-  std::sort(values.begin(), values.end());
-  const size_t n = values.size();
-  return n % 2 == 1 ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
-}
-
-double quantile_of(std::vector<double> values, const double q) {
-  std::sort(values.begin(), values.end());
-  const double position = q * double(values.size() - 1);
-  const size_t below = size_t(std::floor(position));
-  const size_t above = std::min(below + 1, values.size() - 1);
-  const double weight = position - double(below);
-  return (1.0 - weight) * values[below] + weight * values[above];
-}
-
-double mean_of(const std::vector<double> &values) {
-  if (values.empty())
-    return std::numeric_limits<double>::quiet_NaN();
-  return std::accumulate(values.begin(), values.end(), 0.0) / double(values.size());
-}
-
-double variance_of(const std::vector<double> &values) {
-  if (values.size() < 2)
-    return std::numeric_limits<double>::quiet_NaN();
-  const double mu = mean_of(values);
-  double acc = 0.0;
-  for (const double value : values)
-    acc += (value - mu) * (value - mu);
-  return acc / double(values.size() - 1);
-}
-
 // ---------------------------------------------------------------------------
 // 1. The sampler
 // ---------------------------------------------------------------------------
@@ -215,11 +187,13 @@ void test_samplers() {
       const double tolerance_mean = 4.0 * std::sqrt(variance_expected / double(num_samples));
       const double tolerance_variance = 6.0 * variance_expected * std::sqrt(2.0 / double(num_samples));
       const std::string context = " (dof " + std::to_string(dof) + ", a " + std::to_string(a) + ")";
-      check(std::fabs(mean_of(direct) - mean_expected) < tolerance_mean, "integer sampler mean" + context);
-      check(std::fabs(mean_of(mixture) - mean_expected) < tolerance_mean, "Poisson-mixture sampler mean" + context);
-      check(std::fabs(variance_of(direct) - variance_expected) < tolerance_variance,
+      const auto stats_direct = Math::welford(direct);
+      const auto stats_mixture = Math::welford(mixture);
+      check(std::fabs(stats_direct.mean - mean_expected) < tolerance_mean, "integer sampler mean" + context);
+      check(std::fabs(stats_mixture.mean - mean_expected) < tolerance_mean, "Poisson-mixture sampler mean" + context);
+      check(std::fabs(stats_direct.variance - variance_expected) < tolerance_variance,
             "integer sampler variance" + context);
-      check(std::fabs(variance_of(mixture) - variance_expected) < tolerance_variance,
+      check(std::fabs(stats_mixture.variance - variance_expected) < tolerance_variance,
             "Poisson-mixture sampler variance" + context);
       // Two-sample Kolmogorov-Smirnov: the two must agree in distribution, not merely in their
       //   first two moments.
@@ -245,10 +219,11 @@ void test_samplers() {
         sample[size_t(i)] = sample_fractional(a, dof, 1.0, rng);
       const double variance_expected = normalised_variance(a, dof);
       const std::string context = " (dof " + std::to_string(dof) + ", a " + std::to_string(a) + ")";
-      check(std::fabs(mean_of(sample) - normalised_mean(a, dof)) <
+      const auto stats = Math::welford(sample);
+      check(std::fabs(stats.mean - normalised_mean(a, dof)) <
                 4.0 * std::sqrt(variance_expected / double(num_samples)),
             "fractional sampler mean" + context);
-      check(std::fabs(variance_of(sample) - variance_expected) <
+      check(std::fabs(stats.variance - variance_expected) <
                 6.0 * variance_expected * std::sqrt(2.0 / double(num_samples)),
             "fractional sampler variance" + context);
     }
@@ -261,12 +236,11 @@ void test_samplers() {
 
 void test_special_functions(std::FILE *out) {
   constexpr double euler_mascheroni = 0.57721566490153286061;
-  constexpr double pi = 3.14159265358979323846;
 
   check_near(digamma(1.0), -euler_mascheroni, 1.0e-14, "psi(1) = -gamma");
   check_near(digamma(0.5), -euler_mascheroni - 2.0 * std::log(2.0), 1.0e-14, "psi(1/2) = -gamma - 2 log 2");
-  check_near(trigamma(1.0), pi * pi / 6.0, 1.0e-14, "psi'(1) = pi^2/6");
-  check_near(trigamma(0.5), pi * pi / 2.0, 1.0e-14, "psi'(1/2) = pi^2/2");
+  check_near(trigamma(1.0), Math::pow2(Math::pi) / 6.0, 1.0e-14, "psi'(1) = pi^2/6");
+  check_near(trigamma(0.5), Math::pow2(Math::pi) / 2.0, 1.0e-14, "psi'(1/2) = pi^2/2");
 
   // The recurrences, which pin both functions across the whole operating range independently of
   //   the asymptotic series each is ultimately evaluated from.
@@ -404,10 +378,10 @@ CellResult evaluate_cell(const double dof_true,
     SampleSums sums;
     for (int sample = 0; sample != num_samples; ++sample) {
       const double m = sample_magnitude(0.0, dof_true, sigma_true, rng);
-      const double m2 = m * m;
+      const double m2 = Math::pow2(m);
       ++sums.count;
       sums.sum_sq += m2;
-      sums.sum_quad += m2 * m2;
+      sums.sum_quad += Math::pow2(m2);
       sums.sum_log_sq += std::log(m2);
     }
     const Estimate estimate = estimate_from_sums(sums, method);
@@ -422,9 +396,9 @@ CellResult evaluate_cell(const double dof_true,
   }
   if (relative_dof.empty())
     return result;
-  result.bias_dof = median_of(relative_dof);
-  result.iqr_dof = quantile_of(relative_dof, 0.75) - quantile_of(relative_dof, 0.25);
-  result.bias_sigma = median_of(relative_sigma);
+  result.bias_dof = Math::median(relative_dof);
+  result.iqr_dof = Math::quantile(relative_dof, 0.75) - Math::quantile(relative_dof, 0.25);
+  result.bias_sigma = Math::median(relative_sigma);
   result.within_ten_percent = double(within) / double(num_repetitions);
   return result;
 }

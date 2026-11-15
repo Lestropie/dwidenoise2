@@ -33,6 +33,8 @@
 #include "image.h"
 #include "math/erfinv.h"
 #include "math/gamma.h"
+#include "math/math.h"
+#include "math/median.h"
 #include "metadata/bids.h"
 #include "mrtrix.h"
 
@@ -110,7 +112,7 @@ default_type detect_quantum(const std::vector<default_type> &smallest) {
     return 0.0;
   for (const default_type value : smallest) {
     const default_type multiple = value / spacing;
-    if (!(multiple <= quantum_max_multiple) || std::abs(multiple - std::round(multiple)) > quantum_tolerance)
+    if (!(multiple <= quantum_max_multiple) || std::fabs(multiple - std::round(multiple)) > quantum_tolerance)
       return 0.0;
   }
   return spacing;
@@ -157,10 +159,10 @@ public:
       }
       if (!(m > 0.0))
         continue;
-      const default_type m2 = m * m;
+      const default_type m2 = Math::pow2(m);
       ++stats.count;
       stats.sum_sq += m2;
-      stats.sum_quad += m2 * m2;
+      stats.sum_quad += Math::pow2(m2);
       stats.sum_log_sq += std::log(m2);
       stats.min_positive = std::min(stats.min_positive, float(m));
       retain_smallest(smallest, m);
@@ -306,7 +308,7 @@ bool fit_profiled_ml(const SampleSums &sums, const default_type start_shape, con
     default_type a = censored ? std::log(sum_sq / ((n + n0) * shape)) : b - 1.0;
     default_type fa = g(a);
     if (!censored) {
-      for (int i = 0; i != 200 && !(fa > 0.0); ++i) {
+      for (int i = 0; i != BackgroundParameters::maxiter_rootbracket && !(fa > 0.0); ++i) {
         a -= std::ldexp(1.0, i);
         fa = g(a);
       }
@@ -316,7 +318,7 @@ bool fit_profiled_ml(const SampleSums &sums, const default_type start_shape, con
       return std::exp(a);
     if (!(fb < 0.0))
       return std::exp(b);
-    for (int iteration = 0; iteration != 200; ++iteration) {
+    for (int iteration = 0; iteration != BackgroundParameters::maxiter_illinoisrootfind; ++iteration) {
       const default_type c = b - fb * (b - a) / (fb - fa);
       const default_type fc = g(c);
       if (fc * fb < 0.0) {
@@ -327,7 +329,7 @@ bool fit_profiled_ml(const SampleSums &sums, const default_type start_shape, con
       }
       b = c;
       fb = fc;
-      if (fb == 0.0 || std::abs(b - a) <= 1.0e-14 * (1.0 + std::abs(b)))
+      if (fb == 0.0 || std::fabs(b - a) <= BackgroundParameters::rootfind_tolerance * (1.0 + std::fabs(b)))
         break;
     }
     return std::exp(b);
@@ -380,7 +382,9 @@ bool fit_profiled_ml(const SampleSums &sums, const default_type start_shape, con
   default_type x2 = lower + ratio * (upper - lower);
   default_type f1 = profile(x1);
   default_type f2 = profile(x2);
-  for (int iteration = 0; iteration != 200 && upper - lower > 1.0e-10; ++iteration) {
+  for (int iteration = 0;
+       iteration != BackgroundParameters::maxiter_goldensectionmlfind && upper - lower > BackgroundParameters::peakfind_tolerance;
+       ++iteration) {
     if (f1 >= f2) {
       upper = x2;
       x2 = x1;
@@ -429,7 +433,7 @@ bool fit_censored_moments(const SampleSums &sums, Estimate &result) {
     const default_type log_p = lower_tail(shape, z).log_p;
     const default_type expected_sq = scale * shape * std::exp(lower_tail(shape + 1.0, z).log_p - log_p);
     const default_type expected_quad =
-        scale * scale * shape * (shape + 1.0) * std::exp(lower_tail(shape + 2.0, z).log_p - log_p);
+        Math::pow2(scale) * shape * (shape + 1.0) * std::exp(lower_tail(shape + 2.0, z).log_p - log_p);
     const default_type next_sq = sums.sum_sq + n0 * expected_sq;
     const default_type next_quad = sums.sum_quad + n0 * expected_quad;
     if (!std::isfinite(next_sq) || !std::isfinite(next_quad)) {
@@ -528,7 +532,7 @@ Estimate estimate_from_sums(const SampleSums &sums, const background_method_t me
       return result;
     }
     const auto f = [a_term, b_term](const default_type sigma) {
-      return digamma(a_term / (sigma * sigma)) - b_term + std::log(2.0 * sigma * sigma);
+      return digamma(a_term / Math::pow2(sigma)) - b_term + std::log(2.0 * Math::pow2(sigma));
     };
     // The correctly-scaled root mean square of the selected magnitudes. This is the value sigma
     //   would take were there exactly one effective channel, and is a better-conditioned start
@@ -539,12 +543,12 @@ Estimate estimate_from_sums(const SampleSums &sums, const background_method_t me
     default_type lower = sigma;
     default_type upper = sigma;
     if (f(sigma) > 0.0) {
-      for (int i = 0; i != 200 && f(upper) > 0.0; ++i) {
+      for (int i = 0; i != BackgroundParameters::maxiter_rootbracket && f(upper) > 0.0; ++i) {
         lower = upper;
         upper *= 2.0;
       }
     } else {
-      for (int i = 0; i != 200 && f(lower) < 0.0; ++i) {
+      for (int i = 0; i != BackgroundParameters::maxiter_rootbracket && f(lower) < 0.0; ++i) {
         upper = lower;
         lower *= 0.5;
       }
@@ -554,14 +558,14 @@ Estimate estimate_from_sums(const SampleSums &sums, const background_method_t me
       return result;
     }
     bool converged = false;
-    for (int iteration = 0; iteration != 100; ++iteration) {
-      const default_type x = a_term / (sigma * sigma);
-      const default_type value = digamma(x) - b_term + std::log(2.0 * sigma * sigma);
+    for (int iteration = 0; iteration != BackgroundParameters::maxiter_newtonrootfind; ++iteration) {
+      const default_type x = a_term / Math::pow2(sigma);
+      const default_type value = digamma(x) - b_term + std::log(2.0 * Math::pow2(sigma));
       if (value > 0.0)
         lower = sigma;
       else
         upper = sigma;
-      const default_type derivative = -(2.0 * a_term / (sigma * sigma * sigma)) * trigamma(x) + 2.0 / sigma;
+      const default_type derivative = -(2.0 * a_term / Math::pow3(sigma)) * trigamma(x) + 2.0 / sigma;
       default_type next = derivative < 0.0 ? sigma - value / derivative
                                            : std::numeric_limits<default_type>::quiet_NaN();
       if (std::isfinite(next) && next == sigma) {
@@ -572,7 +576,7 @@ Estimate estimate_from_sums(const SampleSums &sums, const background_method_t me
         next = 0.5 * (lower + upper);
       const default_type change = std::abs(next - sigma);
       sigma = next;
-      if (change <= 1.0e-14 * sigma) {
+      if (change <= BackgroundParameters::rootfind_tolerance * sigma) {
         converged = true;
         break;
       }
@@ -581,7 +585,7 @@ Estimate estimate_from_sums(const SampleSums &sums, const background_method_t me
       result.failure = "the maximum-likelihood iteration for the noise level did not converge";
       return result;
     }
-    const default_type num_channels = inverse_digamma(b_term - std::log(2.0 * sigma * sigma));
+    const default_type num_channels = inverse_digamma(b_term - std::log(2.0 * Math::pow2(sigma)));
     if (!std::isfinite(num_channels) || !(num_channels > 0.0)) {
       result.failure = "the maximum-likelihood iteration for the degrees of freedom did not converge";
       return result;
@@ -690,7 +694,7 @@ Selection select(const std::vector<Group> &groups,
   Selection result;
   result.ranges.resize(groups.size());
   result.sums.threshold_sq = threshold_sq;
-  const default_type scale = 2.0 * sigma_candidate * sigma_candidate;
+  const default_type scale = 2.0 * Math::pow2(sigma_candidate);
   for (size_t g = 0; g != groups.size(); ++g) {
     const Group &group = groups[g];
     const auto range = group.accepted(scale * lambda_lo[g], scale * lambda_hi[g]);
@@ -736,8 +740,8 @@ bool has_converged(const default_type dof,
                    const default_type previous_dof,
                    const default_type previous_sigma,
                    const default_type eps) {
-  const default_type d_dof = std::abs(dof - previous_dof);
-  const default_type d_sigma = std::abs(sigma - previous_sigma);
+  const default_type d_dof = std::fabs(dof - previous_dof);
+  const default_type d_sigma = std::fabs(sigma - previous_sigma);
   if (d_dof < eps && d_sigma < eps)
     return true;
   return d_dof < eps * dof && d_sigma < eps * sigma;
@@ -758,7 +762,7 @@ std::string test_gamma_consistency(SliceEstimate &slice, const BackgroundParamet
   const default_type shape = 0.5 * ml.dof;
   const default_type num_samples = default_type(slice.sums.count + slice.sums.num_zero);
   const default_type variance =
-      std::max(0.0, 2.0 * (shape + 1.0) / shape - 1.0 / (shape * shape * (trigamma(shape) - 1.0 / shape)));
+      std::max(0.0, 2.0 * (shape + 1.0) / shape - 1.0 / (Math::pow2(shape) * (trigamma(shape) - 1.0 / shape)));
   const default_type log_ratio = std::log(moments.dof / ml.dof);
   slice.gamma_ratio = moments.dof / ml.dof;
   slice.gamma_ratio_z = variance > 0.0 ? log_ratio / std::sqrt(variance / num_samples)
@@ -908,7 +912,7 @@ void mark_selected(const std::vector<Group> &groups,
     return;
   for (const Group &group : groups) {
     const default_type alpha = default_type(group.count) * slice.dof / 2.0;
-    const default_type scale = 2.0 * slice.sigma * slice.sigma;
+    const default_type scale = 2.0 * Math::pow2(slice.sigma);
     const auto range = group.accepted(scale * gamma_p_inv(alpha, 0.5 * parameters.p),
                                       scale * gamma_q_inv(alpha, 0.5 * parameters.p));
     for (size_t i = range.first; i != range.second; ++i)
@@ -970,12 +974,8 @@ SliceMode lowest_mode(std::vector<default_type> &log_mean_squares, const Backgro
   //   with the quantile indices it uses, the lower quartile it reads being no greater than the one
   //   computed here.
   {
-    const size_t upper_index = size_t(std::round(0.75 * default_type(n)));
-    const size_t lower_index = size_t(std::round(0.25 * default_type(n)));
-    std::nth_element(log_mean_squares.begin(), log_mean_squares.begin() + upper_index, log_mean_squares.end());
-    const default_type upper = log_mean_squares[upper_index];
-    std::nth_element(log_mean_squares.begin(), log_mean_squares.begin() + lower_index, log_mean_squares.end());
-    const default_type lower = log_mean_squares[lower_index];
+    const default_type upper = Math::quantile(log_mean_squares, 0.75);
+    const default_type lower = Math::quantile(log_mean_squares, 0.25);
     const auto extremes = std::minmax_element(log_mean_squares.begin(), log_mean_squares.end());
     const default_type range = *extremes.second - *extremes.first;
     if (!(upper > lower) || !(range <= 2.0 * (upper - lower) * std::pow(default_type(n), 2.0 / 3.0))) {
@@ -1124,7 +1124,7 @@ bool zeros_consistent(const SliceEstimate &estimate,
   if (!fit_profiled_ml(estimate.sums, uncensored ? 0.5 * uncensored.dof : 1.0, profile_t::TRUNCATED, truncated))
     return false;
   const default_type shape = 0.5 * truncated.dof;
-  const default_type z = threshold * threshold / (2.0 * truncated.sigma * truncated.sigma);
+  const default_type z = threshold * threshold / (2.0 * Math::pow2(truncated.sigma));
   const default_type rate = std::min(1.0, parameters.zero_excess_factor * std::exp(lower_tail(shape, z).log_p));
   const default_type n = default_type(estimate.num_samples);
   const default_type observed = default_type(estimate.num_zero) / n;
@@ -1248,7 +1248,7 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
       // A background voxel's per-sample mean square is sigma^2 dof; the noise level at which the
       //   first window, evaluated at dof_min, has its mean at the mode is therefore:
       const default_type initial_sigma = std::sqrt(std::exp(mode.log_mean_square) / parameters.dof_min);
-      return estimate_slice(groups, initial_sigma, method, parameters, censor ? threshold * threshold : 0.0);
+      return estimate_slice(groups, initial_sigma, method, parameters, censor ? Math::pow2(threshold) : 0.0);
     };
 
     std::vector<Group> groups;
@@ -1312,22 +1312,9 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
     return result;
   }
 
-  std::sort(dofs.begin(), dofs.end());
-  std::sort(sigmas.begin(), sigmas.end());
-  const auto median_of = [](const std::vector<default_type> &sorted) {
-    const size_t n = sorted.size();
-    return n % 2 == 1 ? sorted[n / 2] : 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]);
-  };
-  const auto quantile_of = [](const std::vector<default_type> &sorted, const default_type q) {
-    const default_type position = q * default_type(sorted.size() - 1);
-    const size_t below = size_t(std::floor(position));
-    const size_t above = std::min(below + 1, sorted.size() - 1);
-    const default_type weight = position - default_type(below);
-    return (1.0 - weight) * sorted[below] + weight * sorted[above];
-  };
-  result.dof = median_of(dofs);
-  result.sigma = median_of(sigmas);
-  result.dof_iqr = quantile_of(dofs, 0.75) - quantile_of(dofs, 0.25);
+  result.dof = Math::median(dofs);
+  result.sigma = Math::median(sigmas);
+  result.dof_iqr = Math::quantile(dofs, 0.75) - Math::quantile(dofs, 0.25);
   result.estimated = true;
   return result;
 }
@@ -1369,8 +1356,7 @@ std::vector<std::string> estimate_caveats(const BackgroundResult &result) {
   }
   default_type threshold = max_relative_dof_iqr;
   if (!samples.empty() && result.num_volumes > 0) {
-    std::nth_element(samples.begin(), samples.begin() + samples.size() / 2, samples.end());
-    const default_type typical = samples[samples.size() / 2];
+    const default_type typical = Math::median(samples);
     if (typical > 0.0)
       threshold = std::max(threshold, max_dof_iqr_sampling_ratio * 1.349 * std::sqrt(4.0 / typical));
   }

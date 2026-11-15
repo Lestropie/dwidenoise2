@@ -197,6 +197,13 @@ public:
   //   against raw multi-coil data, whose noise level may vary within a slice more than any phantom's.
   default_type gamma_ratio_floor{0.95};
   default_type gamma_ratio_z{3.5};
+  // Max iteration counts for maximum likelihood noise level estimation method
+  static constexpr size_t maxiter_rootbracket{200};
+  static constexpr size_t maxiter_newtonrootfind{100};
+  static constexpr size_t maxiter_illinoisrootfind{200};
+  static constexpr size_t maxiter_goldensectionmlfind{200};
+  static constexpr default_type rootfind_tolerance{1e-14};
+  static constexpr default_type peakfind_tolerance{1e-10};
 };
 
 // Sufficient statistics of one spatial voxel, accumulated over the K volumes of the input.

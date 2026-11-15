@@ -94,7 +94,7 @@ default_type log_gamma_density(const default_type alpha, const default_type x) {
       return a * std::log(a) - a - log_gamma(a);
     static const default_type half_log_two_pi = 0.5 * std::log(2.0 * Math::pi);
     const default_type inv = 1.0 / a;
-    const default_type inv2 = inv * inv;
+    const default_type inv2 = Math::pow2(inv);
     // log Gamma(a) = (a-1/2) log a - a + log(2 pi)/2 + 1/(12a) - 1/(360a^3) + 1/(1260a^5)
     //                  - 1/(1680a^7) + 1/(1188a^9) - ...
     const default_type correction =
@@ -174,7 +174,7 @@ default_type gamma_quantile(const default_type alpha, const default_type p, cons
   if (alpha >= 1.0) {
     const default_type z = normal_quantile(p, q);
     const default_type factor = 1.0 - 2.0 / (9.0 * alpha) + z * std::sqrt(2.0 / (9.0 * alpha));
-    x = factor > 0.0 ? alpha * factor * factor * factor : 0.0;
+    x = factor > 0.0 ? alpha * Math::pow3(factor) : 0.0;
   }
   if (!(x > 0.0) && upper_tail)
     x = -std::log(q) - log_gamma(alpha);
@@ -243,7 +243,7 @@ default_type digamma(const default_type x_in) {
   }
   // psi(x) ~ log x - 1/(2x) - 1/(12x^2) + 1/(120x^4) - 1/(252x^6) + 1/(240x^8) - 1/(132x^10)
   const default_type inv = 1.0 / x;
-  const default_type inv2 = inv * inv;
+  const default_type inv2 = Math::pow2(inv);
   result += std::log(x) - 0.5 * inv -
             inv2 * (1.0 / 12.0 -
                     inv2 * (1.0 / 120.0 - inv2 * (1.0 / 252.0 - inv2 * (1.0 / 240.0 - inv2 * (1.0 / 132.0)))));
@@ -263,7 +263,7 @@ default_type trigamma(const default_type x_in) {
   }
   // psi'(x) ~ 1/x + 1/(2x^2) + 1/(6x^3) - 1/(30x^5) + 1/(42x^7) - 1/(30x^9)
   const default_type inv = 1.0 / x;
-  const default_type inv2 = inv * inv;
+  const default_type inv2 = Math::pow2(inv);
   result += inv * (1.0 + 0.5 * inv +
                    inv2 * (1.0 / 6.0 - inv2 * (1.0 / 30.0 - inv2 * (1.0 / 42.0 - inv2 * (1.0 / 30.0)))));
   return result;
