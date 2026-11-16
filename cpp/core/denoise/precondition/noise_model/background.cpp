@@ -35,7 +35,6 @@
 #include "math/gamma.h"
 #include "math/math.h"
 #include "math/median.h"
-#include "metadata/bids.h"
 #include "mrtrix.h"
 
 namespace MR::Denoise::Precondition::NoiseModel {
@@ -1387,62 +1386,6 @@ std::vector<std::string> estimate_caveats(const BackgroundResult &result) {
                       " the fit sees a truncated distribution, and the degrees of freedom are overestimated");
   }
   return caveats;
-}
-
-size_t select_slice_axis(const Header &H) {
-  const Header::Realignment &realignment = H.realignment();
-  // Header::Realignment::applied_transform() maps a direction expressed against the axes as stored
-  //   on disk to one expressed against the axes as realigned on load to approximate RAS; it is a
-  //   signed permutation, so its transpose maps back.
-  const auto to_ondisk = [&realignment](const Metadata::BIDS::axis_vector_type &internal) {
-    return Metadata::BIDS::axis_vector_type(realignment.applied_transform().transpose() * internal);
-  };
-  const auto nonzero_axis = [](const Metadata::BIDS::axis_vector_type &dir) {
-    for (size_t axis = 0; axis != 3; ++axis) {
-      if (dir[axis])
-        return axis;
-    }
-    return size_t(3);
-  };
-
-  auto slice_encoding_it = H.keyval().find("SliceEncodingDirection");
-  if (slice_encoding_it == H.keyval().end()) {
-    // Slices are conventionally stored along the third axis of the image on disk, which need not be
-    //   the third axis of the image as realigned on load to approximate RAS.
-    const size_t axis = nonzero_axis(Metadata::BIDS::axis_vector_type(realignment.applied_transform() *
-                                                                      Metadata::BIDS::axis_vector_type({0, 0, 1})));
-    if (axis == 2) {
-      CONSOLE("No header information on slice encoding; "
-              "assuming the third spatial axis separates slices for noise distribution estimation");
-    } else {
-      WARN("No header information on slice encoding; "
-           "assuming the third spatial axis of the image as stored on disk separates slices for noise "
-           "distribution estimation, which following realignment of the image axes on load to approximate RAS "
-           "is axis " +
-           str(axis) + "; use -noise_dof_axis to select a different axis if this is incorrect");
-    }
-    return axis;
-  }
-  const Metadata::BIDS::axis_vector_type dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
-  const size_t axis = nonzero_axis(dir);
-  if (axis == 3)
-    return 2;
-  std::string msg = "For header SliceEncodingDirection=\"" + slice_encoding_it->second + "\", " + "chose axis " +
-                    str(axis) + " to separate slices for noise distribution estimation";
-  if (realignment.applied()) {
-    const Metadata::BIDS::axis_vector_type ondisk_dir = to_ondisk(dir);
-    if (ondisk_dir != dir) {
-      const auto orig_it = realignment.orig_keyval().find("SliceEncodingDirection");
-      msg += " (image axes were realigned on load to approximate RAS; as stored on disk, ";
-      msg += orig_it == realignment.orig_keyval().end()
-                 ? "the image has no SliceEncodingDirection field, \"" + slice_encoding_it->second +
-                       "\" having been inferred on load from field SliceTiming"
-                 : "SliceEncodingDirection=\"" + orig_it->second + "\"";
-      msg += ", corresponding to axis " + str(nonzero_axis(ondisk_dir)) + " of the image as stored on disk)";
-    }
-  }
-  INFO(msg);
-  return axis;
 }
 
 } // namespace MR::Denoise::Precondition::NoiseModel

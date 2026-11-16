@@ -438,9 +438,4 @@ BackgroundResult estimate_background(const Accumulation &accumulation,
 // Empty for a result that did not produce an estimate.
 std::vector<std::string> estimate_caveats(const BackgroundResult &result);
 
-// The image axis along which slices are separated, taken from "SliceEncodingDirection" where the
-//   header provides it and otherwise assumed to be the axis that was the third spatial axis of the
-//   image as stored on disk, before realignment of the image axes on load to approximate RAS.
-size_t select_slice_axis(const Header &H);
-
 } // namespace MR::Denoise::Precondition::NoiseModel

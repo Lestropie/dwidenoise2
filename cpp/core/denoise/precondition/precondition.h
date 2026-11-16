@@ -31,6 +31,7 @@
 namespace MR::Denoise::Precondition {
 
 extern const char *const demodulation_description;
+extern const char *const slice_axis_description;
 extern const char *const noise_channels_description;
 // DESCRIPTION paragraphs detailing estimation of the noise distribution's degrees of freedom
 //   from the background voxels of the data (-noise_dof_method), shared by both commands.

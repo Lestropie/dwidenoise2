@@ -44,10 +44,9 @@ const char *const demodulation_description =
     "If the input data are of complex type, "
     "then a smooth phase is demodulated from each k-space prior to PCA, "
     "so that the residual phase is coherent across volumes and the Casorati matrix remains low-rank. "
-    "In the absence of metadata indicating otherwise, "
-    "it is inferred that the first two axes correspond to acquired slices, "
-    "and different slices / volumes will be demodulated individually; "
-    "this behaviour can be modified using the -demod_axes option; "
+    "Each slice of each volume is demodulated individually, "
+    "the axis that separates slices being determined as described for option -slice_axis; "
+    "alternatively, the axes along which demodulation is performed can be named directly using -demod_axes; "
     "the 'apc' estimator is two-dimensional and therefore requires exactly two axes, "
     "whereas 'linear' and 'hann' accept any number of spatial axes. "
     "The method of phase estimation is selected with -demodulate. "
@@ -61,6 +60,20 @@ const char *const demodulation_description =
     "'linear' instead regresses a strictly linear phase term from each k-space, "
     "similarly to performed in Cordero-Grande et al. 2019. "
     "'none' disables phase demodulation.";
+
+const char *const slice_axis_description =
+    "Both the estimation of the noise distribution from the background of magnitude data (-noise_dof_method)"
+    " and the phase demodulation of complex data (-demodulate) operate on individual slices."
+    " The axis that separates slices is taken from the \"SliceEncodingDirection\" header key-value"
+    " where present, and otherwise is assumed to be the third spatial axis of the image as stored on disk;"
+    " it can instead be nominated using -slice_axis."
+    " As for every axis index on the MRtrix3 command line,"
+    " the axis indices of -slice_axis and -demod_axes refer to the image axes"
+    " as realigned on load to approximate RAS (as reported by mrinfo),"
+    " which may differ from the axes of the image as stored on disk (as reported by mrinfo -ondisk);"
+    " to specify axis indices as stored on disk, use -config RealignTransform false,"
+    " under which every axis index refers to the image as stored on disk."
+    " A single slice axis is used throughout, so -slice_axis and -demod_axes are mutually exclusive.";
 
 const char *const noise_channels_description =
     "Options -noise_channels and -noise_dof configure the noise model for magnitude data"
@@ -160,13 +173,11 @@ const char *const noise_dof_estimation_description =
     " is to make use of its result.";
 
 const char *const noise_dof_selection_description =
-    "Options -noise_dof_scope, -noise_dof_axis, -noise_dof_out and -noise_voxels_out"
-    " each require that an estimator be selected via -noise_dof_method."
+    "Options -noise_dof_scope, -noise_dof_out and -noise_voxels_out"
+    " each require that an estimator be selected via -noise_dof_method,"
+    " as does -slice_axis for magnitude input data."
     " Estimation of the degrees of freedom from the data is performed independently for each slice,"
-    " with slices separated along the axis indicated by the \"SliceEncodingDirection\" header key-value"
-    " where present, and otherwise along the third spatial axis of the image as stored on disk"
-    " (which may be a different axis of the image once its axes have been realigned on load to approximate RAS;"
-    " this can be overridden using -noise_dof_axis)."
+    " with slices separated along the axis determined as described for option -slice_axis."
     " A slice from which too few background voxels are identified,"
     " or whose voxels selected fail the test of consistency with a single Gamma distribution (see below),"
     " yields no estimate;"
@@ -262,8 +273,19 @@ OptionGroup precondition_options(const option_scope_t scope)
            "options are: " + Enum::join<demodulation_t>(",") + " "
            "(default: apc for complex data)")
     + Argument("mode").type_choice<demodulation_t>()
+  + Option("slice_axis",
+           "the image axis that separates slices, "
+           "used for estimation of the noise distribution (magnitude data with -noise_dof_method) "
+           "and for phase demodulation (complex data); "
+           "indexed against the image axes as realigned on load to approximate RAS, as reported by mrinfo "
+           "(default: from the \"SliceEncodingDirection\" header key-value where present, "
+           "otherwise the third spatial axis of the image as stored on disk; "
+           "see the Description section of the help page for details)")
+    + Argument("index").type_integer(0, 2)
   + Option("demod_axes",
-           "comma-separated list of axis indices along which FFT can be applied for phase demodulation")
+           "comma-separated list of axis indices along which FFT can be applied for phase demodulation, "
+           "indexed against the image axes as realigned on load to approximate RAS, as reported by mrinfo "
+           "(mutually exclusive with -slice_axis)")
     + Argument("axes").type_sequence_int()
   + Option("demean",
            "select method of demeaning prior to PCA; "
@@ -305,12 +327,6 @@ OptionGroup precondition_options(const option_scope_t scope)
            "(default: global; requires -noise_dof_method; "
            "see the Description section of the help page for details)")
     + Argument("scope").type_choice<NoiseModel::background_scope_t>()
-  + Option("noise_dof_axis",
-           "the image axis along which slices are separated for estimation of the noise distribution "
-           "(default: from the \"SliceEncodingDirection\" header key-value where present, "
-           "otherwise the third spatial axis of the image as stored on disk; requires -noise_dof_method; "
-           "see the Description section of the help page for details)")
-    + Argument("index").type_integer(0, 2)
   + Option("noise_dof_out",
            "export a text file tabulating the per-slice estimates of the noise distribution"
            + std::string(scope == option_scope_t::DENOISING ? ", which are unrelated to -dof_output" : "") + " "
@@ -411,6 +427,157 @@ void write_voxel_mask(const std::string &path, ImageType &input, const NoiseMode
          " the exported mask is empty");
 }
 
+// Every axis index named on the command line, as throughout MRtrix3, refers to the image axes as
+//   realigned on load to approximate RAS (as reported by mrinfo, not mrinfo -ondisk).
+//   Header::Realignment::applied_transform() maps a direction expressed against the axes as stored on
+//   disk to one expressed against the realigned axes; it is a signed permutation, so its transpose
+//   maps back.
+size_t nonzero_axis(const Metadata::BIDS::axis_vector_type &dir) {
+  for (size_t axis = 0; axis != 3; ++axis) {
+    if (dir[axis])
+      return axis;
+  }
+  return 3;
+}
+Metadata::BIDS::axis_vector_type unit_vector(const size_t axis) {
+  Metadata::BIDS::axis_vector_type result(Metadata::BIDS::axis_vector_type::Zero());
+  result[axis] = 1;
+  return result;
+}
+Metadata::BIDS::axis_vector_type to_ondisk(const Header &H, const Metadata::BIDS::axis_vector_type &realigned) {
+  return Metadata::BIDS::axis_vector_type(H.realignment().applied_transform().transpose() * realigned);
+}
+size_t ondisk_axis(const Header &H, const size_t realigned_axis) {
+  return nonzero_axis(to_ondisk(H, unit_vector(realigned_axis)));
+}
+size_t realigned_axis(const Header &H, const size_t ondisk_axis) {
+  return nonzero_axis(Metadata::BIDS::axis_vector_type(H.realignment().applied_transform() * unit_vector(ondisk_axis)));
+}
+// Where realignment moved the axis, a note of which axis it is on disk; otherwise empty.
+std::string ondisk_note(const Header &H, const size_t axis) {
+  if (!H.realignment().applied())
+    return std::string();
+  const size_t ondisk = ondisk_axis(H, axis);
+  return ondisk == axis ? std::string() : " (axis " + str(ondisk) + " of the image as stored on disk)";
+}
+std::vector<size_t> within_slice_axes(const size_t slice_axis) {
+  std::vector<size_t> result;
+  for (size_t axis = 0; axis != 3; ++axis) {
+    if (axis != slice_axis)
+      result.push_back(axis);
+  }
+  return result;
+}
+
+// The slice axis as it would be inferred from the header alone, without reference to -slice_axis,
+//   together with the message that reports that inference. "purpose" names what the axis is used for.
+struct SliceAxisInference {
+  enum class level_t { INFO, CONSOLE, WARN };
+  size_t axis{2};
+  bool from_metadata{false};
+  level_t level{level_t::INFO};
+  std::string message;
+  void report() const {
+    switch (level) {
+    case level_t::INFO:
+      INFO(message);
+      break;
+    case level_t::CONSOLE:
+      CONSOLE(message);
+      break;
+    case level_t::WARN:
+      WARN(message);
+      break;
+    }
+  }
+};
+SliceAxisInference infer_slice_axis(const Header &H, const std::string &purpose) {
+  SliceAxisInference result;
+  const Header::Realignment &realignment = H.realignment();
+  auto slice_encoding_it = H.keyval().find("SliceEncodingDirection");
+  if (slice_encoding_it != H.keyval().end()) {
+    const Metadata::BIDS::axis_vector_type dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
+    const size_t axis = nonzero_axis(dir);
+    if (axis != 3) {
+      result.axis = axis;
+      result.from_metadata = true;
+      result.message = "For header SliceEncodingDirection=\"" + slice_encoding_it->second + "\", chose axis " +
+                       str(axis) + " to separate slices for " + purpose;
+      if (realignment.applied()) {
+        const Metadata::BIDS::axis_vector_type ondisk_dir = to_ondisk(H, dir);
+        if (ondisk_dir != dir) {
+          const auto orig_it = realignment.orig_keyval().find("SliceEncodingDirection");
+          result.message += " (image axes were realigned on load to approximate RAS; as stored on disk, ";
+          result.message += orig_it == realignment.orig_keyval().end()
+                                ? "the image has no SliceEncodingDirection field, \"" + slice_encoding_it->second +
+                                      "\" having been inferred on load from field SliceTiming"
+                                : "SliceEncodingDirection=\"" + orig_it->second + "\"";
+          result.message +=
+              ", corresponding to axis " + str(nonzero_axis(ondisk_dir)) + " of the image as stored on disk)";
+        }
+      }
+      return result;
+    }
+  }
+  // Slices are conventionally stored along the third axis of the image on disk, which need not be
+  //   the third axis of the image as realigned on load to approximate RAS.
+  result.axis = realigned_axis(H, 2);
+  if (result.axis == 2) {
+    result.level = SliceAxisInference::level_t::CONSOLE;
+    result.message = "No header information on slice encoding; "
+                     "assuming the third spatial axis separates slices for " +
+                     purpose;
+  } else {
+    result.level = SliceAxisInference::level_t::WARN;
+    result.message = "No header information on slice encoding; "
+                     "assuming the third spatial axis of the image as stored on disk separates slices for " +
+                     purpose + ", which following realignment of the image axes on load to approximate RAS is axis " +
+                     str(result.axis) + "; use -slice_axis to select a different axis if this is incorrect";
+  }
+  return result;
+}
+
+// A user who reads an axis index from the image as stored on disk (from another software package,
+//   or from the sidecar JSON) and supplies it on the command line, where it is interpreted against
+//   the realigned axes, names the wrong axis. Where realignment has moved axes, the signature of
+//   that mistake is a nominated slice axis that differs from the one inferred from the header, but
+//   that is the on-disk index of the inferred one. "remedy" is the option as it would then be
+//   correctly specified.
+void check_axis_frame(const Header &H,
+                      const std::string &nomination,
+                      const size_t nominated_slice_axis,
+                      const SliceAxisInference &inferred,
+                      const std::string &remedy) {
+  if (!H.realignment().applied() || nominated_slice_axis == inferred.axis ||
+      ondisk_axis(H, inferred.axis) != nominated_slice_axis)
+    return;
+  WARN(nomination + " is interpreted against the image axes as realigned on load to approximate RAS," +
+       " under which it implies that axis " + str(nominated_slice_axis) + ondisk_note(H, nominated_slice_axis) +
+       " separates slices; but " +
+       (inferred.from_metadata ? "header field SliceEncodingDirection indicates"
+                               : "in the absence of slice encoding metadata, it would be inferred to be") +
+       " axis " + str(inferred.axis) + ", which is axis " + str(nominated_slice_axis) +
+       " of the image as stored on disk. If on-disk axis " + str(nominated_slice_axis) + " was intended, specify " +
+       remedy +
+       " instead, or use -config RealignTransform false, under which every axis index refers to the image as"
+       " stored on disk");
+}
+
+// The axis that separates slices: from -slice_axis where specified, otherwise inferred from the header.
+size_t select_slice_axis(const Header &H, const std::string &purpose) {
+  const SliceAxisInference inferred = infer_slice_axis(H, purpose);
+  auto opt = get_options("slice_axis");
+  if (opt.empty()) {
+    inferred.report();
+    return inferred.axis;
+  }
+  const size_t axis = size_t(int(opt[0][0]));
+  check_axis_frame(H, "-slice_axis " + str(axis), axis, inferred, "-slice_axis " + str(inferred.axis));
+  INFO("Using axis " + str(axis) + ondisk_note(H, axis) + ", as nominated by -slice_axis, to separate slices for " +
+       purpose);
+  return axis;
+}
+
 } // namespace
 
 NoiseModelOptions noise_model_options(const bool complex, const Header &H) {
@@ -468,7 +635,7 @@ NoiseModelOptions noise_model_options(const bool complex, const Header &H) {
   NoiseModel::background_method_t method =
       get_option_choice("noise_dof_method", NoiseModel::background_method_t::NONE);
   auto opt_scope = get_options("noise_dof_scope");
-  auto opt_axis = get_options("noise_dof_axis");
+  auto opt_axis = get_options("slice_axis");
   const bool exports_requested = !get_options("noise_dof_out").empty() || !get_options("noise_voxels_out").empty();
   result.background_scope = get_option_choice("noise_dof_scope", NoiseModel::background_scope_t::GLOBAL);
 
@@ -479,8 +646,9 @@ NoiseModelOptions noise_model_options(const bool complex, const Header &H) {
     std::vector<std::string> dependent;
     if (!opt_scope.empty())
       dependent.push_back("-noise_dof_scope");
-    if (!opt_axis.empty())
-      dependent.push_back("-noise_dof_axis");
+    // For complex input, -slice_axis governs the phase demodulation instead, and is validated there.
+    if (!opt_axis.empty() && !complex)
+      dependent.push_back("-slice_axis");
     if (!get_options("noise_dof_out").empty())
       dependent.push_back("-noise_dof_out");
     if (!get_options("noise_voxels_out").empty())
@@ -533,8 +701,7 @@ NoiseModelOptions noise_model_options(const bool complex, const Header &H) {
   result.background_method = method;
 
   if (result.background_method != NoiseModel::background_method_t::NONE) {
-    result.background_slice_axis =
-        opt_axis.empty() ? NoiseModel::select_slice_axis(H) : size_t(int(opt_axis[0][0]));
+    result.background_slice_axis = select_slice_axis(H, "noise distribution estimation");
   }
   return result;
 }
@@ -727,6 +894,7 @@ Demodulation select_demodulation(const Header &H) {
   const bool complex = H.datatype().is_complex();
   auto opt_mode = get_options("demodulate");
   auto opt_axes = get_options("demod_axes");
+  auto opt_slice_axis = get_options("slice_axis");
   Demodulation result;
   if (opt_mode.empty()) {
     if (complex) {
@@ -758,25 +926,23 @@ Demodulation select_demodulation(const Header &H) {
   if (result.mode == demodulation_t::NONE && !opt_axes.empty())
     throw Exception("Option -demod_axes cannot be specified together with -demodulate none: "
                     "there are no demodulation axes when no phase demodulation is performed");
+  // For magnitude input, -slice_axis governs the estimation of the noise distribution, and is
+  //   validated alongside it. Complex input has no such estimation, so without demodulation
+  //   -slice_axis has nothing to govern.
   if (!complex)
     return result;
+  if (result.mode == demodulation_t::NONE && !opt_slice_axis.empty())
+    throw Exception("Option -slice_axis cannot be specified together with -demodulate none for complex input data: "
+                    "the slice axis is used only by the phase demodulation, which is not performed");
+  // -demod_axes and -slice_axis would each determine the slices that are demodulated individually;
+  //   both being accepted would allow two different definitions of the slice axis.
+  if (!opt_axes.empty() && !opt_slice_axis.empty())
+    throw Exception("Options -demod_axes and -slice_axis are mutually exclusive: "
+                    "the phase demodulation is performed along the axes that do not separate slices, "
+                    "so either option alone determines those axes");
   if (opt_axes.empty()) {
-    auto slice_encoding_it = H.keyval().find("SliceEncodingDirection");
-    if (slice_encoding_it == H.keyval().end()) {
-      // TODO Ideally this would be the first two axes *on disk*,
-      //   not following transform realignment
-      INFO("No header information on slice encoding; "
-           "assuming first two axes are within-slice");
-      result.axes = {0, 1};
-    } else {
-      auto dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
-      for (size_t axis = 0; axis != 3; ++axis) {
-        if (!dir[axis])
-          result.axes.push_back(axis);
-      }
-      INFO("For header SliceEncodingDirection=\"" + slice_encoding_it->second + "\", " + //
-           "chose demodulation axes: " + join(result.axes, ","));                        //
-    }
+    result.axes = within_slice_axes(select_slice_axis(H, "phase demodulation"));
+    INFO("Phase demodulation axes: " + join(result.axes, ","));
   } else {
     result.axes = parse_ints<size_t>(opt_axes[0][0]);
     // A demodulation axis list names the axes along which an FFT is taken; naming an axis twice is
@@ -791,6 +957,17 @@ Demodulation select_demodulation(const Header &H) {
     for (auto axis : result.axes) {
       if (axis > 2)
         throw Exception("Phase demodulation implementation not yet robust to non-spatial axes");
+    }
+    // Two demodulation axes imply that the third separates slices; check that implication for
+    //   the signature of axis indices read from the image as stored on disk.
+    if (result.axes.size() == 2) {
+      const size_t implied_slice_axis = 3 - result.axes[0] - result.axes[1];
+      const SliceAxisInference inferred = infer_slice_axis(H, "phase demodulation");
+      check_axis_frame(H,
+                       "-demod_axes " + std::string(opt_axes[0][0]),
+                       implied_slice_axis,
+                       inferred,
+                       "-demod_axes " + join(within_slice_axes(inferred.axis), ","));
     }
   }
   // The adaptive phase correction solver is structurally two-dimensional (it solves an in-slice

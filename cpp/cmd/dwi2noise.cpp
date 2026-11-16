@@ -81,6 +81,8 @@ void usage() {
 
   + noise_dof_selection_description
 
+  + slice_axis_description
+
   + noise_dof_limitations_description
 
   + "Important note:"
