@@ -1407,19 +1407,21 @@ size_t select_slice_axis(const Header &H) {
 
   auto slice_encoding_it = H.keyval().find("SliceEncodingDirection");
   if (slice_encoding_it == H.keyval().end()) {
-    // TODO Ideally this would be resolved against the axes *on disk*,
-    //   not following transform realignment
-    std::string msg = "No header information on slice encoding; "
-                      "assuming the third spatial axis separates slices for noise distribution estimation";
-    if (realignment.applied()) {
-      const size_t ondisk_axis = nonzero_axis(to_ondisk({0, 0, 1}));
-      if (ondisk_axis != 2) {
-        msg += " (this is axis 2 of the image axes as realigned on load to approximate RAS, which is axis " +
-               str(ondisk_axis) + " of the image as stored on disk)";
-      }
+    // Slices are conventionally stored along the third axis of the image on disk, which need not be
+    //   the third axis of the image as realigned on load to approximate RAS.
+    const size_t axis = nonzero_axis(Metadata::BIDS::axis_vector_type(realignment.applied_transform() *
+                                                                      Metadata::BIDS::axis_vector_type({0, 0, 1})));
+    if (axis == 2) {
+      CONSOLE("No header information on slice encoding; "
+              "assuming the third spatial axis separates slices for noise distribution estimation");
+    } else {
+      WARN("No header information on slice encoding; "
+           "assuming the third spatial axis of the image as stored on disk separates slices for noise "
+           "distribution estimation, which following realignment of the image axes on load to approximate RAS "
+           "is axis " +
+           str(axis) + "; use -noise_dof_axis to select a different axis if this is incorrect");
     }
-    INFO(msg);
-    return 2;
+    return axis;
   }
   const Metadata::BIDS::axis_vector_type dir = Metadata::BIDS::axisid2vector(slice_encoding_it->second);
   const size_t axis = nonzero_axis(dir);

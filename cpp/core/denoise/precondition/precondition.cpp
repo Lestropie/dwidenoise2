@@ -164,7 +164,9 @@ const char *const noise_dof_selection_description =
     " each require that an estimator be selected via -noise_dof_method."
     " Estimation of the degrees of freedom from the data is performed independently for each slice,"
     " with slices separated along the axis indicated by the \"SliceEncodingDirection\" header key-value"
-    " where present, and along the third spatial axis otherwise (this can be overridden using -noise_dof_axis)."
+    " where present, and otherwise along the third spatial axis of the image as stored on disk"
+    " (which may be a different axis of the image once its axes have been realigned on load to approximate RAS;"
+    " this can be overridden using -noise_dof_axis)."
     " A slice from which too few background voxels are identified,"
     " or whose voxels selected fail the test of consistency with a single Gamma distribution (see below),"
     " yields no estimate;"
@@ -306,7 +308,7 @@ OptionGroup precondition_options(const option_scope_t scope)
   + Option("noise_dof_axis",
            "the image axis along which slices are separated for estimation of the noise distribution "
            "(default: from the \"SliceEncodingDirection\" header key-value where present, "
-           "otherwise the third spatial axis; requires -noise_dof_method; "
+           "otherwise the third spatial axis of the image as stored on disk; requires -noise_dof_method; "
            "see the Description section of the help page for details)")
     + Argument("index").type_integer(0, 2)
   + Option("noise_dof_out",
