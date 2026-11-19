@@ -1,0 +1,216 @@
+# Required Notice: Copyright (c) 2026 Robert E. Smith <robert.smith@florey.edu.au>;
+# Required Notice: The Florey Institute of Neuroscience and Mental Health.
+#
+# Licensed under the PolyForm Noncommercial License 1.0.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
+#
+#     https://polyformproject.org/licenses/noncommercial/1.0.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied.
+# See the License of the specific language
+# governing permissions and limitations under the License.
+#
+# dwidenoise2 noise level estimation and denoising schedule: "nordic"
+#
+# This file approximates the NORDIC method (Moeller et al., 2021) as closely as the capabilities
+# of this software permit. As for the "legacy" schedule, use of this file is not in isolation
+# adequate to achieve that approximation; the accompanying command-line options are as important
+# as the schedule itself (see the example usage in the dwidenoise2 command):
+#
+#   dwidenoise2 complex.mif out.mif -schedule nordic
+#               -demodulate hann -demean none -filter truncate -aggregator uniform -estimator exp2
+#
+# Those options correspond to NORDIC as follows:
+#  - -demodulate hann : NORDIC multiplies each slice's k-space by a Tukey window with taper
+#                       parameter 1---which is a Hann window---raised to the power
+#                       ARG.phase_filter_width (3 for dMRI), and uses the resulting low-pass
+#                       filtered phase as the smooth background phase to be removed. The "hann"
+#                       demodulator is the corresponding fixed full-extent Hann-window phase
+#                       estimate (its window is not raised to a power, so it is the milder of the
+#                       two). This command's default demodulator ("apc") is instead noise-adaptive
+#                       and re-estimated per iteration; it is the more robust choice, but it is not
+#                       what NORDIC does.
+#  - -demean none     : NORDIC's Casorati matrices are not centred (its own MPPCA branch sets
+#                       "centering = 0" explicitly).
+#  - -filter truncate : NORDIC nulls every component at or below the threshold and retains the
+#                       remainder unmodified ("S(S<lambda2) = 0"); it applies neither optimal
+#                       shrinkage nor soft thresholding.
+#  - -aggregator uniform : NORDIC accumulates every voxel of each patch with unit weight and
+#                       divides by the number of contributing patches. (Its ARG.patch_scale
+#                       alternative, weighting each patch by its retained component count, is this
+#                       command's "-aggregator rank"; it is not NORDIC's default.)
+#  - -estimator exp2  : see "Row 1" below.
+#
+# For magnitude-only input (NORDIC's ARG.magnitude_only), omit "-demodulate hann": there is no
+# phase to demodulate, and requesting it is an error. Note that magnitude input additionally
+# engages the non-linear variance-stabilising transform and the noise-floor debiasing of the
+# output, neither of which NORDIC performs; -vst_method linear and -preserve_noise_bias
+# respectively disable them, at the cost of the corrections they provide.
+#
+# BOTH ROWS ARE CALIBRATED FOR A SERIES OF APPROXIMATELY 99 VOLUMES, the acquisition on which the
+# manuscript's recommendations are based. Two of their settings are derived in NORDIC from the
+# number of volumes, and this file can only state the resulting numbers: the temporal subset of
+# row 1 and the spatial sub-sampling of row 2. Both are flagged below with the arithmetic needed
+# to re-derive them for a series of substantially different length.
+#
+#
+# Row 1: the noise level map (NORDIC's g-factor estimation pass)
+#
+# NORDIC divides the complex data by the g-factor map g(r) so that the noise reaching the PCA is
+# spatially identical, which is precisely the role of this command's variance-stabilising
+# transform: it divides by the estimated noise level. A g-factor derived from the parallel-imaging
+# reconstruction is not available to this software, so this row estimates the noise level from the
+# image data instead.
+#
+# That is a smaller departure than it may appear, because NORDIC estimates the *shape* of its
+# g-factor map from the image data regardless: absent a no-excitation ("noise") volume, its
+# g-factor is the output of an MPPCA pass over the image series, and where such a volume is
+# acquired it contributes only the global scale by which that map is multiplied (see "The
+# threshold" below). This row is therefore a transcription of that pass, rather than of the
+# original MRtrix3 dwidenoise command:
+#
+#  - kernel "cuboid=13,13,1": NORDIC estimates the g-factor with a flat, square, single-slice
+#    patch of 14 x 14 x 1 voxels (its ARG.kernel_size_gfactor default), which reflects the
+#    per-slice nature of the quantity it is estimating. A cuboid extent must match the parity of
+#    the spatial sub-sampling factor on its axis (so that a voxel, rather than a voxel corner,
+#    lies at the patch centre), and the sub-sampling below is odd, so the nearest admissible
+#    in-plane extent is 13: 169 voxels against NORDIC's 196.
+#  - spatial_subsample "7,7,1": NORDIC positions these patches every floor(14/2) = 7 voxels
+#    in-plane, and on every slice (a patch spanning one slice cannot be strided along z).
+#  - smooth_noise false: NORDIC applies no explicit smoothing to its g-factor map, and none is
+#    applied here. Its map is nevertheless smooth, because each estimate is spread with uniform
+#    weight over a 14 x 14 patch positioned every 7 voxels; the estimate here is smooth for the
+#    equivalent reason, being produced on the sub-sampled grid above (one value per 7 x 7 x 1
+#    block) and interpolated back to full resolution when the transform is applied.
+#  - temporal_subsample 0.909091: NORDIC estimates the g-factor from the first min(90, m) volumes
+#    of the series. That is an absolute cap on the number of volumes, which this column---a
+#    fraction of the series---cannot express; 0.909091 is 90/99, the value for the manuscript's
+#    99-volume acquisition. FOR A SERIES OF ANY OTHER LENGTH, SET THIS TO min(90/m, 1). The cap is
+#    not cosmetic: this row's patch is of fixed size, so on a long series an uncapped fraction
+#    would leave the Casorati matrix with fewer voxels than volumes, and the noise level could not
+#    be estimated from it at all. (An absolute volume cap is to this column what
+#    "max_partition_size" is to "partitions"; no such counterpart exists for the temporal subset.)
+#    Note that this command draws its subset stratified by demeaning group---balanced across
+#    b-value shells---rather than taking the first 90 volumes of the series as NORDIC does; for a
+#    shelled acquisition the stratified subset is the better-conditioned of the two.
+#
+# One consequence of transcribing NORDIC's geometry is worth stating explicitly, because it is the
+# reason this row is not sized like that of the "legacy" schedule. 169 voxels against at most 90
+# volumes is an aspect ratio of approximately 1.9:1, close to this command's own default of 2:1.
+# The noise level is therefore estimated from a comfortably elongated Casorati matrix, and not, as
+# it would be under the n >= m ("cuboid=1x") kernel of the original dwidenoise command, from a
+# near-square one whose eigenspectrum carries little information about where the bulk ends. Had
+# this row been written to imitate dwidenoise instead, "cuboid=2x" would have been needed to
+# recover that precision; NORDIC's own choice of geometry already supplies it.
+#
+# What remains, and cannot be remedied by geometry, is that an MPPCA estimate under-states the
+# noise level wherever the local signal rank is high. Since that estimate *is* the denoising
+# threshold here (see below), such a bias propagates directly into the reconstruction; it is the
+# principal weakness of substituting an estimated noise level for NORDIC's measured one.
+#
+# The "-estimator exp2" of the example command line is a deliberate choice rather than a
+# transcription. NORDIC's g-factor pass embeds the Veraart et al. (2016) criterion, which is
+# offered here as "exp1"; but its variant deflates the long matrix dimension as components are
+# removed, which is a property of "exp2" (Cordero-Grande et al., 2019) and not of "exp1", and
+# exp2 is the less biased of the two. Since this estimate sets the threshold, precision is
+# preferred over transcription. Use "-estimator exp1" for the literal published formulation.
+#
+#
+# Row 2: the reconstruction (NORDIC's locally-low-rank pass)
+#
+#  - kernel "cuboid=11x": NORDIC sizes its cubic patch to round((11 m)^(1/3)) voxels per side,
+#    i.e. to an 11:1 ratio of patch voxels to volumes; "cuboid=11x" requests that same ratio.
+#    The patch here is grown until the voxel count is met rather than rounded to the nearest side
+#    length, so for the 99-volume series of the manuscript it yields the 11 x 11 x 11 patch
+#    reported there (NORDIC's own rule gives 10 x 10 x 10). Growth is near-isotropic in
+#    millimetres rather than in voxels, so on anisotropic voxels the patch is not cubic; and the
+#    extent is clamped to the image dimensions, which reproduces in kind (though not in exact
+#    size) NORDIC's own fallback to a within-plane patch on a slab of too few slices.
+#  - spatial_subsample 5: NORDIC positions its patches on a grid of floor(k/2) voxels, where k is
+#    the patch side length; that is 5 for a series of ~100 volumes. FOR A SERIES OF ANY OTHER
+#    LENGTH, set this to half of the side length that the command selects (reported as "selected
+#    cuboid patch size" under -info). Note also that an odd sub-sampling factor is what makes the
+#    auto-sized cuboid odd-sided; an even factor (e.g. the default of 2) yields an even-sided
+#    patch, and hence a different size for the same requested ratio.
+#    This column can only hold a number, so NORDIC's rule---that the stride *follows* the kernel,
+#    which in turn follows the volume count---cannot be stated in the schedule as a rule. Doing so
+#    would require a kernel-derived form of this column (e.g. "kernel/2") whose resolution is
+#    deferred until the kernel geometry is known; note that the two are mutually constraining,
+#    since the parity of the cuboid extent is itself determined by this factor, so such a form
+#    would have to resolve both jointly to an admissible pair rather than one after the other.
+#  - update_noise false: the noise level estimated by row 1 is carried through the reconstruction
+#    rather than being re-estimated per patch. This is what makes the threshold NORDIC's rather
+#    than MPPCA's; see below.
+#
+#
+# The threshold
+#
+# NORDIC's central claim is a threshold that is not estimated from the data being thresholded:
+# every component that cannot be distinguished from Gaussian noise of the *known* level is
+# removed. Its threshold is the sample average of the largest singular value of an n x m matrix
+# with i.i.d. zero-mean entries of that known variance, obtained by Monte-Carlo simulation (the
+# manuscript draws the matrices from a noise image; the released implementation averages ten
+# draws of an n x m pseudo-random Gaussian matrix).
+#
+# The two rows above reproduce that rule exactly, up to the finite-size question below. Row 1's
+# map parameterises the variance-stabilising transform, so the data reaching the PCA in row 2 have
+# unit noise level; because row 2 does not re-estimate, the noise level is imposed (sigma^2 = 1)
+# rather than fitted, and the boundary between noise and signal is the Marchenko-Pastur edge of
+# that imposed level, lambda+ = (1 + sqrt(m/n))^2. Every component at or below it is nulled by
+# -filter truncate. On singular values that boundary is sigma (sqrt(n) + sqrt(m)): the asymptotic
+# limit of the very quantity NORDIC estimates by simulation.
+#
+# The difference is therefore only that NORDIC uses a finite-matrix expectation where this uses
+# its asymptotic limit. The manuscript is explicit that it regards no closed form to be available
+# for the former ("for a finite-sized random matrix, an alternative is needed in the absence of an
+# analytical expression"), and simulates instead. An expression is nevertheless available: the
+# largest eigenvalue of a finite Gaussian matrix is Tracy-Widom distributed about the asymptotic
+# edge, with location (sqrt(n) + sqrt(m))^2 and scale (sqrt(n) + sqrt(m)) (1/sqrt(n) +
+# 1/sqrt(m))^(1/3), and a mean approximately 1.21 (real entries) or 1.77 (complex) scale units
+# below that edge. The resulting threshold is smaller than the asymptotic one by a factor
+# depending on the matrix shape alone: for the 1331 x 99 matrices of the example above, by about
+# 1.3% in eigenvalue units, or 0.7% in singular values. That is several times the sampling error
+# of a ten-draw average, so the two calibrations are not equivalent, though both differences are
+# small beside the accuracy with which the noise level itself can be estimated.
+#
+# Since the threshold is proportional to the imposed noise level, that offset---and equally
+# NORDIC's ARG.factor_error, and the global scale that NORDIC measures from a no-excitation volume
+# where one is acquired (its ARG.measured_noise)---is applied simply by scaling the noise level
+# map and denoising from the scaled map:
+#
+#   dwidenoise2 complex.mif out.mif -schedule nordic -noise_out noise.mif [...]
+#   mrcalc noise.mif 0.993 -mult noise_scaled.mif
+#   dwidenoise2 complex.mif out_scaled.mif -schedule <copy of this file, first row deleted>
+#               -noise_in noise_scaled.mif [...]
+#
+# Three properties of that manoeuvre should be understood before relying on it. The second
+# invocation must use a single-row (reconstruction-only) schedule: with a multi-row schedule the
+# supplied map would merely seed the first iteration and then be discarded. The scaling is a pure
+# change of threshold only where the transform the map parameterises is linear, ie. for complex
+# input data (or -vst_method linear); under a non-linear transform for magnitude data the map also
+# fixes the operating point of the transform and of its debiased inverse, and scaling it therefore
+# changes more than the threshold. And a single scalar can express a shape-dependent correction
+# such as the Tracy-Widom offset only while every patch has the same shape, which is true of this
+# schedule's fixed cuboid but not of the rank-adaptive kernels used elsewhere in this software.
+# Note also that -noise_out is sampled on the reconstruction grid, ie. one voxel per patch
+# position; where the map is wanted at full image resolution, obtain it from a single-row run of
+# the first row alone.
+#
+#
+# Not reproducible here
+#
+# Beyond the g-factor, the following properties of NORDIC have no counterpart in this software,
+# and no attempt is made to approximate them: acquisition of no-excitation volumes; g-factor
+# quantification from the parallel-imaging reconstruction (Breuer et al., 2009) with ESPIRiT
+# sensitivities and SENSE-1 coil combination; calibration of the threshold by simulation of the
+# noise matrix; and the secondary phase step in which residual phase-estimate outliers are
+# replaced by the unfiltered phase (ARG.temporal_phase 2 or 3, the latter being NORDIC's
+# recommendation for dMRI).
+#
+spatial_subsample   temporal_subsample   kernel           update_noise   smooth_noise
+7,7,1               0.909091             cuboid=13,13,1   true           false
+5                   1                    cuboid=11x       false          false
