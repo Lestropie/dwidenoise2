@@ -173,6 +173,47 @@ If the command encounters some problem during execution,
 type "`bt`" then Enter to generate the backtrace.
 The resulting data can then be provided to the developer.
 
+### Noise level convention
+
+Wherever a noise level appears in this software---exported by `dwi2noise`,
+exported from `dwidenoise2` using the `-noise_out` option,
+supplied to either command using the `-noise_in` option,
+or passed internally between the components of one command---
+it is the standard deviation of the noise in a ***single real-valued channel***.
+This is the case for complex input data exactly as it is for magnitude input data.
+
+The practical consequence is that a noise level estimated from one representation of a dataset
+can be applied directly to the other, with no rescaling:
+one may estimate the noise level from magnitude data
+and use the resulting map to denoise the corresponding complex data,
+or estimate it from complex data and use it to variance-stabilise the magnitude data.
+At high SNR the two estimates converge to the same value;
+at low SNR they diverge, since the magnitude data are no longer Gaussian,
+and it is precisely that divergence that the non-linear
+[variance-stabilising transform](#variance-stabilising-transform) below exists to absorb.
+
+**This differs from the `dwidenoise` command in *MRtrix3*.**
+There, the noise level reported for complex input data
+is the *aggregate* level across the real and imaginary channels,
+which is larger by a factor of &radic;2.
+A noise level map produced by *MRtrix3* `dwidenoise` from complex data
+must therefore be divided by &radic;2 before being supplied to `dwidenoise2` or `dwi2noise`
+via the `-noise_in` option.
+No such adjustment is required for a map produced from magnitude data,
+for which the two commands agree.
+
+The reason for the departure is that in `dwidenoise` the noise map is an output,
+produced for inspection at the end of processing,
+whereas in `dwidenoise2` it is an internal currency:
+it parameterises the variance-stabilising transform,
+sets the signal / noise boundary of the eigenspectrum,
+drives the regularisation of
+[adaptive phase correction](#complex-data-demodulation),
+propagates between the iterations of the multi-resolution schedule,
+and is passed between the `dwi2noise` and `dwidenoise2` commands.
+A quantity interpreted by that many components cannot carry
+two different meanings depending on the type of the input data.
+
 ## Technical enhancements
 
 The following is a list of technological enhancements present in the `dwidenoise2` command
@@ -377,47 +418,6 @@ Several estimators are available through the `-estimator` option:
     ([Veraart et al., 2016a](#veraart2016a))
     and its refinement in [Cordero-Grande et al. (2019)](#cordero-grande2019);
     note that these two estimators are subject to the [patent](#patent) noted above.
-
-### Noise level convention
-
-Wherever a noise level appears in this software---exported by `dwi2noise`,
-exported from `dwidenoise2` using the `-noise_out` option,
-supplied to either command using the `-noise_in` option,
-or passed internally between the components of one command---
-it is the standard deviation of the noise in a ***single real-valued channel***.
-This is the case for complex input data exactly as it is for magnitude input data.
-
-The practical consequence is that a noise level estimated from one representation of a dataset
-can be applied directly to the other, with no rescaling:
-one may estimate the noise level from magnitude data
-and use the resulting map to denoise the corresponding complex data,
-or estimate it from complex data and use it to variance-stabilise the magnitude data.
-At high SNR the two estimates converge to the same value;
-at low SNR they diverge, since the magnitude data are no longer Gaussian,
-and it is precisely that divergence that the non-linear
-[variance-stabilising transform](#variance-stabilising-transform) below exists to absorb.
-
-**This differs from the `dwidenoise` command in *MRtrix3*.**
-There, the noise level reported for complex input data
-is the *aggregate* level across the real and imaginary channels,
-which is larger by a factor of &radic;2.
-A noise level map produced by *MRtrix3* `dwidenoise` from complex data
-must therefore be divided by &radic;2 before being supplied to `dwidenoise2` or `dwi2noise`
-via the `-noise_in` option.
-No such adjustment is required for a map produced from magnitude data,
-for which the two commands agree.
-
-The reason for the departure is that in `dwidenoise` the noise map is an output,
-produced for inspection at the end of processing,
-whereas in `dwidenoise2` it is an internal currency:
-it parameterises the variance-stabilising transform,
-sets the signal / noise boundary of the eigenspectrum,
-drives the regularisation of
-[adaptive phase correction](#complex-data-demodulation),
-propagates between the iterations of the multi-resolution schedule,
-and is passed between the `dwi2noise` and `dwidenoise2` commands.
-A quantity interpreted by that many components cannot carry
-two different meanings depending on the type of the input data.
 
 ### Variance-stabilising transform
 
