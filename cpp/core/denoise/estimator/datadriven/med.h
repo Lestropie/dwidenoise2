@@ -26,10 +26,19 @@
 
 namespace MR::Denoise::Estimator {
 
-class Med : public Base {
-public:
-  Med() = default;
-  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final;
+// The two estimators derived from Gavish and Donoho (2014), which share their first step: the
+//   robust noise level sigma^2 = ymed / (qnz * mu(beta)) of their eq. (26), obtained from the
+//   median eigenvalue ymed alone. That estimate is robust to the presence of signal components
+//   (the median is unaffected by the few large signal eigenvalues). Note that it is the noise
+//   level, NOT the bulk edge: the signal/noise boundary used for rank determination is the MP
+//   upper edge lambda+ = sigma^2 * edge, which on the standardised scale is sigma^2 itself.
+// - Med1 stops there: the median fixes both the noise level and, through it, the upper edge.
+// - Med2 uses that edge only to isolate the noise components, and re-estimates the noise level
+//   from all of them.
+class MedBase : public Base {
+protected:
+  // Noise level from the median eigenvalue of a single decomposition.
+  double sigma2_median(const Spectrum &spectrum) const;
 
   // Partitioned form. The median is the one Marchenko-Pastur statistic that can be pooled across
   //   unequal partitions *exactly*, and it is worth stating why, because the obvious approach is
@@ -45,6 +54,44 @@ public:
   //   distributed between partitions, and it costs one division per eigenvalue.
   // The rescaling doubles as the ordering key here, in place of the standardised value used by the
   //   other estimators: the statistic of interest is the centre of each bulk rather than its edge.
+  // Returns NaN where no partition holds a nonzero component.
+  double sigma2_median(const std::vector<Spectrum> &spectra) const;
+
+  // Coefficients as provided in Gavish and Donoho 2014
+  // double omega(const double beta) const {
+  //   const double betasq = Math::pow2(beta);
+  //   return (0.56*beta*betasq - 0.95*betasq + 1.82*beta + 1.43);
+  // }
+  // Median of Marcenko-Pastur distribution
+  // Third-order polynomial fit to data generated using Matlab code supplementary to Gavish and Donohue 2014
+  double mu(const double beta) const;
+};
+
+class Med1 : public MedBase {
+public:
+  Med1() = default;
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final;
+  Result operator()(const std::vector<Spectrum> &spectra, //
+                    const Eigen::Vector3d & /*unused*/) const final;
+
+  // Predicted relative RMSE of the median noise level estimate; calibrated by numerical simulation
+  //   of log(RMSE) = c + p*log m + q*log n + s*log r + g*(log m)(log n), under the protocol
+  //   recorded at Med2::predicted_rmse(). R^2 = 0.98.
+  // The error is dominated by bias rather than variance (a median 84% of the mean squared error
+  //   across the fitted cells): the p signal components occupy the top of the spectrum, so the
+  //   median of the rnz nonzero eigenvalues falls above the median of the noise bulk, and the
+  //   noise level is over-stated by an amount that grows with the rank density p/rnz (sigma by a
+  //   median 1% across the fitted cells, reaching 21%). Enlarging the patch does little to remove this, which is
+  //   why the dependence on n is much weaker here than for Med2, whose averaging over the isolated
+  //   noise components is free of it; Med2's true error is the smaller in 194 of the 199 cells, by
+  //   a median factor of 1.9.
+  double predicted_rmse(const ssize_t m, const ssize_t n, const double r) const final;
+};
+
+class Med2 : public MedBase {
+public:
+  Med2() = default;
+  Result operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*unused*/) const final;
   Result operator()(const std::vector<Spectrum> &spectra, //
                     const Eigen::Vector3d & /*unused*/) const final;
 
@@ -65,16 +112,6 @@ public:
   //   precise enough to be used -- so the predicted values fall with it, and the RMSE-tolerance
   //   kernel stops growing the patch sooner than it did.
   double predicted_rmse(const ssize_t m, const ssize_t n, const double r) const final;
-
-protected:
-  // Coefficients as provided in Gavish and Donohue 2014
-  // double omega(const double beta) const {
-  //   const double betasq = Math::pow2(beta);
-  //   return (0.56*beta*betasq - 0.95*betasq + 1.82*beta + 1.43);
-  // }
-  // Median of Marcenko-Pastur distribution
-  // Third-order polynomial fit to data generated using Matlab code supplementary to Gavish and Donohue 2014
-  double mu(const double beta) const;
 };
 
 } // namespace MR::Denoise::Estimator

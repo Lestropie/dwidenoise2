@@ -369,8 +369,15 @@ Several estimators are available through the `-estimator` option:
     developed with functional MRI in mind,
     as introduced in [Zhu et al. (2022)](#zhu2022).
 
--   `med` estimates the noise level from the median eigenvalue,
+-   `med1` estimates the noise level from the median eigenvalue alone,
     as in [Gavish & Donoho (2014)](#gavish2014).
+
+-   `med2` refines the estimate derived using `med1`,
+    performing one iteration of imposing the upper limit of the MP distribution
+    and then re-estimating the noise level based on the bulk noise component of the spectrum;
+    this was found in simulations to be both more precise
+    (as the noise level is computed from many eigenvalues rather than only one)
+    and more accurate.
 
 -   `exp1` and `exp2` implement the Marchenko-Pastur threshold search
     of, respectively, the original `dwidenoise` command

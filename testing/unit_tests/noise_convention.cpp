@@ -101,7 +101,8 @@ using MR::Denoise::eigenvalues_type;
 using MR::Denoise::Spectrum;
 using MR::Denoise::Estimator::Constant;
 using MR::Denoise::Estimator::Exp;
-using MR::Denoise::Estimator::Med;
+using MR::Denoise::Estimator::Med1;
+using MR::Denoise::Estimator::Med2;
 using MR::Denoise::Estimator::MRM2023;
 using MR::Denoise::Estimator::Rank;
 using MR::Denoise::Estimator::Result;
@@ -263,7 +264,8 @@ struct NamedEstimator {
 std::vector<NamedEstimator> all_estimators(const ssize_t imposed_rank, const double imposed_sigma) {
   return {{"exp1", std::make_shared<Exp<1>>(), true, false},
           {"exp2", std::make_shared<Exp<2>>(), true, false},
-          {"med", std::make_shared<Med>(), true, false},
+          {"med1", std::make_shared<Med1>(), true, false},
+          {"med2", std::make_shared<Med2>(), true, false},
           {"mrm2023", std::make_shared<MRM2023>(), true, false},
           {"tbme2022", std::make_shared<TBME2022>(), true, false},
           {"rank", std::make_shared<Rank>(imposed_rank), true, false},
@@ -399,7 +401,7 @@ void test_homogeneity() {
     check(scaled.cutoff_p == base.cutoff_p, "pooled classification is invariant" + context);
     check(scaled.cutoff_p_partition == base.cutoff_p_partition, "per-partition classification is invariant" + context);
   }
-  std::printf("   swept: exp1 exp2 med mrm2023 tbme2022 rank (homogeneous); unity constant (imposed);\n"
+  std::printf("   swept: exp1 exp2 med1 med2 mrm2023 tbme2022 rank (homogeneous); unity constant (imposed);\n"
               "          four single-PCA shapes and one three-way unequal partitioning\n");
 }
 
