@@ -25,6 +25,7 @@
 #include "denoise/precondition/noise_model/noise_model.h"
 #include "enum.h"
 #include "exception.h"
+#include "math/gamma.h"
 #include "math/noncentral_chi.h"
 #include "mrtrix.h"
 
@@ -199,7 +200,7 @@ NonCentralChi::NonCentralChi(const default_type dof, const vst_method_t vst_meth
     for (ssize_t i = 1; i != n_int; ++i)
       log_x[i] = std::log(x_grid[i]);
     std::vector<default_type> log_p(n_int);
-    const default_type log_norm = (N - 1.0) * std::log(2.0) + std::lgamma(N);
+    const default_type log_norm = (N - 1.0) * std::log(2.0) + Math::log_gamma(N);
     for (ssize_t i = 0; i != n_int; ++i)
       log_p[i] = (2.0 * N - 1.0) * log_x[i] - 0.5 * x_grid[i] * x_grid[i] - log_norm;
     std::vector<default_type> p(n_int);
@@ -224,7 +225,7 @@ NonCentralChi::NonCentralChi(const default_type dof, const vst_method_t vst_meth
     // eta(a) on the SNR grid via numerically-stable (max-subtracted) Poisson sum.
     std::vector<default_type> lgam(Jmax + 1);
     for (ssize_t j = 0; j <= Jmax; ++j)
-      lgam[j] = std::lgamma(default_type(j + 1));
+      lgam[j] = Math::log_gamma(default_type(j + 1));
     std::vector<default_type> eta(N_A);
     eta[0] = E[0]; // a = 0: pure central chi, eta(0) = E_0
     for (ssize_t i = 1; i != N_A; ++i) {

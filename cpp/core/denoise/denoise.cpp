@@ -78,6 +78,7 @@ const char *non_gaussian_noise_description =
     " means that those channels do not contribute independent degrees of freedom."
     " N is consequently smaller than the element count, often by a large factor, and need not be a whole number."
     " Where neither option is provided,"
+    " and the degrees of freedom are not instead estimated from the data (-noise_dof_method; see below),"
     " the image header key-values are interrogated for the manner in which the receive channels were combined,"
     " and, where that combination was by sum of squares,"
     " for the effective channel count measured for that coil and element selection"
