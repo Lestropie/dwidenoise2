@@ -39,11 +39,13 @@ struct Iteration {
   std::array<ssize_t, 3> spatial_subsample_ratios;
   // Per-iteration kernel sizing (type + free parameter); replaces the former kernel_size_multiplier.
   Kernel::KernelSpec kernel;
-  // Full width at half maximum, in millimetres, of the isotropic Gaussian with which this
-  //   iteration's freshly estimated noise level map is smoothed before it is passed on; zero
-  //   bypasses smoothing. Only meaningful for an iteration that (re)estimates the noise level,
-  //   so a non-zero value is admitted only where update_noise resolves to true.
-  default_type smooth_noiseout_fwhm;
+  // Full width at half maximum, in millimetres, of the Gaussian applied while conditioning this
+  //   iteration's noise level map; zero means the conditioning performs imputation only. Isotropic,
+  //   so the width is a property of the anatomy rather than of the grid the map was estimated on.
+  //   Only meaningful for an iteration that (re)estimates the noise level, so a non-zero value is
+  //   admitted only where update_noise resolves to true; the conditioning itself takes place
+  //   whatever this value, because the map cannot be used until every voxel of it holds a level.
+  default_type condition_noiseout_fwhm;
   // Fraction of volumes (along the supra-spatial axes) used for noise level estimation
   //   in this iteration; 1.0 uses all volumes. Sub-sampling is stratified by demeaning
   //   group and is owned entirely by the preconditioner (Preconditioner::set_temporal_subsample).

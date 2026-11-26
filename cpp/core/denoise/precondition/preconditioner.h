@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -245,6 +247,12 @@ private:
   // Second step (forward): variance-stabilising transform.
   //   The noise level map is the VST scale / dispersion parameter.
   Image<float> vst_noise_image;
+  // Log-domain twin of the above (Denoise::log_noise_map()), rebuilt whenever it is. Every
+  //   interpolation of the noise level map goes through this rather than through the map itself,
+  //   via Denoise::LogNoiseInterp; the map is sampled at each voxel's scanner position because it
+  //   may be of lower resolution than the data, and cubic interpolation of sigma undershoots to
+  //   zero and below at the edge of the object, where NoiseModel::stabilise() then blanks the data.
+  Image<float> vst_log_image;
   // Third step (forward): demeaning, performed in the stabilised domain.
   //   The stored means are the per-group means of the stabilised data
   //   (the VST offset parameter; sigma-dependent), not the empirical magnitude means.
@@ -260,7 +268,7 @@ private:
                                Image<cfloat> &phase,
                                Image<uint32_t> &serialise,
                                const Transform &transform,
-                               Interp::Cubic<Image<float>> *vst,
+                               std::optional<LogNoiseInterp> &vst,
                                Eigen::Array<T, Eigen::Dynamic, 1> &data) const;
 
   // (Re)compute the stabilised-domain per-group means from the input,

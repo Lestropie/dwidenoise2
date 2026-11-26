@@ -633,11 +633,16 @@ void run(Header &dwi,
                         partitioning,
                         volume_group,
                         demean_site);
-    // Propagate result to next iteration
+    // Propagate result to next iteration. Conditioning runs whether or not the schedule asked for
+    //   smoothing: this map is about to parameterise the next iteration's variance-stabilising
+    //   transform and to be cubic-interpolated at every patch centre, so every voxel of it must
+    //   hold a usable noise level, and only conditioning guarantees that.
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
-                                             iterations[iteration].smooth_noiseout_fwhm);
+                                             iterations[iteration].condition_noiseout_fwhm,
+                                             nullptr,
+                                             noise_unfilled_type::THROW,
+                                             "the noise level map of iteration " + str(iteration + 1));
     // Signal-rank density (per mm of kernel radius) used to size the next iteration's rank-based
     //   kernel. Under partitioning the rank-based kernel is sized from the smallest partition
     //   (m'/P), so the density must be *per partition*: rank_input is the signal rank summed over
@@ -777,8 +782,6 @@ void run(Header &dwi,
                3)                                                          //
       .run(func, input_preconditioned, output_preconditioned);             //
   func.report_warnings();
-  // Note: Denoise::condition_noise_map() is intentionally _not_ called here:
-  //   noise estimates are fed through as-is
 
   const size_t max_rank = Denoise::num_volumes(dwi);
 
@@ -853,6 +856,23 @@ void run(Header &dwi,
       ThreadedLoop(final_exports.lammax_noise)
           .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), final_exports.lammax_noise);
     }
+  }
+
+  // Condition the exported noise map. Nothing downstream consumes it -- this is the reconstruction
+  //   pass, and the denoising has already happened -- so the change is confined to the image the
+  //   user receives: no NaN reaches their file, and the voxels at which estimation failed carry a
+  //   level derived from their neighbours instead. -noise_valid is what records which those were.
+  //   No smoothing is applied: the schedule parser forbids a non-zero smooth_noise on dwidenoise2's
+  //   final row. RETAIN, because a degenerate configuration must not abort a run at the point of
+  //   writing an output image.
+  if (final_exports.noise_out.valid()) {
+    Image<float> conditioned = Denoise::condition_noise_map(final_exports.noise_out,
+                                                            noise_pad_type::NONE,
+                                                            0.0,
+                                                            nullptr,
+                                                            noise_unfilled_type::RETAIN,
+                                                            "the exported noise level map");
+    ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, conditioned);
   }
 
   opt = get_options("residual_statistics");
@@ -1112,7 +1132,7 @@ void run() {
   //   without estimating (the final reconstruction row, whose update_noise defaults to false, is the
   //   only one that can reach here, as non-final rows are already required to have update_noise true).
   for (const auto &it : iterations)
-    if (it.smooth_noiseout_fwhm > 0.0 && !it.update_noise.value())
+    if (it.condition_noiseout_fwhm > 0.0 && !it.update_noise.value())
       throw Exception("A schedule iteration sets a non-zero smooth_noise FWHM but does not "
                       "(re)estimate the noise level in that iteration (update_noise false), so there "
                       "is no freshly estimated noise map to smooth; smooth_noise may be non-zero only "
@@ -1230,6 +1250,15 @@ void run() {
   opt = get_options("noise_out");
   if (!opt.empty())
     final_exports.set_noise_out(opt[0][0].as_text());
+  opt = get_options("noise_valid");
+  if (!opt.empty()) {
+    // The mask says which voxels of the noise level map were estimated rather than filled, so it
+    //   has nothing to describe without that map. dwi2noise always produces one; here it is
+    //   optional, so the pairing has to be required.
+    if (!final_exports.noise_out.valid())
+      throw Exception("-noise_valid describes the map exported by -noise_out, and requires it");
+    final_exports.set_noise_valid(opt[0][0].as_text());
+  }
   opt = get_options("lamplus");
   if (!opt.empty())
     final_exports.set_lamplus(opt[0][0].as_text());

@@ -26,6 +26,7 @@
 
 #include "exception.h"
 #include "mrtrix.h"
+#include "denoise/mask.h"
 
 namespace MR::Denoise {
 
@@ -258,5 +259,7 @@ void warn_if_metadata_precludes_mp(const Header &H) {
          " so the eigenspectrum of each patch will not conform to the Marchenko-Pastur distribution"
          " and the noise level will be underestimated");
 }
+
+
 
 } // namespace MR::Denoise

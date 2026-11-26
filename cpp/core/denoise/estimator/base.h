@@ -32,6 +32,11 @@ public:
   Base(const Base &) = delete;
   virtual ~Base() = default;
   virtual void update_vst_image(Image<float> &) {}
+  // Number of patches at which this estimator was handed a noise level that is not usable -- not
+  //   finite, or not strictly positive -- from the source it imposes. Zero for every estimator
+  //   that derives its level from the data. Reported once, after the threaded loop, by
+  //   Estimate::report_warnings(); see ImposedSigma.
+  virtual ssize_t unusable_sigma_count() const { return 0; }
   // Single-PCA (non-partitioned) noise level estimation from the eigenspectrum of the whole
   //   patch, ie. the single partition spanning every volume of the series.
   // pos = realspace position of the centre of the patch

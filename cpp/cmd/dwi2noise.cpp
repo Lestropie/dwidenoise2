@@ -208,7 +208,7 @@ void usage() {
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image").type_image_in()
-  + Argument("noise", "the output estimated noise level map").type_image_out();
+  + Argument("noise", "the output estimated & conditioned noise level map").type_image_out();
 
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
@@ -345,11 +345,16 @@ void run(Header &dwi,
                         partitioning,
                         volume_group,
                         demean_site);
-    // Propagate result to next iteration
+    // Propagate result to next iteration. Conditioning runs whether or not the schedule asked for
+    //   smoothing: this map is about to parameterise the next iteration's variance-stabilising
+    //   transform and to be cubic-interpolated at every patch centre, so every voxel of it must
+    //   hold a usable noise level, and only conditioning guarantees that.
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             noise_impute_type::NAN_TO_ZERO,
                                              noise_pad_type::PAD,
-                                             iterations[iteration].smooth_noiseout_fwhm);
+                                             iterations[iteration].condition_noiseout_fwhm,
+                                             nullptr,
+                                             noise_unfilled_type::THROW,
+                                             "the noise level map of iteration " + str(iteration + 1));
 
     // Per-partition signal-rank density: rank_input is summed over the iteration's num_partitions
     //   partitions, while the next iteration's rank-based kernel is sized from the smallest
@@ -403,19 +408,25 @@ void run(Header &dwi,
                       volume_group,
                       demean_site);
 
-  // Smooth the exported noise map if (and only if) the final schedule row requests it. The non-final
-  //   iterations have their smoothing applied by condition_noise_map when propagating the estimate to
-  //   the next iteration; the final iteration's map is the command output, so its smoothing must be
-  //   applied here, before it reaches the filesystem. This mirrors the smoothing dwidenoise2 applies
-  //   internally to its penultimate map, so the two-phase route (dwi2noise, then
-  //   dwidenoise2 -noise_in -schedule apriori) denoises with the same map a single dwidenoise2 run
-  //   would. pad=NONE keeps the result on the (unpadded) output grid.
-  if (iterations.back().smooth_noiseout_fwhm > 0.0) {
-    Image<float> smoothed = Denoise::condition_noise_map(final_exports.noise_out,
-                                                         noise_impute_type::NAN_TO_ZERO,
-                                                         noise_pad_type::NONE,
-                                                         iterations.back().smooth_noiseout_fwhm);
-    ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, smoothed);
+  // Condition the exported noise map. The non-final iterations have theirs conditioned by
+  //   condition_noise_map when propagating the estimate to the next iteration; the final
+  //   iteration's map is the command output, so it must be conditioned here, before it reaches the
+  //   filesystem. This mirrors what dwidenoise2 does to its penultimate map, so the two-phase route
+  //   (dwi2noise, then dwidenoise2 -noise_in -schedule apriori) denoises with the same map a single
+  //   dwidenoise2 run would -- which is why it runs unconditionally, rather than only where the
+  //   schedule's final row requests smoothing: the imputation is part of what the other route's map
+  //   has had done to it. pad=NONE keeps the result on the (unpadded) output grid.
+  // RETAIN rather than THROW: this map is an output, not the seed of a further iteration, and a
+  //   configuration in which no voxel could be estimated at all is legitimately degenerate rather
+  //   than a broken run.
+  {
+    Image<float> conditioned = Denoise::condition_noise_map(final_exports.noise_out,
+                                                            noise_pad_type::NONE,
+                                                            iterations.back().condition_noiseout_fwhm,
+                                                            nullptr,
+                                                            noise_unfilled_type::RETAIN,
+                                                            "the exported noise level map");
+    ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, conditioned);
   }
 
   // Optionally export the per-voxel signal-rank density (rank per mm of kernel radius) of this final
@@ -555,6 +566,9 @@ void run() {
 
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1].as_text());
+  opt = get_options("noise_valid");
+  if (!opt.empty())
+    final_exports.set_noise_valid(opt[0][0].as_text());
   opt = get_options("lamplus");
   if (!opt.empty())
     final_exports.set_lamplus(opt[0][0].as_text());

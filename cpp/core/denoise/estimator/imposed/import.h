@@ -38,16 +38,22 @@ public:
   //   collapse sigma to unity.
   explicit Import(const Image<float> &conditioned_noise_image);
   void update_vst_image(Image<float> &new_vst_image) override {
-    if (rescale_by_vst)
-      vst_image = new_vst_image;
+    if (!rescale_by_vst)
+      return;
+    vst_image = new_vst_image;
+    // As for the imported map below: it is the log-domain twin that get_sigma_sq() interpolates,
+    //   and it is built here rather than per call.
+    vst_log_image = vst_image.valid() ? log_noise_map(vst_image) : Image<float>();
   }
 
 protected:
-  bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const override;
+  double get_sigma_sq(const Eigen::Vector3d &pos) const override;
 
 private:
   Image<float> noise_image;
+  Image<float> noise_log_image;
   Image<float> vst_image;
+  Image<float> vst_log_image;
   bool rescale_by_vst;
 };
 

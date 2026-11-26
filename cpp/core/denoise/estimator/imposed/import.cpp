@@ -19,42 +19,47 @@
 
 #include <string>
 
+#include "denoise/denoise.h"
 #include "interp/cubic.h"
 #include "math/math.h"
 
 namespace MR::Denoise::Estimator {
 
-Import::Import(const std::string &path, Image<float> &vst_image) //
-    : noise_image(Image<float>::open(path)),                     //
-      vst_image(vst_image),                                      //
-      rescale_by_vst(true) {}                                    //
+Import::Import(const std::string &path, Image<float> &vst_image)                            //
+    : noise_image(Image<float>::open(path)),                                               //
+      noise_log_image(log_noise_map(noise_image)),                                         //
+      vst_image(vst_image),                                                                //
+      vst_log_image(vst_image.valid() ? log_noise_map(vst_image) : Image<float>()),        //
+      rescale_by_vst(true) {}                                                              //
 
-Import::Import(const Image<float> &conditioned_noise_image) //
-    : noise_image(conditioned_noise_image),                 //
-      rescale_by_vst(false) {}                              //
+Import::Import(const Image<float> &conditioned_noise_image)                                //
+    : noise_image(conditioned_noise_image),                                                //
+      noise_log_image(log_noise_map(noise_image)),                                         //
+      rescale_by_vst(false) {}                                                             //
 
-bool Import::get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const {
-  // Construct on each call to preserve const-ness & thread-safety
-  Interp::Cubic<Image<float>> interp(noise_image);
+double Import::get_sigma_sq(const Eigen::Vector3d &pos) const {
+  // Construct on each call to preserve const-ness & thread-safety.
+  // Both maps are sampled through their log-domain twins: cubic interpolation of sigma undershoots
+  //   at the edge of the object, and the squaring below would launder a negative interpolated value
+  //   into a plausible-looking positive sigma^2.
+  LogNoiseInterp interp(noise_log_image);
   // TODO This will cause issues at the edge of the image FoV
   // Addressing this may require integration of the mrfilter changes
   //   that provide wrappers for various handling of FoV edges
   // For now, just expect that denoising won't do anything
   //   where the patch centre is too close to the image edge for cubic interpolation
   if (!interp.scanner(pos))
-    return false;
+    return std::numeric_limits<double>::quiet_NaN();
   // If the data have been preconditioned at input based on a pre-estimated noise level,
   //   then we need to rescale the threshold that we load from this image
   //   based on knowledge of that rescaling
   if (vst_image.valid()) {
-    Interp::Cubic<Image<float>> vst_interp(vst_image);
+    LogNoiseInterp vst_interp(vst_log_image);
     if (!vst_interp.scanner(pos))
-      return false;
-    sigma_sq = Math::pow2(interp.value() / vst_interp.value());
-  } else {
-    sigma_sq = Math::pow2(interp.value());
+      return std::numeric_limits<double>::quiet_NaN();
+    return Math::pow2(interp.value() / vst_interp.value());
   }
-  return true;
+  return Math::pow2(interp.value());
 }
 
 } // namespace MR::Denoise::Estimator

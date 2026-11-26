@@ -19,6 +19,7 @@
 
 #include <Eigen/Dense>
 #include <cassert>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -118,31 +119,105 @@ ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp);
 //   whether the input is 4D or higher
 size_t num_volumes(const Header&);
 
-// Function for performing filtering operations on a noise map:
-// - May need to replace NaNs with zeros
-//   (want to persist with putting NaNs in the noise map as indication of PCA failure rather than rank estimation failure,
-//   but this is deleterious in an iterative environment)
-// - May need to perform padding in order to facilitate interpolation at the next resolution
-//   (while it would be preferable for this to be managed using EdgeHandlers in MRtrix3/mrtrix3#2278,
-//    for the sake of progress we will here just do manual explicit padding)
-// - May be instructed to perform explicit smoothing of the noise map prior to the next iteration
-enum class noise_impute_type{ NAN_TO_ZERO, NONE };
+// Whether a value stored in a noise level map is a usable noise level.
+//
+// A single sentinel governs every noise level map in this software: NaN means "no valid noise
+//   level here". Zero and negative values are not sentinels but corruption -- a zero noise level
+//   blanks the data it stabilises (NoiseModel::Gaussian::stabilise returns 0 for sigma <= 0), and a
+//   negative one is silently laundered into a plausible positive sigma^2 by the squaring in
+//   Estimator::Import::get_sigma_sq -- so they are treated here as equivalent to NaN and converted
+//   to it before anything else reads the map.
+//
+// Note the deliberate asymmetry with Estimator::Result, which uses sigma2 == 0 as its own internal
+//   "no usable threshold" sentinel (see Result::operator bool()). The conversion between the two
+//   conventions happens at exactly one place, where Estimate writes the estimated level into
+//   exports.noise_out.
+inline bool noise_level_is_valid(const float value) { return std::isfinite(value) && value > 0.0F; }
+
+// Make a noise level map fit to be used: pad it for interpolation, and guarantee that every voxel
+//   of it holds a usable noise level.
+//
+// Conditioning is performed on log(sigma^2), and this is the only place in the software at which
+//   that domain appears. Both operations below -- the Gaussian smoothing and the imputation -- are
+//   linear filters, and applying a linear filter to log(sigma^2) rather than to sigma is what makes
+//   them well posed:
+//
+// - Power-invariance. The map stores sigma, the estimator produces sigma^2, and the eigenvalue
+//   model is linear in sigma^2. Arithmetic smoothing does not commute with the square root
+//   (sqrt(G*sigma^2) != G*sigma), so the result would depend on the arbitrary choice of which power
+//   of the noise level the image happens to hold. In the log domain the two agree exactly, the
+//   operation being equivariant under any power law. (Smoothing log(sigma^2) and log(sigma) are for
+//   the same reason the same operation: they differ by a constant factor 2, which passes unchanged
+//   through a normalised linear filter.)
+// - The estimator error is multiplicative. A patch's sigma^2 is a scaled chi-squared-type variate
+//   with roughly constant relative error (sd ~ sqrt(2/nu)) -- strongly heteroscedastic in absolute
+//   terms, homoscedastic on the log scale, which is where a linear filter is the minimum-variance
+//   combiner. log is exactly the variance-stabilising transform of the constant-CV family, the same
+//   reasoning this pipeline already applies to the data themselves.
+// - Dynamic range. Across a receive array the noise field spans a large multiplicative range. A
+//   fixed-width Gaussian in the linear domain distributes ABSOLUTE error uniformly, concentrating
+//   the relative damage in the low-sigma interior while the high-sigma periphery bleeds inward. In
+//   the log domain the same kernel imposes a uniform RELATIVE error, which is what the downstream
+//   use of sigma -- as a divisor in the variance-stabilising transform -- cares about.
+// - Outlier robustness. A single near-failed patch at ten times the surrounding level dominates an
+//   arithmetic neighbourhood mean; on the log scale it contributes ln 10.
+// - Consistency with the iteration's own algebra. The update is multiplicative,
+//   sigma_k = sigma_{k-1} * sigma_post-VST, so the quantity that composes additively across
+//   iterations is log sigma. Log-domain smoothing commutes with that update; arithmetic smoothing
+//   does not.
+// - Positivity by construction. exp() of anything finite is positive, so no combination of
+//   filtering, imputation or interpolation can emit a zero or negative sigma into a map that is
+//   subsequently cubic-interpolated.
+//
+// The counter-argument, stated honestly: if the intent were to POOL the variance of a genuinely
+//   heterogeneous neighbourhood, the arithmetic mean of sigma^2 would be correct, because variances
+//   add. The intent here is to regularise an estimate of a smooth field -- to reduce estimator
+//   variance without moving the field -- and for that the log domain is right. The consequence is a
+//   geometric rather than arithmetic mean, which is smaller by approximately exp(s^2/2) in the
+//   within-kernel spread s: below 0.1% from estimator noise alone, a few percent where the true
+//   field varies steeply within the kernel. Small, systematic, and always downward.
+//
+
 enum class noise_pad_type{ PAD, NONE };
+// What to do with a voxel that no mechanism could fill: one with no valid voxel anywhere in the map
+//   to reach it, and no patch-derived bound of its own.
+// - THROW: the map is to seed a subsequent iteration's variance-stabilising transform, so it must
+//   be usable; a wholly unfillable one is a broken run.
+// - RETAIN: the map is only being exported. Leaving the NaN visible is right there, because a
+//   configuration that produces no estimate anywhere is legitimately degenerate (-fixed_rank set to
+//   the available rank is exactly that), and aborting the run over an output image would be wrong.
+enum class noise_unfilled_type { THROW, RETAIN };
 // When "coverage" is non-null, the padding is widened as necessary so that the returned map's
 //   field of view encloses that header's field of view (plus the interpolation margin). An
 //   externally-supplied map need not share the DWI voxel grid -- the estimator interpolates it --
 //   but it must be sampleable at every patch position the DWI grid can produce, which a map on a
 //   smaller or offset grid otherwise is not. Padded voxels replicate the nearest edge value.
-// "smooth_fwhm" is the full width at half maximum, in millimetres, of the isotropic Gaussian with
+// "fwhm" is the full width at half maximum, in millimetres, of the isotropic Gaussian with
 //   which the map is smoothed once conditioned; zero (the default) bypasses smoothing entirely.
 //   Expressing the width in millimetres rather than in voxels makes the extent of the smoothing a
 //   property of the anatomy rather than of the grid the map happens to be estimated on, which for
-//   an iterative schedule differs from one iteration to the next.
+//   an iterative schedule differs from one iteration to the next. Note that smoothing is no longer
+//   the only thing this function does, nor a precondition for it doing anything: the imputation
+//   below runs whether or not a width was requested.
+// "context" names the map in any message this function emits.
+//
+// POSTCONDITION, asserted: for impute == NONE with unfilled == THROW, the returned map is finite
+//   and strictly positive at every voxel, padding included. That is what Interp::Cubic and
+//   NoiseModel::stabilise have always assumed of it and never been given.
 Image<float> condition_noise_map(Image<float> &in,
-                                 const noise_impute_type impute = noise_impute_type::NAN_TO_ZERO,
                                  const noise_pad_type pad = noise_pad_type::PAD,
-                                 const default_type smooth_fwhm = 0.0,
-                                 const Header *coverage = nullptr);
+                                 const default_type fwhm = 0.0,
+                                 const Header *coverage = nullptr,
+                                 const noise_unfilled_type unfilled = noise_unfilled_type::THROW,
+                                 const std::string &context = "the estimated noise level map");
+
+// Report the number of voxels of a noise level map at which no valid noise level was estimated and
+//   which were consequently filled from their neighbours, escalating from INFO to WARN by the same
+//   rule as Denoise::report_invalid_data(): the threshold is the largest number of voxels within a
+//   single slice orthogonal to any axis, excluding the slice-encoding axis where the metadata name
+//   it. "H" must be the header of the map being conditioned (the sub-sampled grid), so that "one
+//   slice" is one slice of that map. "context" names the map in the message.
+void report_imputed_noise_levels(const size_t imputed_count, const Header &H, const std::string &context);
 
 // Construct the externally-provided noise level map (the variance-stabilising-transform scale)
 //   from a -noise_in command-line argument, which may be either:
@@ -172,6 +247,36 @@ Image<float> compute_rank_per_mm(Image<uint16_t> &rank_input, Image<float> &max_
 //   (NaN->0 and padded) so it can be safely interpolated to size the reconstruction kernel.
 Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header &H_spatial);
 
+// Log-domain twin of a conditioned noise level map: x = log(sigma^2) = 2 log(sigma), and NaN
+//   wherever the source holds no usable level (which for a conditioned map is nowhere).
+//
+// Every point at which a noise level map is sampled between voxel centres samples this instead,
+//   through LogNoiseInterp below. Two reasons, and they are the reasons conditioning itself is
+//   performed in the log domain:
+// - Cubic interpolation is not monotone: it undershoots at a step, and near the edge of the object
+//   the noise field presents a large one. In the linear domain that undershoot reaches zero and
+//   below, and the consequences are silent -- NoiseModel::Gaussian::stabilise() returns 0 for
+//   sigma <= 0, blanking the data at that voxel; Estimator::Import squares the interpolated value,
+//   laundering a negative sigma into a plausible positive sigma^2; Estimator::Constant divides by
+//   its square, so a zero yields an infinity. exp() of an undershooting log value is merely small.
+// - It makes interpolation geometric, matching the domain in which the map was conditioned. A map
+//   smoothed as a geometric mean and then sampled as an arithmetic one is inconsistent with itself.
+Image<float> log_noise_map(Image<float> &sigma_map);
+
+// Cubic interpolation of a noise level map performed on its log-domain twin, returning the noise
+//   level. Constructed over the image log_noise_map() returns, never over the map itself.
+//   Out-of-field-of-view sampling yields NaN, as the underlying interpolator does; callers test the
+//   value they receive.
+class LogNoiseInterp {
+public:
+  explicit LogNoiseInterp(const Image<float> &log_map) : interp(log_map) {}
+  bool scanner(const Eigen::Vector3d &position) { return interp.scanner(position); }
+  default_type value() { return std::exp(0.5 * default_type(interp.value())); }
+
+private:
+  Interp::Cubic<Image<float>> interp;
+};
+
 // Multiply a 3-D map in place by a power of the noise level (variance-stabilising-transform scale)
 //   interpolated at each voxel's scanner position. When the data were stabilised with a noise
 //   map, an estimate derived on the stabilised data is a unit-less correction factor; multiplying
@@ -191,14 +296,19 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
 //   silently, differing only in magnitude.
 class NoiseMapVSTRescaleFunctor {
 public:
+  // The log-domain twin is built here, once per construction, and held so that the scratch buffer
+  //   outlives the per-thread copies ThreadedLoop makes of this functor (an Image copy shares the
+  //   buffer, and each copy's interpolator gets its own voxel accessor). Building it here rather
+  //   than requiring it of the caller keeps every call site expressed in the map it actually holds.
   NoiseMapVSTRescaleFunctor(Image<float> &vst_image, const Header &grid, const int power)
-      : vst_interp(vst_image), transform(grid), power(power) {
+      : vst_log(log_noise_map(vst_image)), vst_interp(vst_log), transform(grid), power(power) {
     assert(power == 1 || power == 2);
   }
   void operator()(Image<float> &map);
 
 private:
-  Interp::Cubic<Image<float>> vst_interp;
+  Image<float> vst_log;
+  LogNoiseInterp vst_interp;
   Transform transform;
   int power;
 };

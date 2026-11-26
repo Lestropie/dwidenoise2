@@ -35,16 +35,21 @@ public:
   //   undo. Mirrors the equivalent Import constructor.
   explicit Constant(const default_type value);
   void update_vst_image(Image<float> &new_vst_image) override {
-    if (rescale_by_vst)
-      vst_image = new_vst_image;
+    if (!rescale_by_vst)
+      return;
+    vst_image = new_vst_image;
+    // The log-domain twin is what get_sigma_sq() interpolates; built here, once per iteration,
+    //   because that function constructs a fresh interpolator on every call.
+    vst_log_image = vst_image.valid() ? log_noise_map(vst_image) : Image<float>();
   }
 
 protected:
-  bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const override;
+  double get_sigma_sq(const Eigen::Vector3d &pos) const override;
 
 private:
   const default_type sigma2;
   Image<float> vst_image;
+  Image<float> vst_log_image;
   bool rescale_by_vst;
 };
 

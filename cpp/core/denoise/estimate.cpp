@@ -18,6 +18,7 @@
 #include "denoise/estimate.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -239,11 +240,24 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     }
   }
 
+  // A decomposition that succeeded but yielded no usable threshold is a different event from one
+  //   that failed to converge, and is counted separately (see the two counters in Estimate).
+  if (successful_decomposition && !bool(threshold))
+    no_threshold_counter.fetch_add(1, std::memory_order_relaxed);
+
   // Store additional output maps if requested
   auto ss_index = subsample->in2ss(voxel);
   if (exports.noise_out.valid()) {
     // Per-channel noise level, for complex input as much as for magnitude: the eigenvalues from
     //   which sigma2 was derived were rescaled on that basis at to_per_channel() above.
+    // This is the ONE place at which Estimator::Result's "no usable threshold" convention
+    //   (sigma2 == 0, via operator bool()) is converted into the map-level convention (NaN); see
+    //   Denoise::noise_level_is_valid(). Every route to an unusable threshold arrives here alike:
+    //   a decomposition that failed to converge, an imposed rank equal to the available rank,
+    //   MRM2023's peel-off classifying every component as signal, a degenerate spectrum whose
+    //   noise components are identically zero, and an imposed estimator handed a level it could
+    //   not use. None of them yields a noise level at this voxel, and the map says so with the one
+    //   sentinel.
     assign_pos_of(ss_index).to(exports.noise_out);
     exports.noise_out.value() = bool(threshold)                                //
                                     ? float(std::sqrt(threshold.sigma2))       //
@@ -259,6 +273,13 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   //   -noise_out map, which it equals when the cut lands exactly on the edge.
   // Both are NaN, rather than the signalling NaN of a default-constructed Result, where no usable
   //   threshold was found; as for -noise_out.
+  // Whether a valid noise level was ESTIMATED here, recorded before any conditioning fills the
+  //   voxel in. This is the same test that decides what noise_out receives, evaluated at the same
+  //   moment, so the two cannot disagree.
+  if (exports.noise_valid.valid()) {
+    assign_pos_of(ss_index).to(exports.noise_valid);
+    exports.noise_valid.value() = bool(threshold);
+  }
   if (exports.lamplus.valid()) {
     assign_pos_of(ss_index).to(exports.lamplus);
     exports.lamplus.value() = bool(threshold)                                //
@@ -345,6 +366,27 @@ template <typename F> void Estimate<F>::report_warnings() const {
   const ssize_t count = pca_failure_counter.load(std::memory_order_acquire);
   if (count > 0) {
     WARN("A total of " + str(count) + " PCA kernels failed to converge");
+  }
+  // An imposed estimator handed an unusable noise level reports here rather than throwing: this
+  //   count is accumulated inside a ThreadedLoop functor, from which an exception cannot safely
+  //   unwind, and FAIL() writing per voxel from every thread would interleave and flood the
+  //   terminal. Reported once, after the loop, at error level: the conditioned map from which the
+  //   level is drawn is finite and strictly positive by construction, so a non-zero count says
+  //   "this cannot happen and did" while still letting the run complete with those voxels marked
+  //   invalid.
+  const ssize_t unusable_sigma = estimator ? estimator->unusable_sigma_count() : 0;
+  if (unusable_sigma > 0) {
+    FAIL("At " + str(unusable_sigma) +
+         " patch(es) the imposed noise level was not finite and positive;"
+         " those patches were left unprocessed");
+  }
+  const ssize_t no_threshold = no_threshold_counter.load(std::memory_order_acquire);
+  if (no_threshold > 0) {
+    // Not a numerical failure: these decompositions succeeded, and the estimator declined to place
+    //   a signal/noise boundary within them. Reported at INFO because for some configurations it is
+    //   the expected outcome (-fixed_rank set to the available rank produces it at every patch).
+    INFO("A total of " + str(no_threshold) +
+         " PCA kernels were decomposed successfully but yielded no usable signal/noise threshold");
   }
 }
 

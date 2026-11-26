@@ -44,6 +44,7 @@ public:
 
   void set_noise_out(const std::string &path);
   void set_noise_out();
+  void set_noise_valid(const std::string &path);
   void set_lamplus(const std::string &path);
   void set_lammax_noise(const std::string &path);
   void set_rank_pcanonzero(const std::string &path);
@@ -62,6 +63,13 @@ public:
   void set_eigenspectra_path(const std::string &path);
 
   Image<float> noise_out;
+  // Binary mask of voxels at which a valid noise level was ESTIMATED, captured before any
+  //   sanitisation or imputation touches the map. It is what restores the information the exported
+  //   noise map used to carry by holding zero where estimation failed; that map is now filled
+  //   everywhere, which is better for the pipeline but makes a failure invisible in the primary
+  //   output. Voxels filled from the patch-derived bound are likewise absent from this mask: a
+  //   bound is not an estimate.
+  Image<bool> noise_valid;
   // The two signal/noise boundary maps of Estimator::Result, which are not the same quantity; see
   //   the commentary on that class. lamplus holds the theoretical Marchenko-Pastur edge on the
   //   normalised eigenvalue scale (sigma^2 * edge); lammax_noise holds the largest eigenvalue

@@ -34,7 +34,7 @@ public:
   Unity() = default;
 
 protected:
-  bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const override;
+  double get_sigma_sq(const Eigen::Vector3d &pos) const override;
 };
 
 } // namespace MR::Denoise::Estimator

@@ -19,9 +19,8 @@
 
 namespace MR::Denoise::Estimator {
 
-bool Unity::get_sigma_sq(const Eigen::Vector3d & /*pos*/, double &sigma_sq) const {
-  sigma_sq = 1.0;
-  return true;
+double Unity::get_sigma_sq(const Eigen::Vector3d & /*pos*/) const {
+  return 1.0;
 }
 
 } // namespace MR::Denoise::Estimator

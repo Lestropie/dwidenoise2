@@ -25,6 +25,7 @@
 
 #include "algo/loop.h"
 #include "algo/threaded_loop.h"
+#include "denoise/denoise.h"
 #include "interp/cubic.h"
 #include "math/math.h"
 #include "mrtrix.h"
@@ -791,7 +792,7 @@ public:
              const std::vector<size_t> &outer_axes,
              const std::vector<size_t> &inner_axes,
              Image<T> &in,
-             Image<float> &sigma,
+             Image<float> &log_sigma,
              Image<cfloat> &phase,
              Image<uint32_t> &serialise,
              const std::vector<AdaptivePhaseEstimator::VolumePlan> &plan,
@@ -802,14 +803,14 @@ public:
         outer_axes(outer_axes),
         inner_axes(inner_axes),
         in(in),
-        sigma(sigma),
+        log_sigma(log_sigma),
         phase(phase),
         serialise(serialise),
         plan(&plan),
         lambda_store(lambda_store),
         slice_axis(estimator.slice_axis()),
         num_slices(in.size(estimator.slice_axis())),
-        have_sigma(sigma.valid()),
+        have_sigma(log_sigma.valid()),
         transform(in),
         Nx(in.size(inner_axes[0])),
         Ny(in.size(inner_axes[1])),
@@ -1034,14 +1035,17 @@ private:
       sig.setConstant(-1.0);
       return;
     }
-    Interp::Cubic<Image<float>> sigma_interp(sigma);
+    // Interpolated in the log domain: cubic interpolation of sigma undershoots at the edge of the
+    //   object, and a negative or zero level there would be read as an unknown voxel (or, worse,
+    //   weight the fidelity term by a near-infinite precision).
+    LogNoiseInterp sigma_interp(log_sigma);
     for (auto l = Loop(inner_axes)(in); l; ++l) {
       const ssize_t ix = in.index(ax);
       const ssize_t iy = in.index(ay);
       sigma_interp.scanner(transform.voxel2scanner * Eigen::Vector3d({double(in.index(0)),   //
                                                                       double(in.index(1)),   //
                                                                       double(in.index(2))})); //
-      const double s = double(sigma_interp.value());
+      const double s = sigma_interp.value();
       sig(ix, iy) = std::isfinite(s) ? s : -1.0;
     }
   }
@@ -1063,7 +1067,7 @@ private:
   std::vector<size_t> outer_axes;
   std::vector<size_t> inner_axes;
   Image<T> in;
-  Image<float> sigma;
+  Image<float> log_sigma;
   Image<cfloat> phase;
   Image<uint32_t> serialise;
   const std::vector<AdaptivePhaseEstimator::VolumePlan> *plan;
@@ -1103,6 +1107,10 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
                                         std::vector<double> *const io_lambda) const {
   assert(inslice_axes.size() == 2);
   assert(io_lambda == nullptr || io_lambda->size() == plan.size() * size_t(in.size(slice_axis())));
+  // The noise level map is sampled between voxel centres (it may be of lower resolution than the
+  //   data), and every such sampling in this software is performed in the log domain. Built once
+  //   here rather than per thread: each plane's functor constructs its interpolator over it.
+  Image<float> log_sigma = sigma.valid() ? log_noise_map(sigma) : Image<float>();
   // Outer axes = every axis of the data except the two in-slice (demodulation) axes: the
   //   slice-normal spatial axis, the volume axis, and any serialised supra-volume axes. Each
   //   outer position is one independent 2-D phase-estimation problem.
@@ -1148,7 +1156,7 @@ void AdaptivePhaseEstimator::operator()(Image<T> &in,
 
   ThreadedLoop(message, in, outer_axes, inslice_axes)
       .run_outer(
-          APCFunctor<T>(*this, outer_axes, inslice_axes, in, sigma, io_phase, serialise, plan, io_lambda, params));
+          APCFunctor<T>(*this, outer_axes, inslice_axes, in, log_sigma, io_phase, serialise, plan, io_lambda, params));
 }
 
 // Explicitly instantiated for complex data only; the phase is ill-defined for real input, and
