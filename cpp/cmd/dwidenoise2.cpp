@@ -615,10 +615,6 @@ void run(Header &dwi,
     // For internal iterations, we only save the output noise level estimate
     Exports iteration_exports(dwi, subsample->header());
     iteration_exports.set_noise_out();
-    // Patch-derived upper bounds on the noise level, for those voxels at which the estimator
-    //   declared every component to be signal and so left no estimate. Conditioning falls back to
-    //   these only where imputation from neighbouring voxels has nothing to work from.
-    iteration_exports.set_noise_bound();
     iteration_exports.set_rank_input();
     iteration_exports.set_max_dist();
     Iterative::estimate(input,
@@ -642,11 +638,9 @@ void run(Header &dwi,
     //   transform and to be cubic-interpolated at every patch centre, so every voxel of it must
     //   hold a usable noise level, and only conditioning guarantees that.
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             noise_impute_type::NONE,
                                              noise_pad_type::PAD,
                                              iterations[iteration].condition_noiseout_fwhm,
                                              nullptr,
-                                             &iteration_exports.noise_bound,
                                              noise_unfilled_type::THROW,
                                              "the noise level map of iteration " + str(iteration + 1));
     // Signal-rank density (per mm of kernel radius) used to size the next iteration's rank-based
@@ -847,10 +841,6 @@ void run(Header &dwi,
     if (final_exports.noise_out.valid()) {
       ThreadedLoop(final_exports.noise_out)
           .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), final_exports.noise_out);
-      if (final_exports.noise_bound.valid()) {
-        ThreadedLoop(final_exports.noise_bound)
-            .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), final_exports.noise_bound);
-      }
     }
     // Note: each boundary voxel is scaled by the noise level interpolated at *its own* scanner
     //   position (the looped image's index), correcting a prior copy-paste that sampled
@@ -877,11 +867,9 @@ void run(Header &dwi,
   //   writing an output image.
   if (final_exports.noise_out.valid()) {
     Image<float> conditioned = Denoise::condition_noise_map(final_exports.noise_out,
-                                                            noise_impute_type::NONE,
                                                             noise_pad_type::NONE,
                                                             0.0,
                                                             nullptr,
-                                                            &final_exports.noise_bound,
                                                             noise_unfilled_type::RETAIN,
                                                             "the exported noise level map");
     ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, conditioned);
@@ -1260,10 +1248,8 @@ void run() {
 
   Exports final_exports(dwi, final_subsample->header());
   opt = get_options("noise_out");
-  if (!opt.empty()) {
+  if (!opt.empty())
     final_exports.set_noise_out(opt[0][0].as_text());
-    final_exports.set_noise_bound();
-  }
   opt = get_options("noise_valid");
   if (!opt.empty()) {
     // The mask says which voxels of the noise level map were estimated rather than filled, so it

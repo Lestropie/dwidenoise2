@@ -47,9 +47,7 @@ bool ImposedSigma::accept_sigma_sq(const double sigma_sq) const {
 
 Result ImposedSigma::operator()(const Spectrum &spectrum, const Eigen::Vector3d &pos) const {
   Result result;
-  double sigma_sq;
-  if (!get_sigma_sq(pos, sigma_sq))
-    return result;
+  const double sigma_sq = get_sigma_sq(pos);
   if (!accept_sigma_sq(sigma_sq))
     return result;
   result.sigma2 = sigma_sq;
@@ -65,9 +63,7 @@ Result ImposedSigma::operator()(const Spectrum &spectrum, const Eigen::Vector3d 
 
 Result ImposedSigma::operator()(const std::vector<Spectrum> &spectra, const Eigen::Vector3d &pos) const {
   Result result;
-  double sigma_sq;
-  if (!get_sigma_sq(pos, sigma_sq))
-    return result;
+  const double sigma_sq = get_sigma_sq(pos);
   if (!accept_sigma_sq(sigma_sq))
     return result;
   result.sigma2 = sigma_sq;

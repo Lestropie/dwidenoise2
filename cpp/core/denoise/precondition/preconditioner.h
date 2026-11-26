@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -266,7 +268,7 @@ private:
                                Image<cfloat> &phase,
                                Image<uint32_t> &serialise,
                                const Transform &transform,
-                               LogNoiseInterp *vst,
+                               std::optional<LogNoiseInterp> &vst,
                                Eigen::Array<T, Eigen::Dynamic, 1> &data) const;
 
   // (Re)compute the stabilised-domain per-group means from the input,

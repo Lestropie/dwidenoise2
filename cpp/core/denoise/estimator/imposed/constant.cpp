@@ -33,19 +33,17 @@ Constant::Constant(const default_type value) //
     : sigma2(Math::pow2(value)),             //
       rescale_by_vst(false) {}               //
 
-bool Constant::get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const {
+double Constant::get_sigma_sq(const Eigen::Vector3d &pos) const {
   // If the data have been preconditioned at input based on a pre-estimated noise level,
   //   then we need to rescale the threshold that we load from this image
   //   based on knowledge of that rescaling
   if (vst_image.valid()) {
     LogNoiseInterp vst_interp(vst_log_image);
     if (!vst_interp.scanner(pos))
-      return false;
-    sigma_sq = sigma2 / Math::pow2(vst_interp.value());
-  } else {
-    sigma_sq = sigma2;
+      return std::numeric_limits<double>::quiet_NaN();
+    return sigma2 / Math::pow2(vst_interp.value());
   }
-  return true;
+  return sigma2;
 }
 
 } // namespace MR::Denoise::Estimator

@@ -59,23 +59,6 @@ ssize_t total_qnz(const std::vector<Spectrum> &spectra) {
   return s;
 }
 
-double all_signal_sigma2_bound(const Spectrum &spectrum) {
-  if (spectrum.rnz() < 1)
-    return std::numeric_limits<double>::quiet_NaN();
-  const double bound = spectrum.standardized(spectrum.rz());
-  return bound > 0.0 ? bound : std::numeric_limits<double>::quiet_NaN();
-}
-
-double all_signal_sigma2_bound(const std::vector<Spectrum> &spectra) {
-  double bound = std::numeric_limits<double>::infinity();
-  for (const Spectrum &spectrum : spectra) {
-    if (spectrum.rnz() < 1)
-      continue;
-    bound = std::min(bound, spectrum.standardized(spectrum.rz()));
-  }
-  return (std::isfinite(bound) && bound > 0.0) ? bound : std::numeric_limits<double>::quiet_NaN();
-}
-
 std::vector<PooledEigenvalue> pool_standardized(const std::vector<Spectrum> &spectra) {
   std::vector<PooledEigenvalue> pooled;
   pooled.reserve(size_t(std::max<ssize_t>(0, total_rnz(spectra))));

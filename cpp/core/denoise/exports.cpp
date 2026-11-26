@@ -219,10 +219,6 @@ Exports::Exports(const Header &in, const Header &ss) //
 void Exports::set_noise_out(const std::string &path) { noise_out = Image<float>::create(path, *H_ss); }
 void Exports::set_noise_out() { noise_out = Image<float>::scratch(*H_ss, "Scratch image for noise level output"); }
 
-void Exports::set_noise_bound() {
-  noise_bound = Image<float>::scratch(*H_ss, "Scratch image for patch-derived noise level bound");
-}
-
 void Exports::set_noise_valid(const std::string &path) {
   Header H(*H_ss);
   H.datatype() = DataType::Bit;

@@ -25,6 +25,7 @@
 #include <optional>
 
 #include "algo/loop.h"
+#include "algo/threaded_copy.h"
 #include "algo/threaded_loop.h"
 #include "axes.h"
 #include "denoise/mask.h"
@@ -209,22 +210,17 @@ inline void assign_padded_pos(Image<float> &out,
 class ConditionNoiseMapFunctor {
 public:
   ConditionNoiseMapFunctor(Image<float> &in,
-                           const noise_impute_type impute,
                            const noise_pad_type pad,
                            const std::array<ssize_t, 3> &pad_lo)
-      : in(in), impute(impute), pad(pad), pad_lo(pad_lo) {}
+      : in(in), pad(pad), pad_lo(pad_lo) {}
   void operator()(Image<float> &out) {
     assign_padded_pos(out, in, pad, pad_lo);
     const float value = in.value();
-    if (impute == noise_impute_type::NAN_TO_ZERO)
-      out.value() = std::isfinite(value) ? value : 0.0F;
-    else
-      out.value() = noise_level_is_valid(value) ? value : std::numeric_limits<float>::quiet_NaN();
+    out.value() = noise_level_is_valid(value) ? value : std::numeric_limits<float>::quiet_NaN();
   }
 
 private:
   Image<float> in;
-  noise_impute_type impute;
   noise_pad_type pad;
   std::array<ssize_t, 3> pad_lo;
 };
@@ -365,40 +361,6 @@ private:
   std::atomic<size_t> *filled;
 };
 
-// Last-resort fill from the patch-derived upper bounds (Estimator::Result::sigma2_bound, exported
-//   as a noise level). Applied only to voxels that no imputation pass could reach, and only in the
-//   log domain the surrounding map is already in.
-class BoundFillFunctor {
-public:
-  BoundFillFunctor(Image<float> &bound,
-                   const noise_pad_type pad,
-                   const std::array<ssize_t, 3> &pad_lo,
-                   std::atomic<size_t> &filled)
-      : bound(bound), pad(pad), pad_lo(pad_lo), filled(&filled) {}
-  void operator()(Image<float> &out) {
-    if (std::isfinite(out.value()))
-      return;
-    assign_padded_pos(out, bound, pad, pad_lo);
-    const float sigma = bound.value();
-    if (!noise_level_is_valid(sigma))
-      return;
-    out.value() = float(2.0 * std::log(default_type(sigma)));
-    filled->fetch_add(1, std::memory_order_relaxed);
-  }
-
-private:
-  Image<float> bound;
-  noise_pad_type pad;
-  std::array<ssize_t, 3> pad_lo;
-  std::atomic<size_t> *filled;
-};
-
-// Copy one map into another of identical dimensions.
-class CopyFloatFunctor {
-public:
-  void operator()(Image<float> &destination, Image<float> &source) { destination.value() = source.value(); }
-};
-
 // Fill every voxel of a scratch image with a fixed value.
 class FillFloatFunctor {
 public:
@@ -491,11 +453,9 @@ void normalised_convolution(Image<float> &x, const default_type fwhm) {
 } // namespace
 
 Image<float> condition_noise_map(Image<float> &in,
-                                 const noise_impute_type impute,
                                  const noise_pad_type pad,
                                  const default_type fwhm,
                                  const Header *coverage,
-                                 Image<float> *bound,
                                  const noise_unfilled_type unfilled,
                                  const std::string &context) {
   assert(fwhm >= 0.0);
@@ -543,11 +503,7 @@ Image<float> condition_noise_map(Image<float> &in,
                                                                                default_type(-pad_lo[2])};
   }
   Image<float> out = Image<float>::scratch(H, "Conditioned version of \"" + std::string(in.name()) + "\"");
-  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, impute, pad, pad_lo), out);
-  // The rank-per-mm density is not a noise level: zero is a legitimate value for it, and the log
-  //   domain is meaningless. Padding and the NaN-to-zero conversion are all it wants from here.
-  if (impute == noise_impute_type::NAN_TO_ZERO)
-    return out;
+  ThreadedLoop(out).run(ConditionNoiseMapFunctor(in, pad, pad_lo), out);
 
   // Report the number of voxels the map itself holds no estimate at, before padding replicates any
   //   of them outward. The threshold escalating INFO to WARN is a property of the map's own grid.
@@ -571,7 +527,7 @@ Image<float> condition_noise_map(Image<float> &in,
   while (remaining > 0) {
     if (!previous.valid())
       previous = Image<float>::scratch(H, "Previous pass of noise level map imputation");
-    ThreadedLoop(previous).run(CopyFloatFunctor(), previous, out);
+    threaded_copy(out, previous);
     std::atomic<size_t> filled{0};
     ThreadedLoop(out).run(ImputeNoiseFunctor(previous, spacing, filled), out);
     const size_t filled_count = filled.load(std::memory_order_acquire);
@@ -588,19 +544,6 @@ Image<float> condition_noise_map(Image<float> &in,
   if (passes > 0) {
     INFO(context + ": conditioning completed in " + str(passes) + " pass(es), " + str(imputed) +
          " voxel(s) filled by imputation");
-  }
-
-  if (remaining > 0 && bound != nullptr && bound->valid()) {
-    std::atomic<size_t> filled{0};
-    ThreadedLoop(out).run(BoundFillFunctor(*bound, pad, pad_lo, filled), out);
-    const size_t filled_count = filled.load(std::memory_order_acquire);
-    assert(filled_count <= remaining);
-    remaining -= filled_count;
-    if (filled_count > 0) {
-      INFO(context + ": " + str(filled_count) +
-           " voxel(s) beyond the reach of any valid estimate were filled from the patch-derived"
-           " upper bound on the noise level");
-    }
   }
 
   if (remaining > 0) {
@@ -621,6 +564,19 @@ Image<float> condition_noise_map(Image<float> &in,
   }
 #endif
   return out;
+}
+
+void report_imputed_noise_levels(const size_t imputed_count, const Header &H, const std::string &context) {
+  if (imputed_count == 0)
+    return;
+  const std::string message = "A total of " + str(imputed_count) +                     //
+                              " voxels of " + context +                                //
+                              " held no valid noise level estimate;"                   //
+                              " these were filled during conditioning";                //
+  if (imputed_count > invalid_data_warning_threshold(H))
+    WARN(message);
+  else
+    INFO(message);
 }
 
 std::optional<default_type> imposed_scalar_value(const App::ParsedArgument &arg) {
@@ -673,11 +629,9 @@ Image<float> import_vst_noise_map(const App::ParsedArgument &arg, const Header &
   //   non-positive and non-finite noise levels most plausibly enter the software, and cubic
   //   interpolation would otherwise spread a single one of them across a 4^3 neighbourhood.
   return condition_noise_map(in,
-                             noise_impute_type::NONE,
                              noise_pad_type::PAD,
                              0.0,
                              &H_spatial,
-                             nullptr,
                              noise_unfilled_type::THROW,
                              "the noise level map supplied via -noise_in");
 }
@@ -713,16 +667,13 @@ Image<float> import_rank_per_mm_map(const App::ParsedArgument &arg, const Header
   }
   // As for the noise level map: cover the DWI field of view so interpolation is well-posed at
   //   every patch position, rather than requiring the supplied map to be grid-conformant.
-  // NAN_TO_ZERO is retained here, and here alone. A rank density is not a noise level: zero is a
-  //   legitimate value for it (a patch with no signal rank), so there is nothing to impute and
-  //   nothing the log domain would mean.
-  return condition_noise_map(in, noise_impute_type::NAN_TO_ZERO, noise_pad_type::PAD, 0.0, &H_spatial);
+  return condition_noise_map(in, noise_pad_type::PAD, 0.0, &H_spatial);
 }
 
 Image<float> log_noise_map(Image<float> &sigma_map) {
   Image<float> out =
       Image<float>::scratch(Header(sigma_map), "Log-domain twin of \"" + std::string(sigma_map.name()) + "\"");
-  ThreadedLoop(out).run(CopyFloatFunctor(), out, sigma_map);
+  threaded_copy(sigma_map, out);
   ThreadedLoop(out).run(ToLogNoiseFunctor(), out);
   return out;
 }
@@ -731,7 +682,7 @@ void NoiseMapVSTRescaleFunctor::operator()(Image<float> &map) {
   vst_interp.scanner(transform.voxel2scanner *
                      Eigen::Vector3d({double(map.index(0)), double(map.index(1)), double(map.index(2))}));
   const default_type sigma = vst_interp.value();
-  map.value() *= float((power == 2) ? (sigma * sigma) : sigma);
+  map.value() *= float((power == 2) ? Math::pow2(sigma) : sigma);
 }
 
 } // namespace MR::Denoise

@@ -60,11 +60,6 @@ Result MRM2023::operator()(const Spectrum &spectrum, const Eigen::Vector3d & /*u
   result.cutoff_p = 0;
   result.sigma2 = 0.0;
   result.set_boundaries(spectrum.edge(), 0.0);
-  // The peel-off scan ran to completion without any candidate falling below the running noise
-  //   level, ie. it classified every component as signal. That claim bounds the noise level from
-  //   above; record the bound (see Result::sigma2_bound). sigma2 remains zero, so the patch is
-  //   still copied through unchanged.
-  result.sigma2_bound = all_signal_sigma2_bound(spectrum);
   return result;
 }
 
@@ -114,7 +109,6 @@ Result MRM2023::operator()(const std::vector<Spectrum> &spectra, //
     result.set_boundaries(mean_edge(spectra), 0.0);
     result.cutoff_p_partition.assign(spectra.size(), 0);
     result.lamplus_partition.assign(spectra.size(), 0.0);
-    result.sigma2_bound = all_signal_sigma2_bound(spectra);
     return result;
   }
   const NoiseStats stats = apply_threshold_standardized(spectra, zstar, result);

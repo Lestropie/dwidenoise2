@@ -257,8 +257,7 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
     //   MRM2023's peel-off classifying every component as signal, a degenerate spectrum whose
     //   noise components are identically zero, and an imposed estimator handed a level it could
     //   not use. None of them yields a noise level at this voxel, and the map says so with the one
-    //   sentinel. Their provenance remains separable in the reporting (the two counters of
-    //   Estimate, and Result::sigma2_bound, which only the all-signal classifications populate).
+    //   sentinel.
     assign_pos_of(ss_index).to(exports.noise_out);
     exports.noise_out.value() = bool(threshold)                                //
                                     ? float(std::sqrt(threshold.sigma2))       //
@@ -280,20 +279,6 @@ template <typename F> void Estimate<F>::operator()(Image<F> &dwi) {
   if (exports.noise_valid.valid()) {
     assign_pos_of(ss_index).to(exports.noise_valid);
     exports.noise_valid.value() = bool(threshold);
-  }
-  // The patch-derived upper bound on the noise level, where the estimator's classification was
-  //   "every component is signal" and hence left no estimate (Result::sigma2_bound). Written as a
-  //   noise level (its square root), on the same scale as noise_out, and NaN wherever noise_out
-  //   holds a valid estimate -- the two never disagree, and conditioning consults this map only
-  //   where imputation from neighbouring voxels had nothing to work from.
-  if (exports.noise_bound.valid()) {
-    assign_pos_of(ss_index).to(exports.noise_bound);
-    const bool usable = !bool(threshold)                        //
-                        && std::isfinite(threshold.sigma2_bound) //
-                        && threshold.sigma2_bound > 0.0;         //
-    exports.noise_bound.value() = usable                                       //
-                                      ? float(std::sqrt(threshold.sigma2_bound)) //
-                                      : std::numeric_limits<float>::quiet_NaN(); //
   }
   if (exports.lamplus.valid()) {
     assign_pos_of(ss_index).to(exports.lamplus);

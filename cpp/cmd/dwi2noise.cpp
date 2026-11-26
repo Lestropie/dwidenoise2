@@ -208,12 +208,7 @@ void usage() {
 
   ARGUMENTS
   + Argument("dwi", "the input diffusion-weighted image").type_image_in()
-  + Argument("noise",
-             "the output estimated noise level map. "
-             "Voxels at which no valid noise level could be estimated are filled from their"
-             " neighbours rather than left empty; use -noise_valid to export a mask of those"
-             " voxels at which the level was estimated.")
-      .type_image_out();
+  + Argument("noise", "the output estimated & conditioned noise level map").type_image_out();
 
   OPTIONS
   + OptionGroup("Options for modifying PCA computations")
@@ -332,10 +327,6 @@ void run(Header &dwi,
     // For internal iterations, we only save the output noise level estimate
     Exports iteration_exports(dwi, subsample->header());
     iteration_exports.set_noise_out();
-    // Patch-derived upper bounds on the noise level, for those voxels at which the estimator
-    //   declared every component to be signal and so left no estimate. Conditioning falls back to
-    //   these only where imputation from neighbouring voxels has nothing to work from.
-    iteration_exports.set_noise_bound();
     iteration_exports.set_rank_input();
     iteration_exports.set_max_dist();
     Iterative::estimate(input,
@@ -359,11 +350,9 @@ void run(Header &dwi,
     //   transform and to be cubic-interpolated at every patch centre, so every voxel of it must
     //   hold a usable noise level, and only conditioning guarantees that.
     vst_image = Denoise::condition_noise_map(iteration_exports.noise_out,
-                                             noise_impute_type::NONE,
                                              noise_pad_type::PAD,
                                              iterations[iteration].condition_noiseout_fwhm,
                                              nullptr,
-                                             &iteration_exports.noise_bound,
                                              noise_unfilled_type::THROW,
                                              "the noise level map of iteration " + str(iteration + 1));
 
@@ -432,11 +421,9 @@ void run(Header &dwi,
   //   than a broken run.
   {
     Image<float> conditioned = Denoise::condition_noise_map(final_exports.noise_out,
-                                                            noise_impute_type::NONE,
                                                             noise_pad_type::NONE,
                                                             iterations.back().condition_noiseout_fwhm,
                                                             nullptr,
-                                                            &final_exports.noise_bound,
                                                             noise_unfilled_type::RETAIN,
                                                             "the exported noise level map");
     ThreadedLoop(final_exports.noise_out).run(CopyValueFunctor(), final_exports.noise_out, conditioned);
@@ -579,7 +566,6 @@ void run() {
 
   Exports final_exports(dwi, final_subsample->header());
   final_exports.set_noise_out(argument[1].as_text());
-  final_exports.set_noise_bound();
   opt = get_options("noise_valid");
   if (!opt.empty())
     final_exports.set_noise_valid(opt[0][0].as_text());

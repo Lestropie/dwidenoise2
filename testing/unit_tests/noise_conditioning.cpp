@@ -56,12 +56,7 @@
 //      smoother's radius or weights.
 //  10. The warning threshold, with and without SliceEncodingDirection, and at its escalation
 //      boundary.
-//  11. Copy-through is preserved for a Result carrying only a bound. The failure this guards
-//      against is silent: it would show up only as slightly over-denoised patches.
-//  12. The bound is consistent with the classification that produced it, and the half-the-smallest-
-//      eigenvalue alternative is not.
-//  13. Bound-sourced fill, in all three of its outcomes.
-//  14. The imposed-estimator guard: an unusable interpolated level is counted and the patch
+//  11. The imposed-estimator guard: an unusable interpolated level is counted and the patch
 //      abandoned, rather than tripping an assertion.
 
 #include <algorithm>
@@ -99,7 +94,6 @@ using MR::Denoise::invalid_data_warning_threshold;
 using MR::Denoise::log_noise_map;
 using MR::Denoise::LogNoiseInterp;
 using MR::Denoise::Moments;
-using MR::Denoise::noise_impute_type;
 using MR::Denoise::noise_level_is_valid;
 using MR::Denoise::noise_pad_type;
 using MR::Denoise::noise_unfilled_type;
@@ -263,8 +257,8 @@ void test_power_invariance() {
     sigma_sq.value() = hole ? NaN : float(value * value);
   }
 
-  MR::Image<float> from_sigma = condition_noise_map(sigma, noise_impute_type::NONE, noise_pad_type::NONE, 4.0);
-  MR::Image<float> from_sigma_sq = condition_noise_map(sigma_sq, noise_impute_type::NONE, noise_pad_type::NONE, 4.0);
+  MR::Image<float> from_sigma = condition_noise_map(sigma, noise_pad_type::NONE, 4.0);
+  MR::Image<float> from_sigma_sq = condition_noise_map(sigma_sq, noise_pad_type::NONE, 4.0);
   double worst = 0.0;
   for (auto l = MR::Loop(from_sigma)(from_sigma, from_sigma_sq); l; ++l) {
     const double direct = double(from_sigma.value());
@@ -291,7 +285,7 @@ void test_imputation_only() {
   //   identified by the same predicate the conditioning itself uses rather than by index.
   const std::vector<float> before = flatten(map);
 
-  MR::Image<float> out = condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 0.0);
+  MR::Image<float> out = condition_noise_map(map, noise_pad_type::NONE, 0.0);
   check(all_valid(out), "every voxel is valid after imputation alone");
 
   // The valid voxels are not touched by the imputation, but they do make the round trip through
@@ -338,7 +332,7 @@ void test_wide_hole() {
       for (ssize_t i = 4; i != 11; ++i)
         set(map, i, j, k, NaN);
 
-  MR::Image<float> out = condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 0.0);
+  MR::Image<float> out = condition_noise_map(map, noise_pad_type::NONE, 0.0);
   check(all_valid(out), "a hole three voxels deep is closed by iterated imputation");
   bool within = true;
   for (ssize_t k = 4; k != 11; ++k)
@@ -361,7 +355,7 @@ void test_all_invalid() {
 
   bool threw = false;
   try {
-    MR::Image<float> out = condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 0.0);
+    MR::Image<float> out = condition_noise_map(map, noise_pad_type::NONE, 0.0);
   } catch (MR::Exception &) {
     threw = true;
   }
@@ -371,7 +365,7 @@ void test_all_invalid() {
   MR::Image<float> exported;
   try {
     exported = condition_noise_map(
-        map, noise_impute_type::NONE, noise_pad_type::NONE, 0.0, nullptr, nullptr, noise_unfilled_type::RETAIN);
+        map, noise_pad_type::NONE, 0.0, nullptr, nullptr, noise_unfilled_type::RETAIN);
   } catch (MR::Exception &) {
     threw_retain = true;
   }
@@ -393,7 +387,7 @@ void test_all_invalid() {
   for (ssize_t j = 0; j != H.size(1); ++j)
     for (ssize_t i = 0; i != H.size(0); ++i)
       set(partial, i, j, 0, 5.0F);
-  MR::Image<float> filled = condition_noise_map(partial, noise_impute_type::NONE, noise_pad_type::NONE, 0.0);
+  MR::Image<float> filled = condition_noise_map(partial, noise_pad_type::NONE, 0.0);
   check(all_valid(filled), "a map whose only valid data is one plane is filled from that plane");
 }
 
@@ -478,7 +472,7 @@ void test_two_image_exactness() {
     }
   }
 
-  MR::Image<float> out = condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, fwhm);
+  MR::Image<float> out = condition_noise_map(map, noise_pad_type::NONE, fwhm);
   const std::vector<double> reference = reference_normalised_convolution(x, valid, N, N, N, spacing, stdev);
 
   double worst = 0.0;
@@ -529,8 +523,8 @@ void test_axis_order_independence() {
     }
   }
 
-  MR::Image<float> a = condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 2.5);
-  MR::Image<float> b = condition_noise_map(permuted, noise_impute_type::NONE, noise_pad_type::NONE, 2.5);
+  MR::Image<float> a = condition_noise_map(map, noise_pad_type::NONE, 2.5);
+  MR::Image<float> b = condition_noise_map(permuted, noise_pad_type::NONE, 2.5);
   double worst = 0.0;
   for (ssize_t k = 0; k != N; ++k)
     for (ssize_t j = 0; j != N; ++j)
@@ -609,7 +603,7 @@ void test_log_linear_ramp() {
       for (ssize_t i = 0; i != N; ++i)
         set(map, i, j, k, float(analytic(i, j, k)));
 
-  MR::Image<float> out = condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 3.0);
+  MR::Image<float> out = condition_noise_map(map, noise_pad_type::NONE, 3.0);
   double worst = 0.0;
   // The interior only: at the boundary the kernel is truncated asymmetrically, so the geometric
   //   mean of a ramp is no longer its central value, and there is nothing analytic left to compare
@@ -656,136 +650,7 @@ void test_warning_threshold() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 11. Copy-through is preserved for a Result carrying only a bound.
-
-Spectrum make_spectrum(eigenvalues_type &storage, const ssize_t m, const ssize_t n, const ssize_t rp) {
-  return Spectrum(storage, m, n, rp);
-}
-
-void test_bound_preserves_copy_through() {
-  std::fprintf(stderr, "\n-- a Result carrying only a bound still copies the patch through --\n");
-  const ssize_t m = 20;
-  const ssize_t n = 40;
-  eigenvalues_type s(std::min(m, n));
-  for (ssize_t i = 0; i != s.size(); ++i)
-    s[i] = 4.0 + 0.8 * double(i); // ascending, every component well above any plausible bulk
-  Spectrum spectrum = make_spectrum(s, m, n, 0);
-
-  // Exactly what Rank and MRM2023 leave behind when they classify every component as signal.
-  Result result;
-  result.cutoff_p = 0;
-  result.sigma2 = 0.0;
-  result.set_boundaries(spectrum.edge(), 0.0);
-  result.sigma2_bound = all_signal_sigma2_bound(spectrum);
-  check(std::isfinite(result.sigma2_bound) && result.sigma2_bound > 0.0, "the fall-through does carry a finite bound");
-  check(!bool(result), "a Result carrying only a bound remains unusable");
-
-  for (const filter_type type : {filter_type::OPTSHRINK, filter_type::OPTTHRESH, filter_type::TRUNCATE}) {
-    const SpectrumFilter filter(type);
-    vector_type w;
-    Moments moments;
-    const bool usable = filter.weights(spectrum, result, -1, w, moments);
-    check(!usable, "the filter reports the threshold unusable");
-    bool all_unity = true;
-    for (ssize_t i = 0; i != spectrum.r(); ++i)
-      if (w[i] != 1.0)
-        all_unity = false;
-    check(all_unity, "every weight is unity, so the patch is passed through unchanged");
-    check(moments.rank == spectrum.r(), "the reported rank is the full cardinality of the decomposition");
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-// 12. The bound is consistent with the classification that produced it.
-
-void test_bound_consistency() {
-  std::fprintf(stderr, "\n-- the bound is consistent with an all-signal classification --\n");
-  const ssize_t n = 40;
-  for (const ssize_t m : {8, 20, 40}) {
-    eigenvalues_type s(std::min(m, n));
-    for (ssize_t i = 0; i != s.size(); ++i)
-      s[i] = 6.0 + 1.3 * double(i);
-    Spectrum spectrum = make_spectrum(s, m, n, 0);
-    const double bound = all_signal_sigma2_bound(spectrum);
-    const double lambda_min = spectrum.normalized(spectrum.rz());
-    // The classification asserts every component lies above lambda+ = sigma^2 edge; the largest
-    //   noise level consistent with that is exactly lambda_min / edge, so the implied lambda+ must
-    //   not exceed the smallest retained eigenvalue.
-    check_relative(bound * spectrum.edge(), lambda_min, 1e-12, "the implied lambda+ is the smallest retained eigenvalue");
-    check(bound * spectrum.edge() <= lambda_min * (1.0 + 1e-12), "the implied lambda+ does not exceed it");
-
-    // The alternative that was proposed -- half the smallest eigenvalue -- is not a bound: for any
-    //   beta above 0.17 it asserts a noise level under which that same smallest component should
-    //   have been classified as NOISE, contradicting the classification it came from.
-    const double half_lambda_min = 0.5 * lambda_min;
-    const bool violates = half_lambda_min * spectrum.edge() > lambda_min;
-    std::fprintf(stderr,
-                 "   beta = %.3f: bound %.5g, lambda_min/2 %.5g, implied lambda+ %.5g vs lambda_min %.5g%s\n",
-                 spectrum.beta(),
-                 bound,
-                 half_lambda_min,
-                 half_lambda_min * spectrum.edge(),
-                 lambda_min,
-                 violates ? "  (violates)" : "");
-    if (spectrum.beta() > 0.17)
-      check(violates, "lambda_min / 2 contradicts the classification for beta > 0.17");
-  }
-
-  // No non-bypassed component to bound with, and a spectrum whose components are identically zero:
-  //   both are cases in which no bound exists, and NaN is what says so.
-  {
-    eigenvalues_type s(4);
-    s.setZero();
-    Spectrum spectrum = make_spectrum(s, 4, 40, 0);
-    check(!std::isfinite(all_signal_sigma2_bound(spectrum)), "a degenerate spectrum yields no bound");
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-// 13. Bound-sourced fill.
-
-void test_bound_sourced_fill() {
-  std::fprintf(stderr, "\n-- filling from the patch-derived bound --\n");
-  const MR::Header H = make_header(6, 6, 6);
-  MR::Image<float> map = constant_map(H, NaN);
-  MR::Image<float> bound = constant_map(H, 2.5F);
-
-  MR::Image<float> filled =
-      condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 0.0, nullptr, &bound);
-  check(all_valid(filled), "a map no imputation could reach is filled from the bound");
-  double worst = 0.0;
-  for (auto l = MR::Loop(filled)(filled); l; ++l)
-    worst = std::max(worst, std::fabs(double(filled.value()) - 2.5) / 2.5);
-  check(worst < 1e-6, "the filled values are the bound itself");
-
-  // The same map with a bound that is itself unusable: there is then nothing left, and the two
-  //   policies part company.
-  MR::Image<float> empty_bound = constant_map(H, NaN);
-  bool threw = false;
-  try {
-    MR::Image<float> out =
-        condition_noise_map(map, noise_impute_type::NONE, noise_pad_type::NONE, 0.0, nullptr, &empty_bound);
-  } catch (MR::Exception &) {
-    threw = true;
-  }
-  check(threw, "with no bound available, a map that would seed a further iteration throws");
-
-  MR::Image<float> exported = condition_noise_map(map,
-                                                  noise_impute_type::NONE,
-                                                  noise_pad_type::NONE,
-                                                  0.0,
-                                                  nullptr,
-                                                  &empty_bound,
-                                                  noise_unfilled_type::RETAIN);
-  bool all_nan = true;
-  for (auto l = MR::Loop(exported)(exported); l; ++l)
-    if (std::isfinite(exported.value()))
-      all_nan = false;
-  check(all_nan, "with no bound available, an exported map warns and retains its NaNs");
-}
-
-// ---------------------------------------------------------------------------------------------
-// 14. The imposed-estimator guard.
+// 11. The imposed-estimator guard.
 
 void test_imposed_guard() {
   std::fprintf(stderr, "\n-- an unusable imposed noise level is counted, not asserted --\n");
@@ -839,9 +704,6 @@ int main() {
   test_log_domain_interpolation();
   test_log_linear_ramp();
   test_warning_threshold();
-  test_bound_preserves_copy_through();
-  test_bound_consistency();
-  test_bound_sourced_fill();
   test_imposed_guard();
 
   if (failures == 0)

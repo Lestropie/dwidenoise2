@@ -398,11 +398,11 @@ template <typename T> std::vector<ssize_t> Preconditioner<T>::output_volume_to_g
 //   where a noise level map is available, the forward variance-stabilising transform.
 template <typename T>
 void Preconditioner<T>::serialise_and_stabilise(Image<T> &input,
-                                              Image<cfloat> &phase,
-                                              Image<uint32_t> &serialise,
-                                              const Transform &transform,
-                                              LogNoiseInterp *vst,
-                                              Eigen::Array<T, Eigen::Dynamic, 1> &data) const {
+                                                Image<cfloat> &phase,
+                                                Image<uint32_t> &serialise,
+                                                const Transform &transform,
+                                                std::optional<LogNoiseInterp> &vst,
+                                                Eigen::Array<T, Eigen::Dynamic, 1> &data) const {
   // Load all volumes within this voxel into "data"
   if (H_in.ndim() == 4) {
     for (ssize_t v = 0; v != H_out.size(3); ++v) {
@@ -435,12 +435,12 @@ void Preconditioner<T>::serialise_and_stabilise(Image<T> &input,
   }
 
   // Forward variance-stabilising transform
-  if (vst != nullptr) {
-    vst->scanner(transform.voxel2scanner *                         //
+  if (vst.has_value()) {
+    vst.value().scanner(transform.voxel2scanner *                  //
                  Eigen::Vector3d({default_type(input.index(0)),    //
                                   default_type(input.index(1)),    //
                                   default_type(input.index(2))})); //
-    const default_type sigma = vst->value();
+    const default_type sigma = vst.value().value();
     for (ssize_t v = 0; v != H_out.size(3); ++v)
       data[v] = vst_forward<T>(*noise_model, data[v], sigma);
   }
@@ -477,7 +477,7 @@ public:
   }
 
   void operator()(Image<T> &input) {
-    pre.serialise_and_stabilise(input, phase, serialise, transform, vst ? &vst.value() : nullptr, data);
+    pre.serialise_and_stabilise(input, phase, serialise, transform, vst, data);
     assign_pos_of(input, 0, 3).to(mean);
     if (mean.ndim() == 3) {
       T sum(T(0));
@@ -531,7 +531,7 @@ public:
 
   void operator()(Image<T> &input, Image<T> &output) {
     // Steps 1 & 2: serialise, phase demodulation, variance-stabilising transform
-    pre.serialise_and_stabilise(input, phase, serialise, transform, vst ? &vst.value() : nullptr, data);
+    pre.serialise_and_stabilise(input, phase, serialise, transform, vst, data);
 
     // Step 3: demeaning (in the stabilised domain). Performed only if this component is the one
     //   responsible for it; under the ESTIMATOR site the per-partition per-group demeaning is

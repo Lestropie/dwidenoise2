@@ -124,12 +124,6 @@ void estimate(Image<T> &input,
   if (vst_image.valid()) {
     ThreadedLoop(exports.noise_out)
         .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), exports.noise_out);
-    // The patch-derived bound is a noise level like noise_out, and is consumed against it during
-    //   conditioning, so it must be brought onto the same (native) scale by the same factor.
-    if (exports.noise_bound.valid()) {
-      ThreadedLoop(exports.noise_bound)
-          .run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 1), exports.noise_bound);
-    }
     if (exports.lamplus.valid()) {
       ThreadedLoop(exports.lamplus).run(NoiseMapVSTRescaleFunctor(vst_image, subsample->header(), 2), exports.lamplus);
     }

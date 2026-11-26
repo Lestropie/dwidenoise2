@@ -119,27 +119,6 @@ ssize_t rank_zero(const ssize_t m, const ssize_t n, const ssize_t rp);
 //   whether the input is 4D or higher
 size_t num_volumes(const Header&);
 
-// Interrogate the input image header key-values for evidence that upstream image processing has
-//   already invalidated the assumptions on which Marchenko-Pastur-based noise level estimation
-//   rests, issuing a WARN() for each class of violation for which evidence is found.
-// Two such classes are discoverable from image metadata of DICOM provenance:
-// - Resampling of the image data by interpolation, of which vendor gradient non-linearity
-//   distortion correction is the most prevalent instance. Interpolation correlates the noise
-//   between neighbouring voxels, breaking the independence on which the Marchenko-Pastur
-//   distribution of the noise eigenvalues depends.
-// - Reconstruction of a finer image matrix than the acquired k-space supports, ie. zero-filling of
-//   unacquired k-space. The unmeasured outer k-space contributes signal but no noise, which
-//   likewise correlates the noise between neighbouring voxels.
-// In both cases the consequence for this command is the same: the noise portion of each patch's
-//   eigenspectrum is compressed relative to the Marchenko-Pastur prediction, and the noise level
-//   is consequently underestimated.
-// The absence of any warning is *not* evidence that the input data are suitable. Most of the
-//   relevant fields do not survive conversion from DICOM (that for the acquisition matrix
-//   especially rarely does), the vendor conventions interrogated here are not exhaustive, and
-//   resampling performed after conversion (eg. gradient unwarping or upsampling by a third-party
-//   tool) leaves no trace in the image header at all.
-void warn_if_metadata_precludes_mp(const Header &H);
-
 // Whether a value stored in a noise level map is a usable noise level.
 //
 // A single sentinel governs every noise level map in this software: NaN means "no valid noise
@@ -154,16 +133,6 @@ void warn_if_metadata_precludes_mp(const Header &H);
 //   conventions happens at exactly one place, where Estimate writes the estimated level into
 //   exports.noise_out.
 inline bool noise_level_is_valid(const float value) { return std::isfinite(value) && value > 0.0F; }
-
-// Report the number of voxels of a noise level map at which no valid noise level was estimated and
-//   which conditioning consequently had to fill. It does not name the mechanism, because it is
-//   emitted before any of them has run and more than one may be involved; the INFO messages that
-//   follow report how many voxels each of them accounted for. Escalates from INFO to WARN by the same
-//   rule as Denoise::report_invalid_data(): the threshold is the largest number of voxels within a
-//   single slice orthogonal to any axis, excluding the slice-encoding axis where the metadata name
-//   it. "H" must be the header of the map being conditioned (the sub-sampled grid), so that "one
-//   slice" is one slice of that map. "context" names the map in the message.
-void report_imputed_noise_levels(const size_t imputed_count, const Header &H, const std::string &context);
 
 // Make a noise level map fit to be used: pad it for interpolation, and guarantee that every voxel
 //   of it holds a usable noise level.
@@ -208,15 +177,7 @@ void report_imputed_noise_levels(const size_t imputed_count, const Header &H, co
 //   within-kernel spread s: below 0.1% from estimator noise alone, a few percent where the true
 //   field varies steeply within the kernel. Small, systematic, and always downward.
 //
-// "impute" selects what becomes of a voxel holding no valid value:
-// - NONE imputes it, which is the behaviour every noise level map takes. Voxels failing
-//   noise_level_is_valid() are converted to NaN first, so that a single sentinel governs the whole
-//   operation whatever the map's provenance.
-// - NAN_TO_ZERO replaces it with zero, and bypasses everything else here: no log domain, no
-//   imputation, only the padding. This exists for the ONE map passing through this function that is
-//   not a noise level -- the rank-per-mm density of import_rank_per_mm_map(), for which zero is a
-//   legitimate value and the log domain is meaningless.
-enum class noise_impute_type{ NAN_TO_ZERO, NONE };
+
 enum class noise_pad_type{ PAD, NONE };
 // What to do with a voxel that no mechanism could fill: one with no valid voxel anywhere in the map
 //   to reach it, and no patch-derived bound of its own.
@@ -238,21 +199,25 @@ enum class noise_unfilled_type { THROW, RETAIN };
 //   an iterative schedule differs from one iteration to the next. Note that smoothing is no longer
 //   the only thing this function does, nor a precondition for it doing anything: the imputation
 //   below runs whether or not a width was requested.
-// "bound" is the optional map of patch-derived upper bounds (Exports::noise_bound), consulted only
-//   for voxels that no number of imputation passes could reach.
 // "context" names the map in any message this function emits.
 //
 // POSTCONDITION, asserted: for impute == NONE with unfilled == THROW, the returned map is finite
 //   and strictly positive at every voxel, padding included. That is what Interp::Cubic and
 //   NoiseModel::stabilise have always assumed of it and never been given.
 Image<float> condition_noise_map(Image<float> &in,
-                                 const noise_impute_type impute = noise_impute_type::NONE,
                                  const noise_pad_type pad = noise_pad_type::PAD,
                                  const default_type fwhm = 0.0,
                                  const Header *coverage = nullptr,
-                                 Image<float> *bound = nullptr,
                                  const noise_unfilled_type unfilled = noise_unfilled_type::THROW,
                                  const std::string &context = "the estimated noise level map");
+
+// Report the number of voxels of a noise level map at which no valid noise level was estimated and
+//   which were consequently filled from their neighbours, escalating from INFO to WARN by the same
+//   rule as Denoise::report_invalid_data(): the threshold is the largest number of voxels within a
+//   single slice orthogonal to any axis, excluding the slice-encoding axis where the metadata name
+//   it. "H" must be the header of the map being conditioned (the sub-sampled grid), so that "one
+//   slice" is one slice of that map. "context" names the map in the message.
+void report_imputed_noise_levels(const size_t imputed_count, const Header &H, const std::string &context);
 
 // Construct the externally-provided noise level map (the variance-stabilising-transform scale)
 //   from a -noise_in command-line argument, which may be either:

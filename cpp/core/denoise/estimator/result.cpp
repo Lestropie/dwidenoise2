@@ -28,10 +28,7 @@ Result::Result()
       sigma2(std::numeric_limits<double>::signaling_NaN()),
       edge(std::numeric_limits<double>::signaling_NaN()),
       lamplus(std::numeric_limits<double>::signaling_NaN()),
-      lammax_noise(std::numeric_limits<double>::signaling_NaN()),
-      // Quiet, not signalling: unlike the members above this one is legitimately read (and tested
-      //   for finiteness) on a Result that no estimator ever populated.
-      sigma2_bound(std::numeric_limits<double>::quiet_NaN()) {}
+      lammax_noise(std::numeric_limits<double>::signaling_NaN()) {}
 
 ssize_t Result::cutoff(const ssize_t partition) const {
   assert(partition < 0 || partition < ssize_t(cutoff_p_partition.size()));

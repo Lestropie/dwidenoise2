@@ -55,10 +55,10 @@ public:
   ssize_t unusable_sigma_count() const final { return unusable_sigma_counter.load(std::memory_order_acquire); }
 
 protected:
-  // Provide sigma^2 at the patch centre `pos`; return false if it cannot be
+  // Provide sigma^2 at the patch centre `pos`; return NaN if it cannot be
   //   determined there (e.g. cubic interpolation outside the image FoV), in which
   //   case the patch is left unprocessed (an invalid Result is returned).
-  virtual bool get_sigma_sq(const Eigen::Vector3d &pos, double &sigma_sq) const = 0;
+  virtual double get_sigma_sq(const Eigen::Vector3d &pos) const = 0;
 
   // Test a level returned by get_sigma_sq() before it reaches Result::sigma2, counting (but not
   //   reporting) each rejection. Returns false where the caller must abandon the patch.
